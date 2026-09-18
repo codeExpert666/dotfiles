@@ -1,0 +1,173 @@
+# 基于 Starship 的 Tokyo Night 预设修改。
+# 来源：https://starship.rs/presets/tokyo-night
+# 本仓库调整了身份显示、模块组合和提示符行为。
+# 上游版权与 ISC 许可声明如下：
+# ISC License
+#
+# Copyright (c) 2019-2022, Starship Contributors
+#
+# Permission to use, copy, modify, and/or distribute this software for any
+# purpose with or without fee is hereby granted, provided that the above
+# copyright notice and this permission notice appear in all copies.
+# THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+# WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+# MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+# ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+# WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+# ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+# OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+# 唯一的个人提示符配置；Starship 从 ~/.config/starship.toml 自动读取。
+# 为支持 JSON Schema 的编辑器提供补全与类型检查；这行不控制外观。
+"$schema" = "https://starship.rs/config-schema.json"
+
+# 在每次新提示符前插入一个空行；format 末尾的 \n 继续把输入符号放到第二行。
+add_newline = true
+
+# 保留明确的扫描和外部命令超时，便于排查大型仓库中的提示符延迟。
+scan_timeout = 30
+command_timeout = 500
+
+# 顶层 format 同时决定模块顺序和允许出现的模块。
+# 系统图标与按条件显示的 user@host 共用首个浅蓝色块。
+# 目录、Git、语言/容器、耗时/时间分别使用四段 Tokyo Night 色块。
+# 首块右侧的背景色空格统一写在顶层，身份模块隐藏时仍保留完整留白。
+format = """
+[░▒▓](#a3aed2)\
+$os\
+$username\
+$hostname\
+[ ](bg:#a3aed2)\
+[](bg:#769ff0 fg:#a3aed2)\
+$directory\
+[](fg:#769ff0 bg:#394260)\
+$git_branch\
+$git_state\
+$git_status\
+[](fg:#394260 bg:#212736)\
+$java\
+$golang\
+$docker_context\
+$kubernetes\
+[](fg:#212736 bg:#1d2230)\
+$cmd_duration\
+$time\
+[ ](fg:#1d2230)\
+\n$character"""
+
+# username 默认不会在普通本地会话中始终显示；SSH 或 root 等场景由模块规则决定。
+# 普通身份采用深色文字；root 使用同一浅蓝背景上的深红色强调。
+# 用户名前的两个空格拉开与系统图标的距离，并随用户名模块一起显示或隐藏。
+[username]
+show_always = false
+style_user = "bold fg:#090c0c bg:#a3aed2"
+style_root = "bold fg:#8c2432 bg:#a3aed2"
+format = "[  $user]($style)"
+
+# 主机名只在 SSH 会话中显示；@ 随本模块一起隐藏，与用户名共用背景色。
+[hostname]
+ssh_only = true
+ssh_symbol = ""
+style = "bold fg:#090c0c bg:#a3aed2"
+format = "[@$hostname]($style)"
+
+# 操作系统图标与身份信息共用第一段；图标依赖 Nerd Font，右侧留白由顶层统一补齐。
+[os]
+disabled = false
+style = "bg:#a3aed2 fg:#090c0c"
+format = "[ $symbol]($style)"
+
+[os.symbols]
+Windows = "󰍲"
+Ubuntu = "󰕈"
+SUSE = ""
+Raspbian = "󰐿"
+Mint = "󰣭"
+Macos = "󰀵"
+Manjaro = ""
+Linux = "󰌽"
+Gentoo = "󰣨"
+Fedora = "󰣛"
+Alpine = ""
+Amazon = ""
+Android = ""
+AOSC = ""
+Arch = "󰣇"
+Artix = "󰣇"
+EndeavourOS = ""
+CentOS = ""
+Debian = "󰣚"
+Redhat = "󱄛"
+RedHatEnterprise = "󱄛"
+Pop = ""
+
+# 目录段最多保留三层，并优先截断到 Git 仓库根目录。
+[directory]
+style = "fg:#e3e5e5 bg:#769ff0"
+format = "[ $path ]($style)"
+truncation_length = 3
+truncation_symbol = "…/"
+truncate_to_repo = true
+
+# 这些替换只匹配同名路径组件；使用其他语言或目录名时保持原名。
+[directory.substitutions]
+"Documents" = "󰈙 "
+"Downloads" = " "
+"Music" = " "
+"Pictures" = " "
+
+# Git 分支、rebase/merge 等操作状态和工作区状态共用第三段背景色。
+[git_branch]
+symbol = ""
+style = "bg:#394260"
+format = '[[ $symbol $branch ](fg:#769ff0 bg:#394260)]($style)'
+
+[git_state]
+style = "bg:#394260"
+format = '[[ $state( $progress_current/$progress_total) ](fg:#769ff0 bg:#394260)]($style)'
+
+[git_status]
+style = "bg:#394260"
+format = '[[($all_status$ahead_behind )](fg:#769ff0 bg:#394260)]($style)'
+
+# Java、Go 与容器上下文只在各自检测条件满足时进入第四段。
+[java]
+symbol = ""
+style = "bg:#212736"
+format = '[[ $symbol ($version) ](fg:#769ff0 bg:#212736)]($style)'
+
+[golang]
+symbol = ""
+style = "bg:#212736"
+format = '[[ $symbol ($version) ](fg:#769ff0 bg:#212736)]($style)'
+
+[docker_context]
+symbol = ""
+style = "bg:#212736"
+format = '[[ $symbol $context ](fg:#769ff0 bg:#212736)]($style)'
+only_with_files = true
+
+# Kubernetes 先保留样式但默认禁用；确认 kubeconfig 与上下文切换习惯后再改为 false。
+[kubernetes]
+symbol = "󱃾"
+style = "bg:#212736"
+format = '[[ $symbol $context ](fg:#769ff0 bg:#212736)]($style)'
+disabled = true
+
+# 超过两秒的命令显示耗时；24 小时时钟沿用上游 Tokyo Night 的最后一段。
+[cmd_duration]
+min_time = 2000
+style = "bg:#1d2230"
+format = '[[ 󱎫 $duration ](fg:#a0a9cb bg:#1d2230)]($style)'
+
+[time]
+disabled = false
+time_format = "%R"
+style = "bg:#1d2230"
+format = '[[  $time ](fg:#a0a9cb bg:#1d2230)]($style)'
+
+# 输入符号单独位于第二行；成功、失败与 Vim normal mode 使用不同颜色或方向。
+[character]
+success_symbol = "[❯](bold #9ece6a)"
+error_symbol = "[❯](bold #f7768e)"
+vimcmd_symbol = "[❮](bold #9ece6a)"

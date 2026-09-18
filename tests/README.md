@@ -1,0 +1,94 @@
+# 测试
+
+本目录验证脚本行为和应用配置，运行时使用临时 HOME 与仓库副本。根目录的 `.sh` 是公开
+入口；Python、Lua 和 Bash 辅助程序放在对应套件目录中，不作为日常运行入口。
+
+| 入口                                   | 验证范围                                               | 运行时机             |
+| -------------------------------------- | ------------------------------------------------------ | -------------------- |
+| [all.sh](all.sh)                       | 按顺序运行下列四套，任一失败立即停止                   | 完整回归、跨套件调整 |
+| [deploy.sh](deploy.sh)                 | 链接布局、平台包选择、冲突、幂等性、错误报告和清理     | 调整部署行为         |
+| [doctor.sh](doctor.sh)                 | 诊断的状态和输出、独立故障、只读保证、受控运行及清理   | 调整诊断行为         |
+| [bootstrap.sh](bootstrap.sh)           | 安装来源和清单、阶段顺序、失败重试、资源发布、插件准备 | 调整环境准备行为     |
+| [config-loading.sh](config-loading.sh) | 应用实际发现配置，并加载出预期选项或行为               | 调整应用配置         |
+
+`all.sh` 是全量运行的便利命令，不持有夹具或断言；中断时把信号转交当前套件并等待清理。
+四套测试可以独立运行。
+共享 Skill 在 deploy 中验证源文件与 Claude 别名的一致性、资源可读性、重复部署及冲突
+保留，以及包内 `src` 和元数据不被部署、已有 `~/src` 在部署和卸载时保持不变。在 doctor
+中验证断链、正文缺失或变成文件链接、包内入口指向错误 Skill，以及源目录或排除规则缺失
+的诊断。测试只需复制完整的 `skills` 包，保留目录软链接和包内 `.agents`；这些检查
+不需要 AI 客户端或 API Key，实际客户端发现仍需本机验收。
+Codex 专用工作流还验证 `astra-sol` 没有 Claude 别名、`sol_worker.toml` 的普通副本部署、
+原文件冲突保留、个人配置和其他代理共存，以及 doctor 对声明的源目录和必需入口缺失、
+代理内容差异及符号链接的诊断，并覆盖复制失败清理和重试。`codex` 源目录须与 `skills`
+一起复制进测试夹具；Stow 卸载技能不会删除独立的角色副本。
+`config-loading` 保留独立的应用断言：例如 Git 的个人覆盖、Zsh 的加载顺序、Shuck 的格式化
+结果、Lazygit 的 delta 渲染结果及编辑器参数。它调用部署脚本来准备输入，不重复验证完整
+链接布局。`doctor` 则检查诊断程序能否正确识别健康或故障状态；诊断通过不代替上述应用断言。
+
+## 运行
+
+在仓库根目录执行：
+
+```sh
+bash tests/all.sh
+bash tests/config-loading.sh
+bash tests/doctor.sh DoctorTests.test_multiple_independent_link_faults
+bash tests/bootstrap.sh Publication.test_requirements_and_platform_manifests_agree
+```
+
+入口也可以从任意工作目录按绝对路径调用。用 `/path/to/bash tests/all.sh` 指定 Bash，
+各套件会把所选解释器传给被测脚本；两个 Python 套件接受标准 `unittest` 用例选择参数。
+Bash 入口和支持文件保持 Bash 3.2 语法，Python 需要 3.9+。
+
+完整回归需要 Git、GNU Stow、Zsh、Vim、Python 3，以及 `ps`、`stat` 等常见 Unix 命令。
+未安装的可选应用（Neovim、Shuck、Lazygit/delta、Starship、Atuin、Ghostty）会明确标为
+`SKIP`。已安装但无法完成验证的应用会报错。Ghostty 检查仅验证配置解析，图形效果仍需
+在对应桌面环境查看。
+
+常规回归不安装系统软件或下载插件，使用包管理器替身和本地归档。macOS 模拟同时替换
+副本中的固定 Homebrew 路径，以免误调用宿主包管理器；模拟分支不代表原生 macOS 验证。
+Neovim 的常规配置检查涵盖配置发现、语法和离线选项，不启动插件安装。
+
+已有完整且匹配当前配置的插件缓存时，可显式启用额外的准备和运行集成：
+
+```sh
+DOTFILES_TEST_PREPARED_HOME=/path/to/prepared-home bash tests/all.sh
+```
+
+这些用例复制缓存并核对来源未变；Neovim 准备用例拒绝 Git/curl/wget 下载。缓存集成
+不能代替首次在线安装验收。
+
+## 内部组织与失败诊断
+
+- `deploy/support.bash` 与 `deploy/mock-command.sh`：部署专用夹具、命令替身和断言。
+- `doctor/cases.py`：诊断用例，以及诊断执行器和共享进程设施的回归。
+- `bootstrap/cases.py` 与 `bootstrap/mock.py`：安装编排、资源和准备用例，以及命令替身。
+- `config-loading/lazygit.py` 与 `config-loading/nvim.lua`：原生应用会话及应用内部断言。
+- `support/harness.bash` 与 `support/harness.py`：跨套件的夹具、快照、进程清理和终端设施。
+
+测试设施不导入生产脚本的运行器来管理自身进程。Bash 入口负责 trap 和夹具清理；Python
+执行器拥有命令会话，等待时记录后代，并在正常结束、超时或可捕获信号后回收它们。
+先停止测试创建的进程，再删除夹具。应用调用有时间上限，交互调用还限制终端输出大小。
+这用于测试创建的进程，不负责追踪任意主动脱离进程树的守护程序。
+
+失败时 Bash 会显示用例、阶段和命令日志；Python 用例缓冲正常输出，在失败时显示相关
+命令输出。终端失败会把经过转义的输出尾部写入诊断，临时目录删除后仍可查看。
+
+## 静态检查
+
+在仓库根目录执行；工具缺失应记录为未验证，不能算通过：
+
+```sh
+files=(tests/*.sh tests/deploy/*.sh tests/deploy/*.bash tests/support/*.bash)
+for file in "${files[@]}"; do bash -n "$file" || exit; done
+shellcheck -x "${files[@]}"
+shfmt -d -ci -sr "${files[@]}"
+python3 -B - <<'PY'
+import ast
+from pathlib import Path
+for path in Path('tests').rglob('*.py'):
+    ast.parse(path.read_text(), filename=str(path))
+PY
+stylua --check --indent-type Spaces --indent-width 2 tests/config-loading/nvim.lua
+```

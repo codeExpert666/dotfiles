@@ -1,0 +1,10 @@
+# CLI 和语言服务器共用的全局默认值；项目中的 Shuck 配置优先。
+[format]
+# 使用真正的 Tab 字符缩进。
+indent-style = "tab"
+
+# 缩进 case 分支。
+switch-case-indent = true
+
+# 重定向符号与目标之间留空格，例如 > output.txt。
+space-redirects = true

@@ -1,0 +1,47 @@
+# 即使已经登录 Atuin 账户，也不自动同步；需要同步时可手动运行 `atuin sync`。
+# 若希望 Atuin 定期自动同步，可改为 true；更新检查由 update_check 单独控制。
+auto_sync = false
+
+# false：选中历史后先回填到 Shell 命令行，便于检查或编辑，再按 Enter 执行。
+# true：在 Atuin 界面中按 Enter 会立即执行选中的命令。
+enter_accept = false
+
+# 使用精简界面；可改为 auto（按终端高度切换）或 full（完整界面）。
+style = "compact"
+
+# 限制界面最多占 20 行；调大可同时显示更多内容，设为 0 则使用全部可用高度。
+inline_height = 20
+
+# 使用模糊匹配搜索命令内容；它决定“怎样匹配”，不决定“搜索哪些历史”。
+# 在搜索界面可按 Ctrl-S 临时循环其他匹配模式。
+search_mode = "fuzzy"
+
+# 打开交互搜索时先检索全部历史；当前还支持 host、session、directory、workspace 和 session-preload。
+# 进入界面后可用 Ctrl-R 循环 search.filters 中启用的过滤范围；本基线不覆盖该列表。
+filter_mode = "global"
+
+# 启用 workspace 过滤能力：在 Git 仓库中可检索整个仓库树，而不只当前目录。
+# 它不会改变上面的默认过滤范围；不在 Git 仓库时 workspace 模式会被跳过。
+workspaces = true
+
+# 启用 Atuin 内置的凭据格式过滤；它只是安全网，不能覆盖所有秘密格式。
+secrets_filter = true
+
+# history_filter 使用正则表达式；^ 和 $ 分别限定命令开头和结尾。
+# 自定义正则只阻止之后匹配的命令入库，不会自动删除既有历史。
+# 调整规则后若要清理旧记录，应先用 `atuin history prune --dry-run` 预览影响。
+history_filter = [
+  # 排除以 export 开头、变量名以 _TOKEN、_PASSWORD 或 _SECRET 结尾的赋值。
+  "^export .*(_TOKEN|_PASSWORD|_SECRET)=",
+  # 排除以 curl 开头且包含 Authorization: 请求头的命令。
+  "^curl .*Authorization:",
+]
+
+[search]
+# 同时检索当前 Zsh、可能导入的旧 Bash，以及旧版 Atuin 没有记录 Shell 的历史。
+# 空字符串表示 Shell 未知；显式列出范围，避免默认 auto 在 Zsh 中隐藏 Bash 导入记录。
+shells = ["", "bash", "zsh"]
+
+[logs]
+# 与 Zsh、Vim 共用默认 XDG state 布局；日志属于不进入 Git 的本机状态。
+dir = "~/.local/state/atuin/logs"

@@ -1,0 +1,237 @@
+{
+  "nvim": {
+    "version": "v0.12.5",
+    "source": "https://github.com/neovim/neovim",
+    "kind": "archive",
+    "assets": {
+      "linux-x86_64": {
+        "url": "https://github.com/neovim/neovim/releases/download/v0.12.5/nvim-linux-x86_64.tar.gz",
+        "sha256": "bce0f56eda1f1b1db6eee8f4133d7a38813ea07933837dd1777411ca384c6875"
+      },
+      "linux-arm64": {
+        "url": "https://github.com/neovim/neovim/releases/download/v0.12.5/nvim-linux-arm64.tar.gz",
+        "sha256": "1aa5ca085249580ae0f91eb14f27ec0919773ff2d99a163d03f3d6c21ac29725"
+      }
+    },
+    "links": {
+      ".local/bin/nvim": "bin/nvim"
+    }
+  },
+  "fzf": {
+    "version": "v0.74.4",
+    "source": "https://github.com/junegunn/fzf",
+    "kind": "archive",
+    "assets": {
+      "linux-x86_64": {
+        "url": "https://github.com/junegunn/fzf/releases/download/v0.74.4/fzf-0.74.4-linux_amd64.tar.gz",
+        "sha256": "05e6813a337cc722c3ed07e54a764b75cc5d671e2e60459db0ba696ee5fa7504"
+      },
+      "linux-arm64": {
+        "url": "https://github.com/junegunn/fzf/releases/download/v0.74.4/fzf-0.74.4-linux_arm64.tar.gz",
+        "sha256": "5d673b849f494f0d64ec471d8640b153ca8849e3846a31da17abdcfce8df6b46"
+      }
+    },
+    "links": {
+      ".local/bin/fzf": "fzf"
+    }
+  },
+  "lazygit": {
+    "version": "v0.65.1",
+    "source": "https://github.com/jesseduffield/lazygit",
+    "kind": "archive",
+    "assets": {
+      "linux-x86_64": {
+        "url": "https://github.com/jesseduffield/lazygit/releases/download/v0.65.1/lazygit_0.65.1_linux_x86_64.tar.gz",
+        "sha256": "02beacbcda0fa342e50ae3480ba8147307353af3fb28e1d5f790e02329c201a6"
+      },
+      "linux-arm64": {
+        "url": "https://github.com/jesseduffield/lazygit/releases/download/v0.65.1/lazygit_0.65.1_linux_arm64.tar.gz",
+        "sha256": "49abecdf6adf4f2dfdb11bf7b9bfada267ea523612ed809d1c6d87f6c04000a7"
+      }
+    },
+    "links": {
+      ".local/bin/lazygit": "lazygit"
+    }
+  },
+  "delta": {
+    "version": "0.19.2",
+    "source": "https://github.com/dandavison/delta",
+    "kind": "archive",
+    "assets": {
+      "linux-x86_64": {
+        "url": "https://github.com/dandavison/delta/releases/download/0.19.2/delta-0.19.2-x86_64-unknown-linux-gnu.tar.gz",
+        "sha256": "8e695c5f586a8c53d6c3b01be0b4a422ed218bfed2a56191caebe373a1c18ab2"
+      },
+      "linux-arm64": {
+        "url": "https://github.com/dandavison/delta/releases/download/0.19.2/delta-0.19.2-aarch64-unknown-linux-gnu.tar.gz",
+        "sha256": "0bfce159a5cddd5feb3d6db4a616d883ff51253ce08ac7ec11cb1d208cfaab9e"
+      }
+    },
+    "links": {
+      ".local/bin/delta": "delta"
+    }
+  },
+  "atuin": {
+    "version": "v18.22.0",
+    "source": "https://github.com/atuinsh/atuin",
+    "kind": "archive",
+    "assets": {
+      "linux-x86_64": {
+        "url": "https://github.com/atuinsh/atuin/releases/download/v18.22.0/atuin-x86_64-unknown-linux-musl.tar.gz",
+        "sha256": "b3c123df1887cf27c6480a87d148c86831cd83da478e0a8ab773ca188f3f3222"
+      },
+      "linux-arm64": {
+        "url": "https://github.com/atuinsh/atuin/releases/download/v18.22.0/atuin-aarch64-unknown-linux-musl.tar.gz",
+        "sha256": "76d12818e3dff64ddac3b9f4ec63b305070ddcf5fc382a2a23dc0826fa9bf5a8"
+      }
+    },
+    "links": {
+      ".local/bin/atuin": "atuin"
+    }
+  },
+  "starship": {
+    "version": "v1.26.0",
+    "source": "https://github.com/starship/starship",
+    "kind": "archive",
+    "assets": {
+      "linux-x86_64": {
+        "url": "https://github.com/starship/starship/releases/download/v1.26.0/starship-x86_64-unknown-linux-musl.tar.gz",
+        "sha256": "b7c232b0e8249d8e55a40beb79c5c43a7d370f3f9408bd215deb0170daeaadf3"
+      },
+      "linux-arm64": {
+        "url": "https://github.com/starship/starship/releases/download/v1.26.0/starship-aarch64-unknown-linux-musl.tar.gz",
+        "sha256": "dc30189378d2f2e287384e8a692d3f95ad1df64cf0e8c36aa9201516028aed6b"
+      }
+    },
+    "links": {
+      ".local/bin/starship": "starship"
+    }
+  },
+  "zoxide": {
+    "version": "v0.10.0",
+    "source": "https://github.com/ajeetdsouza/zoxide",
+    "kind": "archive",
+    "assets": {
+      "linux-x86_64": {
+        "url": "https://github.com/ajeetdsouza/zoxide/releases/download/v0.10.0/zoxide-0.10.0-x86_64-unknown-linux-musl.tar.gz",
+        "sha256": "2d93385b99f3e82cf2701609a1bffcad863fbeb75aa3fe7eb6be4d29be68b1ae"
+      },
+      "linux-arm64": {
+        "url": "https://github.com/ajeetdsouza/zoxide/releases/download/v0.10.0/zoxide-0.10.0-aarch64-unknown-linux-musl.tar.gz",
+        "sha256": "f1f16c5d6298d63dee467eedea1cdcd8490e43e493bea43acd416dc9033ef641"
+      }
+    },
+    "links": {
+      ".local/bin/zoxide": "zoxide"
+    }
+  },
+  "tree-sitter": {
+    "version": "v0.27.0",
+    "source": "https://github.com/tree-sitter/tree-sitter",
+    "kind": "gzip",
+    "assets": {
+      "linux-x86_64": {
+        "url": "https://github.com/tree-sitter/tree-sitter/releases/download/v0.27.0/tree-sitter-linux-x64.gz",
+        "sha256": "20a1f39ec1c45f2211492dcb8881c802b643b554bb196869a29ac3778277fa77"
+      },
+      "linux-arm64": {
+        "url": "https://github.com/tree-sitter/tree-sitter/releases/download/v0.27.0/tree-sitter-linux-arm64.gz",
+        "sha256": "3a35a2dd961ad842384e982c75daf792c01d1a67e442fc3914d4de37bd8a59cb"
+      }
+    },
+    "links": {
+      ".local/bin/tree-sitter": "tree-sitter"
+    }
+  },
+  "shuck": {
+    "version": "v0.2.2",
+    "source": "https://github.com/ewhauser/shuck",
+    "kind": "archive",
+    "assets": {
+      "linux-x86_64": {
+        "url": "https://github.com/ewhauser/shuck/releases/download/v0.2.2/shuck-cli-x86_64-unknown-linux-musl.tar.xz",
+        "sha256": "390c7d4703f1db40a48ae73abe7527abcf07e619561d045222767da31876b5ab"
+      },
+      "linux-arm64": {
+        "url": "https://github.com/ewhauser/shuck/releases/download/v0.2.2/shuck-cli-aarch64-unknown-linux-musl.tar.xz",
+        "sha256": "09dce61180786d1d39b5b32916278a895842fe4973fe3496ebc74fc320ed624a"
+      }
+    },
+    "links": {
+      ".local/bin/shuck": "shuck"
+    }
+  },
+  "iosevka": {
+    "version": "v3.5.1",
+    "source": "https://github.com/ryanoasis/nerd-fonts",
+    "kind": "archive",
+    "assets": {
+      "universal": {
+        "url": "https://github.com/ryanoasis/nerd-fonts/releases/download/v3.5.1/IosevkaTerm.zip",
+        "sha256": "b0dfd98968b7c7743080431257bfd082c5ef7dd4d1c674d3ce16bc5520c10cdc"
+      }
+    },
+    "family": "IosevkaTerm Nerd Font"
+  },
+  "sarasa": {
+    "version": "v1.0.41",
+    "source": "https://github.com/be5invis/Sarasa-Gothic",
+    "kind": "7z",
+    "assets": {
+      "universal": {
+        "url": "https://github.com/be5invis/Sarasa-Gothic/releases/download/v1.0.41/SarasaTermSC-TTF-1.0.41.7z",
+        "sha256": "176443ef1387d61e875a1b5b7138a1a0adf762160ee656797472b208e974b36c"
+      }
+    },
+    "family": "Sarasa Term SC"
+  },
+  "antidote": {
+    "version": "v2.3.0",
+    "source": "https://github.com/mattmc3/antidote",
+    "kind": "archive",
+    "links": {
+      ".local/share/antidote": "antidote-2.3.0"
+    },
+    "assets": {
+      "universal": {
+        "url": "https://codeload.github.com/mattmc3/antidote/tar.gz/refs/tags/v2.3.0",
+        "sha256": "c8b4f85d01c8c8715f279a8fed075a1e03e755e914bf1fd98688f24156fc110e"
+      }
+    }
+  },
+  "node": {
+    "version": "v24.21.0",
+    "source": "https://nodejs.org/dist/v24.21.0/SHASUMS256.txt",
+    "kind": "archive",
+    "links": {
+      ".local/bin/node": "bin/node",
+      ".local/bin/npm": "bin/npm",
+      ".local/bin/npx": "bin/npx"
+    },
+    "assets": {
+      "linux-x86_64": {
+        "url": "https://nodejs.org/dist/v24.21.0/node-v24.21.0-linux-x64.tar.xz",
+        "sha256": "fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6"
+      },
+      "linux-arm64": {
+        "url": "https://nodejs.org/dist/v24.21.0/node-v24.21.0-linux-arm64.tar.xz",
+        "sha256": "6ad1325edbdb5649c379b75a237147a666c95d4f9ae8d340fef2d1575d289ad2"
+      }
+    }
+  },
+  "ghostty": {
+    "version": "1.3.1-0-ppa2",
+    "source": "https://github.com/mkasberg/ghostty-ubuntu",
+    "kind": "deb",
+    "assets": {
+      "ubuntu-24.04-x86_64": {
+        "url": "https://github.com/mkasberg/ghostty-ubuntu/releases/download/1.3.1-0-ppa2/ghostty_1.3.1-0.ppa2_amd64_24.04.deb",
+        "sha256": "478d440153ef544426418efc7d6d8901715359f452c46be29071901a94b8cd47"
+      },
+      "ubuntu-24.04-arm64": {
+        "url": "https://github.com/mkasberg/ghostty-ubuntu/releases/download/1.3.1-0-ppa2/ghostty_1.3.1-0.ppa2_arm64_24.04.deb",
+        "sha256": "91063815b6ce3d834d59714b4ad0310f744448b6716836d035b3d331d1923363"
+      }
+    }
+  }
+}

@@ -1,0 +1,12 @@
+# 与外部程序的交互设置，如编辑器、文件打开方式和剪贴板。
+os:
+  # 使用 LazyGit 内置的 Neovim 编辑预设；按 e 编辑文件时调用 nvim。
+  editPreset: nvim
+
+# Git 操作及差异显示相关设置。
+git:
+  # 配置差异渲染器；多个渲染器可用 | 键切换。
+  diffRenderers:
+    # 使用 delta 渲染差异，--dark 采用适合深色终端背景的配色。
+    # --paging=never 禁用 delta 分页器，由 LazyGit 显示和滚动差异。
+    - command: delta --dark --paging=never

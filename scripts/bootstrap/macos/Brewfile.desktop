@@ -1,0 +1,3 @@
+# desktop 在基础 Brewfile 之外追加；字体归档由公共资源阶段准备。
+brew "sevenzip" # 解压 Sarasa Term SC 字体归档。
+cask "ghostty"

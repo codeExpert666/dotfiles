@@ -1,0 +1,9 @@
+# Codex workspace mounts
+/.agents/
+/.codex/
+
+# macOS Finder metadata
+.DS_Store
+
+# Neovim runtime logs
+nvim.log

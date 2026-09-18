@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+"""仅复制到临时测试目录中执行的命令替身。"""
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+name = Path(sys.argv[0]).name
+args = sys.argv[1:]
+root = Path(os.environ['BOOTSTRAP_TEST_ROOT'])
+configuration = root / 'fixture-env.json'
+if configuration.is_file():
+    os.environ.update(json.loads(configuration.read_text()))
+
+
+def event(command, values):
+    with (root / 'events').open('a') as stream:
+        stream.write(json.dumps([command, *values]) + '\n')
+
+
+def words(key):
+    return set(filter(None, os.environ.get(key, '').split(',')))
+
+
+def expire_sudo(stage):
+    # 在明确的检查点使凭据失效，避免依赖真实的过期时间。
+    if stage in words('BOOTSTRAP_TEST_SUDO_EXPIRE'):
+        (root / 'sudo-valid').unlink(missing_ok=True)
+        (root / 'sudo-expired').touch()
+        event('sudo-expired', [stage])
+
+
+def installed_commands(package, installer):
+    commands = {'neovim': ['nvim'], 'git-delta': ['delta'], 'node': ['node', 'npm', 'npx'],
+                'node@24': ['node', 'npm', 'npx'], 'python': ['python3'], 'ripgrep': ['rg'],
+                'fd-find': ['fd'], 'build-essential': ['cc', 'make'], 'xz-utils': ['xz'],
+                'ncurses-bin': ['infocmp', 'tic'], 'ncurses': ['infocmp', 'tic'],
+                'ewhauser/tap/shuck-cli': ['shuck'], 'sevenzip': ['7zz'], '7zip': ['7zz'],
+                'fontconfig': ['fc-list', 'fc-cache'], 'wl-clipboard': ['wl-copy', 'wl-paste']}.get(package, [package])
+    for command in commands:
+        if installer == 'apt' and command in words('BOOTSTRAP_TEST_APT_OLD'):
+            continue
+        (root / ('installed-' + command)).touch()
+        target = root / 'bin' / command
+        if not target.exists():
+            if command == 'python3':
+                # 所有替身均通过 env python3 启动，因此保留真实解释器。
+                target.symlink_to(sys.executable)
+            else:
+                shutil.copyfile(root / 'fixture.py', target)
+                target.chmod(0o755)
+
+
+def brew_has(package):
+    supplied = words('BOOTSTRAP_TEST_BREW_INSTALLED')
+    return 'all' in supplied or package in supplied or (root / ('brew-' + package.replace('/', '_'))).exists()
+
+
+def brew_mark(package):
+    (root / ('brew-' + package.replace('/', '_'))).touch()
+    installed_commands(package, 'brew')
+
+
+def brewfile_entries(file):
+    # 仓库中的 Brewfile 仅使用静态声明；替身遇到不支持的语法就报错，
+    # 避免静默接受不完整的包清单。
+    entries = []
+    for line in Path(file).read_text().splitlines():
+        if not line.strip() or line.lstrip().startswith('#'):
+            continue
+        match = re.fullmatch(r'\s*(tap|brew|cask) "([^"]+)"(?:\s*#.*)?\s*', line)
+        if not match:
+            raise RuntimeError('unsupported Brewfile fixture syntax: ' + line)
+        entries.append(match.groups())
+    return entries
+
+
+if name == 'uname':
+    print(os.environ.get('BOOTSTRAP_TEST_KERNEL', 'Linux') if args == ['-s'] else os.environ.get('BOOTSTRAP_TEST_ARCH', 'aarch64'))
+elif name == 'sw_vers':
+    print('26.0')
+elif name == 'xcode-select':
+    print('/Library/Developer/CommandLineTools')
+elif name == 'dpkg-query':
+    if args[-1] in words('BOOTSTRAP_TEST_PACKAGES') and not (root / ('apt-' + args[-1])).exists():
+        sys.exit(1)
+    print('install ok installed', end='')
+elif name == 'sudo':
+    event(name, args)
+    if args == ['-v']:
+        failure = os.environ.get('BOOTSTRAP_TEST_FAIL')
+        if failure == 'sudo-auth' or (failure == 'sudo-renew' and (root / 'sudo-expired').exists()):
+            print('fixture: sudo authentication denied', file=sys.stderr)
+            sys.exit(49)
+        (root / 'sudo-valid').touch()
+    elif args[:1] == ['-n']:
+        if not (root / 'sudo-valid').exists():
+            print('sudo: a password is required', file=sys.stderr)
+            sys.exit(1)
+        os.execvp(args[1], args[1:])
+    else:
+        raise RuntimeError('unexpected sudo invocation: ' + repr(args))
+elif name == 'brew':
+    event(name, args)
+    if args[:2] in (['bundle', 'check'], ['bundle', 'install']):
+        file = next(arg.removeprefix('--file=') for arg in args if arg.startswith('--file='))
+        entries = brewfile_entries(file)
+        if args[1] == 'check':
+            sys.exit(0 if all(brew_has(package) for _, package in entries) else 1)
+        if os.environ.get('BOOTSTRAP_TEST_FAIL') == 'brew' or (
+                os.environ.get('BOOTSTRAP_TEST_FAIL') == 'bundle-desktop' and Path(file).name == 'Brewfile.desktop'):
+            sys.exit(42)
+        for kind, package in entries:
+            if not brew_has(package):
+                if kind == 'tap':
+                    (root / ('brew-' + package.replace('/', '_'))).touch()
+                else:
+                    brew_mark(package)
+            elif kind != 'tap' and '--no-upgrade' not in args:
+                (root / 'brew-upgraded-by-bundle').touch()
+                brew_mark(package)
+    elif args[0] == 'list':
+        if not brew_has(args[-1]):
+            sys.exit(1)
+        print(args[-1], '1.0')
+    elif args[0] == 'upgrade':
+        if os.environ.get('BOOTSTRAP_TEST_FAIL') == 'brew' or not brew_has(args[-1]):
+            sys.exit(42)
+        brew_mark(args[-1])
+    else:
+        raise RuntimeError('unexpected brew invocation: ' + repr(args))
+elif name == 'apt-get':
+    event(name, args)
+    if os.environ.get('BOOTSTRAP_TEST_FAIL') == name:
+        sys.exit(42)
+    if args[0] == 'update':
+        expire_sudo('apt-update')
+    elif args[0] == 'install':
+        for package in args[1:]:
+            if package.startswith('-'):
+                continue
+            if package.endswith('.deb'):
+                package = Path(package).stem
+            (root / ('apt-' + package)).touch()
+            installed_commands(package, 'apt')
+elif name == 'doctor-fixture':
+    event('doctor', args)
+    sys.exit(41 if os.environ.get('BOOTSTRAP_TEST_FAIL') == 'doctor' else 0)
+elif name == 'resources-fixture':
+    event('resources', args)
+    if os.environ.get('BOOTSTRAP_TEST_FAIL') == args[0]:
+        sys.exit(43)
+    if args[0] == 'install':
+        installed_commands(args[1], 'release')
+        if args[1] == 'antidote':
+            entry = Path(os.environ['HOME']) / '.local/share/antidote/antidote.zsh'
+            entry.parent.mkdir(parents=True, exist_ok=True)
+            entry.write_text('# Antidote 测试夹具。\n')
+    elif args[0] == 'fetch':
+        Path(args[3]).touch()
+elif name == 'nvim' and '--headless' in args:
+    event('nvim', args)
+    if os.environ.get('BOOTSTRAP_TEST_FAIL') == 'nvim':
+        sys.exit(44)
+    if os.environ.get('BOOTSTRAP_TEST_FAIL') == 'signal':
+        child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
+        (root / 'child-pid').write_text(str(child.pid))
+        print('NATIVE CHECKPOINT', flush=True)
+        (root / 'ready').touch()
+        time.sleep(60)
+    expire_sudo('nvim')
+elif name == 'zsh' and any(arg.endswith('/bootstrap/zsh.zsh') for arg in args):
+    event('zsh', args)
+    sys.exit(45 if os.environ.get('BOOTSTRAP_TEST_FAIL') == 'zsh' else 0)
+elif name == 'cc' and '-x' in args:
+    event(name, args)
+    if os.environ.get('BOOTSTRAP_TEST_CAPABILITY_FAIL') == 'compiler':
+        sys.exit(46)
+    output = Path(args[args.index('-o') + 1])
+    code = 47 if os.environ.get('BOOTSTRAP_TEST_CAPABILITY_FAIL') == 'executable' else 0
+    output.write_text(f'#!/bin/sh\nexit {code}\n')
+    output.chmod(0o755)
+elif '--version' in args:
+    if name == 'npm' and os.environ.get('BOOTSTRAP_TEST_CAPABILITY_FAIL') == 'npm':
+        sys.exit(48)
+    old = words('BOOTSTRAP_TEST_OLD') | words('BOOTSTRAP_TEST_APT_OLD')
+    if name in words('BOOTSTRAP_TEST_STUCK') or (name in old and not (root / ('installed-' + name)).exists()):
+        print('version=0.0.1')
+    elif name == 'nvim':
+        print('NVIM v0.12.5\nLuaJIT 2.1')
+    elif name == 'lazygit':
+        print('commit=abc, version=0.65.1, os=linux, git version=2.43.0')
+    elif name in ('git', 'stow'):
+        os.execv(os.environ['BOOTSTRAP_TEST_REAL_' + name.upper()], [name, *args])
+    else:
+        print('99.99.99')
+elif name in ('git', 'stow'):
+    os.execv(os.environ['BOOTSTRAP_TEST_REAL_' + name.upper()], [name, *args])
+elif name == 'curl':
+    event(name, args)
+    sys.exit(90)  # 意外的网络请求必须失败。
+else:
+    print('bootstrap fixture: unexpected invocation', name, args, file=sys.stderr)
+    sys.exit(99)

@@ -1,0 +1,20 @@
+# 包内源目录只供下面的 Skill 目录链接引用，不部署为 ~/src。
+^/src$
+
+# 包级规则会替代 Stow 默认规则；保留版本控制、编辑器临时文件及根目录文档的忽略项。
+RCS
+.+,v
+CVS
+\.\#.+
+\.cvsignore
+\.svn
+_darcs
+\.hg
+\.git
+\.gitignore
+\.gitmodules
+.+~
+\#.*\#
+^/README.*
+^/LICENSE.*
+^/COPYING

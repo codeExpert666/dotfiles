@@ -1,0 +1,3 @@
+# 只维护加载顺序；具体配置分别由公共层和平台层负责。
+config-file = common.ghostty
+config-file = ?platform.ghostty

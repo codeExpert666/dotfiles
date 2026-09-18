@@ -1,0 +1,51 @@
+[init]
+	# 新建仓库时将 main 作为初始分支名。
+	defaultBranch = main
+
+[fetch]
+	# 获取远端更新时清理远端已经删除的跟踪引用，不影响本地分支。
+	prune = true
+
+[color]
+	# 面向终端输出时自动启用颜色，重定向到文件或管道时不强制着色。
+	ui = auto
+
+[alias]
+	# 查看工作区和暂存区状态。
+	st = status
+	# 切换分支，或从指定起点创建并切换到新分支。
+	sw = switch
+	# 查看、创建、重命名或删除分支。
+	br = branch
+	# 查看最近一次提交及其文件变更统计。
+	last = log -1 --stat
+	# 以精简提交图展示所有引用的历史与装饰信息。
+	graph = log --oneline --graph --decorate --all
+
+[pull]
+	# 只允许快进式拉取；分支发生分叉时停止并要求显式处理。
+	ff = only
+
+[core]
+	# nvim 从默认配置目录加载 LazyVim，用于提交消息、标签消息等 Git 文本。
+	editor = nvim
+	# 将 Git 的普通分页输出交给 delta 完整渲染，不改变实际差异内容。
+	pager = delta
+
+[interactive]
+	# 交互式补丁仅由 delta 着色并保持逐行对应，避免影响 Git 应用补丁。
+	diffFilter = delta --color-only
+
+[delta]
+	# 启用 n 和 N，在较长的差异中向前或向后跳转区段。
+	navigate = true
+	# 同时显示变更前后的行号。
+	line-numbers = true
+
+[diff]
+	# 让 Git 识别并标记移动的代码块，供 delta 区别于普通增删。
+	colorMoved = default
+
+[merge]
+	# 在冲突中显示共同祖先版本，便于对照双方相对于基线的修改。
+	conflictStyle = zdiff3

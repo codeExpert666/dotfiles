@@ -1,0 +1,25 @@
+# Ghostty macOS 平台配置
+# deploy 只在 macOS 选择 ghostty-macos Stow package。
+
+# 背景模糊配合 common.ghostty 中的不透明度使用。
+background-blur = 20
+
+# 使用上游 Customized（faded warp + ripple）光标效果。
+# 相对路径以本文件所在目录为基准，来源与参数见 shaders/README.md。
+custom-shader = shaders/cursor_warp.glsl
+custom-shader = shaders/ripple_cursor.glsl
+
+# 失去焦点后继续播放，使光标形状变化的涟漪可以完成。
+custom-shader-animation = always
+
+# 标签页融入顶部标题栏，只占用一条工具栏高度并保留窗口按钮。
+macos-titlebar-style = tabs
+
+# 将左右 Option 键作为 Alt/Meta。
+macos-option-as-alt = true
+
+# Control + 反引号键全局呼出或隐藏快捷终端。
+keybind = global:ctrl+backquote=toggle_quick_terminal
+
+# 快捷终端从顶部弹出时，高度为屏幕的 40%。
+quick-terminal-size = 40%

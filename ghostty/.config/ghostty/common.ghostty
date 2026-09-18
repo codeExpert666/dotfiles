@@ -1,0 +1,43 @@
+# Ghostty 跨平台公共配置
+# 本文件只保存准备在 macOS 与 Linux 桌面复用的稳定行为。
+
+# 所需字体应在 bootstrap 阶段安装；deploy 只部署配置。
+# 顺序表示首选字体和回退字体。
+font-family = "IosevkaTerm Nerd Font"
+font-family = "Sarasa Term SC"
+font-size = 15
+
+# 设置新窗口的初始字符网格尺寸和窗口内边距。
+window-width = 105
+window-height = 33
+window-padding-x = 10
+window-padding-y = 5
+
+# 选中文字后同时写入选择剪贴板和系统剪贴板。
+copy-on-select = clipboard
+
+# 允许终端程序通过 OSC 52 读取和写入系统剪贴板。
+clipboard-read = allow
+clipboard-write = allow
+
+# 关闭疑似不安全粘贴内容的确认。
+clipboard-paste-protection = false
+
+# 打字时隐藏鼠标指针，移动或点击鼠标后恢复显示。
+mouse-hide-while-typing = true
+
+# 为交互式 Shell 中直接运行的 SSH 启用环境兼容和 terminfo 安装。
+shell-integration-features = ssh-env,ssh-terminfo
+
+# 关闭窗口、标签页或分屏时不显示确认提示。
+confirm-close-surface = false
+
+# 使用 95% 不透明背景和 TokyoNight Moon 深色主题。
+background-opacity = 0.95
+theme = "TokyoNight Moon"
+
+# 使用线性颜色混合并校正文字渲染。
+alpha-blending = linear-corrected
+
+# 窗口界面固定为深色。
+window-theme = dark

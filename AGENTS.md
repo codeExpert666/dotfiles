@@ -1,0 +1,71 @@
+# Repository Guidelines
+
+## Project Structure & Module Organization
+
+- Top-level GNU Stow packages (`zsh/`, `git/`, `nvim/`, `ghostty/`, etc.) mirror
+  paths beneath HOME, usually `<package>/.config/<app>/`.
+- Neovim Lua lives in `nvim/.config/nvim/lua/`; Ghostty shader assets live in
+  `ghostty-macos/.config/ghostty/shaders/`.
+- AI skills live in `skills/src/`, excluded from deployment by the
+  package's `.stow-local-ignore`; per-skill directory links in the same package
+  expose them at the clients' discovery paths. `scripts/layout.bash` declares
+  the required clients per skill; `astra-sol` has only an `.agents` entry.
+- Codex custom agents live in `codex/agents/` and deploy as regular copies
+  outside Stow because Codex rejects symlinked role files; personal Codex config,
+  credentials, and runtime state remain outside version control.
+- `scripts/` contains deploy, doctor, and bootstrap entrypoints. Bootstrap and
+  doctor helpers stay in their corresponding subdirectories; `layout.bash`
+  centralizes shared deployment paths and package lists.
+- `tests/` contains four independent suites and shared fixtures in `tests/support/`.
+
+## Build, Test, and Development Commands
+
+There is no build step. Run these commands from the repository root:
+
+- `bash scripts/deploy.sh --dry-run`: preview configuration links and conflicts.
+- `bash scripts/bootstrap.sh --dry-run --profile server`: preview environment
+  preparation; use `desktop` for GUI tools and fonts.
+- `bash scripts/doctor.sh`: check dependencies, deployment, and configuration.
+- `bash tests/all.sh`: run deploy, doctor, bootstrap, and config-loading suites.
+- `bash tests/config-loading.sh`: verify application configuration independently.
+
+See [scripts/README.md](scripts/README.md) for maintenance and static checks.
+
+## Coding Style & Naming Conventions
+
+Keep Bash compatible with 3.2, using tabs and `shfmt -ci -sr`. Validate with
+`bash -n`, `shellcheck -x`, and `shfmt -d -ci -sr`. Format Zsh with Shuck and
+check syntax with `zsh -n`. Lua uses two spaces and StyLua; Neovim's
+`stylua.toml` sets a 120-column width. Python uses four spaces and snake_case.
+Use `.sh` for public shell entrypoints and `.bash` for sourced Bash helpers.
+Sourced helpers declare functions or data; entrypoints own runtime state and traps.
+
+## Testing Guidelines
+
+Tests use custom Bash harnesses and Python's standard-library `unittest`, with
+temporary HOME directories, repository copies, and offline fixtures. Name Python
+cases `test_<behavior>` and give Bash cases descriptive labels. For example:
+
+```sh
+bash tests/doctor.sh DoctorTests.test_multiple_independent_link_faults
+```
+
+For behavior changes, cover relevant failure paths and run the affected suite;
+use the full suite for changes spanning suites. No numeric coverage threshold
+is configured. Report optional-application `SKIP` results and distinguish simulated
+platform checks from native validation. See [tests/README.md](tests/README.md).
+
+## Commit & Pull Request Guidelines
+
+Use the `type(scope): summary` commit message convention; scope is optional. Types
+include `feat`, `fix`, `docs`, `test`, `refactor`, and `chore`.
+Example: `feat(nvim): configure Markdown editing environment`.
+Keep PRs focused, describe behavior and affected platforms, list validation
+results, link relevant issues, and include screenshots for visual changes.
+Update applicable READMEs.
+
+## Configuration Safety
+
+Preview deployment before using `--apply`. Keep personal Git identity, credentials,
+and machine-specific overrides outside tracked configuration. Preserve default
+XDG paths and use `local.zsh` or `local.zprofile` for local Zsh settings.

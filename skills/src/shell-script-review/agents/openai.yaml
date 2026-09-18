@@ -1,0 +1,4 @@
+interface:
+  display_name: "Shell 脚本交付审视"
+  short_description: "审视 Shell 脚本与回归测试，验证行为契约并评估整体结构与维护成本"
+  default_prompt: "请使用 $shell-script-review，以最终交付标准审视指定脚本及相关测试，结合验证证据给出结论与调整方案。"
