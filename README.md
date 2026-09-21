@@ -31,6 +31,7 @@
 
 Zsh 中用 `Ctrl-R` 打开 Atuin 历史搜索，`Ctrl-T` 打开 fzf 文件选择，
 `z`/`zi` 通过 zoxide 跳转目录。
+原生 Zsh 历史保存到 `~/.local/state/zsh/history`；macOS Terminal 的额外会话保存与恢复已禁用。
 
 ## 部署说明
 

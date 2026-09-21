@@ -2,6 +2,9 @@
 # 仓库采用默认目录布局；部署时拒绝不匹配的 XDG 路径。
 ZDOTDIR="$HOME/.config/zsh" # shuck: ignore=C001 # 由 Zsh 用于定位启动文件。
 
+# 禁用 macOS Terminal 的会话保存与恢复，原生历史由 .zshrc 统一写入 XDG state。
+SHELL_SESSIONS_DISABLE=1 # shuck: ignore=C001 # 由 macOS 的 /etc/zshrc_Apple_Terminal 读取。
+
 # Ubuntu 的系统级 zshrc 可能先调用 compinit；本配置在用户 .zshrc 中统一初始化并把转储写入 XDG cache。
 # 该开关不需要导出；未使用它的平台会忽略这个普通 Shell 参数。
 skip_global_compinit=1 # shuck: ignore=C001 # 由 Ubuntu 的系统级 zshrc 读取。
