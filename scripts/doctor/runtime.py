@@ -39,6 +39,23 @@ def stop(child):
         os.killpg(child.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
+    except PermissionError as error:
+        # macOS 的退出进程组可能先报 EPERM，随后才消失。仅对已退出的子进程
+        # 短暂等待 ESRCH；仍存在或无法确认消失的进程组继续报告原权限错误。
+        if child.poll() is None:
+            raise
+        deadline = time.monotonic() + .2
+        while True:
+            try:
+                os.killpg(child.pid, 0)
+            except ProcessLookupError:
+                break
+            except PermissionError:
+                if time.monotonic() >= deadline:
+                    raise error
+                time.sleep(.01)
+            else:
+                raise error
     child.wait()
     for stream in (child.stdin, child.stdout, child.stderr):
         if stream:
@@ -349,34 +366,48 @@ def lazygit(repo, original, home, env, config):
     bindir = home / "bin"
     bindir.mkdir()
     editor_args, delta_args = home / "editor.args", home / "delta.args"
+    delta_status = home / "delta-status"
+    delta_status.mkdir()
     # 编辑器替身只记录交接参数，由 Neovim 模块验证编辑器本身。
-    # delta 包装器记录参数后转发给真实命令，保留实际渲染验证。
+    # delta 完成后原子发布退出状态；参数文件只证明调用开始，不能证明渲染成功。
     (bindir / "nvim").write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$DOTFILES_EDITOR_ARGS"\n')
     (bindir / "delta").write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$DOTFILES_DELTA_ARGS"\n'
-                                   + "exec " + shlex.quote(delta) + ' "$@"\n')
+                                   + shlex.quote(delta) + ' "$@"\n'
+                                   'status=$?\n'
+                                   'printf "%s\\n" "$status" > "$DOTFILES_DELTA_STATUS/$$.tmp"\n'
+                                   'mv "$DOTFILES_DELTA_STATUS/$$.tmp" "$DOTFILES_DELTA_STATUS/$$.status"\n'
+                                   'exit "$status"\n')
     for path in bindir.iterdir():
         path.chmod(0o755)
     env.update(PATH=str(bindir) + os.pathsep + env["PATH"], DOTFILES_EDITOR_ARGS=str(editor_args),
-               DOTFILES_DELTA_ARGS=str(delta_args))
+               DOTFILES_DELTA_ARGS=str(delta_args), DOTFILES_DELTA_STATUS=str(delta_status))
     project = home / "project"
     run(["git", "init", "--quiet", str(project)], env, home)
     (project / "sample.txt").write_text("doctor renderer and editor handoff\n")
-    state = {"edited": False, "quit": False}
+    state = {"edited": False, "next_quit": 0}
+
+    def completed_renders():
+        receipts = list(delta_status.glob("*.status"))
+        for receipt in receipts:
+            status = receipt.read_text().strip()
+            if status != "0":
+                raise RuntimeError("configured delta renderer exited " + status)
+        return receipts
 
     def observe(master):
-        # 按证据文件推进按键交互：渲染器被调用后再编辑，编辑器参数落盘后再退出。
-        # 避免用固定延时猜测终端界面是否就绪。
-        if delta_args.exists() and not state["edited"]:
+        # 等待实际渲染完成再编辑，不用固定延时猜测界面是否就绪。
+        if completed_renders() and not state["edited"]:
             os.write(master, b"2e")
             state["edited"] = True
-        if editor_args.exists() and not state["quit"]:
+        if editor_args.exists() and time.monotonic() >= state["next_quit"]:
+            # 参数文件可能先于 TUI 恢复输入模式出现，在会话时限内重试退出键。
             os.write(master, b"q")
-            state["quit"] = True
+            state["next_quit"] = time.monotonic() + .2
 
     terminal(["lazygit", "--use-config-file", str(home / ".config/lazygit/config.yml") + "," + str(override)],
              env, project, observe=observe, seconds=12)
-    if not delta_args.exists() or not editor_args.exists():
-        raise RuntimeError("configured renderer/editor was not invoked")
+    if not completed_renders() or not delta_args.exists() or not editor_args.exists():
+        raise RuntimeError("configured renderer/editor did not complete")
     if not {"--dark", "--paging=never"}.issubset(delta_args.read_text().splitlines()):
         raise RuntimeError("unexpected delta options")
     if not any(Path(arg).name == "sample.txt" for arg in editor_args.read_text().splitlines()):

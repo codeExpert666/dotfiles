@@ -25,6 +25,9 @@ Codex 专用工作流还验证 `astra-sol` 没有 Claude 别名、`sol_worker.to
 `config-loading` 保留独立的应用断言：例如 Git 的个人覆盖、Zsh 的加载顺序、Shuck 的格式化
 结果、Lazygit 的 delta 渲染结果及编辑器参数。它调用部署脚本来准备输入，不重复验证完整
 链接布局。`doctor` 则检查诊断程序能否正确识别健康或故障状态；诊断通过不代替上述应用断言。
+doctor 用真实 PTY 和已安装的 delta 验证后台能力探针；Lazygit 夹具模拟编辑器交接丢失首个
+退出键，以及 TUI 忽略渲染器错误，原生 Lazygit 会话另行验证。进程清理用例覆盖组长退出后
+的后代回收、退出进程组暂时报 `EPERM` 后消失，以及真实权限错误不得被忽略。
 
 ## 运行
 
@@ -86,7 +89,8 @@ DOTFILES_TEST_PREPARED_HOME=/path/to/prepared-home bash tests/all.sh
   `deploy/git-write-failure.bash` 仅在 Git 写入失败用例中通过 `BASH_ENV` 加载，先写入部分
   配置，再在目标写入子 Shell 中用 `ulimit -f 0` 触发真实失败；不限制初始化时 Bash 3.2
   的 here-string 临时文件写入。用例核对注入命中、失败阶段、清理及解除故障后的重试。
-- `doctor/cases.py`：诊断用例，以及诊断执行器和共享进程设施的回归。
+- `doctor/cases.py` 与 `doctor/lazygit-fixture.py`：诊断用例、Lazygit 交互夹具，
+  以及诊断执行器和共享进程设施的回归。
 - `bootstrap/cases.py` 与 `bootstrap/mock.py`：安装编排、资源和准备用例，以及命令替身。
 - `config-loading/lazygit.py` 与 `config-loading/nvim.lua`：原生应用会话及应用内部断言。
 - `support/harness.bash` 与 `support/harness.py`：跨套件的夹具、快照、进程清理和终端设施。

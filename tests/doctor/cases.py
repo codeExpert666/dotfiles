@@ -1,5 +1,6 @@
 """doctor 的行为测试：独立故障、原生命令查询与只读保证。"""
 
+import errno
 import importlib.util
 import json
 import os
@@ -332,6 +333,17 @@ class DoctorTests(unittest.TestCase):
         log = self.doctor("--only", "dependencies", code=1)
         self.assertIn("PASS dependencies.stow-capability", log)
 
+    @unittest.skipUnless(shutil.which("delta"), "native delta is required")
+    def test_delta_capability_with_a_controlling_terminal(self):
+        self.deploy()
+        before, source_before = snapshot(self.target), snapshot(self.repo)
+        output = harness.terminal([BASH, str(self.script), "--only", "git", "--verbose"],
+                                  env=self.env, cwd=self.work, timeout=20)
+        self.assertIn(b"PASS git.delta-capability", output)
+        self.assertEqual(snapshot(self.target), before)
+        self.assertEqual(snapshot(self.repo), source_before)
+        self.assertEqual(list(self.temp.iterdir()), [])
+
     def test_java_and_maven_dependencies_require_a_complete_consistent_toolchain(self):
         jdk = self.java_dependencies_fixture()
         self.mock("delta", "exit 7\n")
@@ -642,6 +654,24 @@ esac
         log = self.doctor("--only", "lazygit", "--runtime")
         self.assertIn("PASS lazygit.runtime: TUI loaded copied YAML", log)
 
+    def lazygit_terminal_fixture(self, mode, render_status=0):
+        self.deploy()
+        fixture = REPO / "tests/doctor/lazygit-fixture.py"
+        self.mock("lazygit", "exec " + shlex.join([sys.executable, "-B", str(fixture), mode]) + ' "$@"\n')
+        self.mock("delta", "cat > /dev/null\nexit " + str(render_status) + "\n")
+        self.mock("nvim", "exit 0\n")
+
+    def test_lazygit_retries_quit_after_editor_handoff_discards_input(self):
+        self.lazygit_terminal_fixture("lost-quit")
+        log = self.doctor("--only", "lazygit", "--runtime", "--verbose")
+        self.assertIn("PASS lazygit.runtime", log)
+
+    def test_lazygit_rejects_failed_renderer_even_when_tui_can_exit_successfully(self):
+        self.lazygit_terminal_fixture("normal", render_status=7)
+        log = self.doctor("--only", "lazygit", "--runtime", "--verbose", code=1)
+        self.assertIn("configured delta renderer exited 7", log)
+        self.assertNotIn("PASS lazygit.runtime", log)
+
     @unittest.skipUnless(shutil.which("zsh"), "native Zsh is not installed")
     def test_invalid_fzf_initialization_is_a_health_failure(self):
         self.deploy()
@@ -871,6 +901,60 @@ class RuntimeProcessTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.env = {"HOME": self.temporary.name, "PATH": os.environ["PATH"]}
         self.runtime.DEADLINE = time.monotonic() + 10
+
+    def test_cleanup_confirms_group_disappearance_after_permission_error(self):
+        with self.runtime.session([sys.executable, "-c", "pass"],
+                                  self.env, self.temporary.name) as (child, _master):
+            child.communicate(timeout=5)
+            denied = PermissionError(errno.EPERM, "process group is exiting")
+            gone = ProcessLookupError(errno.ESRCH, "process group is gone")
+            with mock.patch.object(self.runtime.os, "killpg", side_effect=[denied, denied, gone]) as killpg:
+                self.runtime.stop(child)
+            self.assertEqual(killpg.call_args_list,
+                             [mock.call(child.pid, signal.SIGKILL), mock.call(child.pid, 0), mock.call(child.pid, 0)])
+            self.assertNotIn(child, self.runtime.CHILDREN)
+            self.assertTrue(child.stdout.closed)
+            self.assertTrue(child.stderr.closed)
+
+    def test_cleanup_preserves_permission_errors_for_groups_not_confirmed_gone(self):
+        for state in ("live", "exited-visible", "exited-denied"):
+            with self.subTest(state=state):
+                command = "import time; time.sleep(120)" if state == "live" else "pass"
+                with self.runtime.session([sys.executable, "-c", command],
+                                          self.env, self.temporary.name) as (child, _master):
+                    if state != "live":
+                        child.communicate(timeout=5)
+                    denied = PermissionError(errno.EPERM, "cannot signal process group")
+                    failures = [denied, None] if state == "exited-visible" else denied
+                    with mock.patch.object(self.runtime.os, "killpg", side_effect=failures):
+                        with self.assertRaises(PermissionError):
+                            self.runtime.stop(child)
+                    self.assertIn(child, self.runtime.CHILDREN)
+                    if state == "live":
+                        self.assertIsNone(child.poll())
+                self.assertIsNotNone(child.returncode)
+                self.assertNotIn(child, self.runtime.CHILDREN)
+
+    def test_cleanup_reaps_descendants_after_group_leader_exits(self):
+        command = ('import subprocess, sys\n'
+                   'child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"], '
+                   'stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n'
+                   'print(child.pid, flush=True)\n')
+        descendant = None
+        try:
+            with self.runtime.session([sys.executable, "-c", command],
+                                      self.env, self.temporary.name) as (child, _master):
+                stdout, _stderr = child.communicate(timeout=5)
+                descendant = int(stdout)
+                self.assertEqual(child.returncode, 0)
+                self.assertTrue(running(descendant))
+            deadline = time.monotonic() + 2
+            while running(descendant) and time.monotonic() < deadline:
+                time.sleep(.02)
+            self.assertFalse(running(descendant), "cleanup left a descendant running")
+        finally:
+            if descendant is not None and running(descendant):
+                os.kill(descendant, signal.SIGKILL)
 
     def assert_spawn_interrupt_cleanup(self, terminal):
         real_popen, real_openpty = subprocess.Popen, self.runtime.pty.openpty

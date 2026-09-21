@@ -806,10 +806,11 @@ check_git() {
 		if [[ $pager != delta ]]; then need_tool delta FAIL git.diff-filter || :; fi
 	fi
 	if find_tool delta; then
-		if clean_probe 8 "$tool_path" --color-only --paging=never; then
+		# --color-only 即使重定向输出仍会查询终端颜色；固定主题避免后台探针触发 SIGTTOU。
+		if clean_probe 8 "$tool_path" --color-only --paging=never --dark; then
 			report PASS git.delta-capability 'delta accepts the configured filter and non-paging options'
 		else
-			native_error git.delta-capability 'delta rejected the configured options' 'Install a compatible delta version.'
+			native_error git.delta-capability 'delta capability probe failed' 'Use --verbose to inspect delta startup and option diagnostics.'
 		fi
 	fi
 	if capture 8 "$git_bin" config --includes --get merge.conflictStyle; then
