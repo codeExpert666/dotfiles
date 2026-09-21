@@ -952,6 +952,7 @@ check_starship() {
 
 check_atuin() {
 	local config="${ATUIN_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/atuin}/config.toml" atuin_bin key value
+	local probe_home="$scratch/home"
 	need_tool atuin WARN atuin.command || return 0
 	atuin_bin="$tool_path"
 	check_file atuin.config "$config" || return 0
@@ -961,7 +962,8 @@ check_atuin() {
 		if clean_probe 8 ATUIN_CONFIG_DIR="$scratch/atuin" "$atuin_bin" config get --resolved "$key"; then
 			value=$(< "$probe_stdout")
 			if [[ $key == logs.dir ]]; then
-				value="${value//"$scratch/home"/"$HOME"}"
+				# Bash 3.2 需用变量模式避开字面量 /，赋值不加外层引号以免替换值混入引号。
+				value=${value//"$probe_home"/"$HOME"}
 				report PASS atuin.logs "configured log path resolves to $value (tilde resolved for the real HOME)"
 			elif [[ $value == false ]]; then
 				report PASS "atuin.$key" 'selected TOML parses; managed value is false'

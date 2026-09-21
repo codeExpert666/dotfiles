@@ -504,6 +504,28 @@ esac
         log = self.doctor(*args)
         self.assertIn("FAIL=0", log)
 
+    def test_atuin_log_path_reports_real_home_and_preserves_absolute_paths(self):
+        self.target = self.target.rename(self.base / "home & [user]* with spaces")
+        self.temp = self.temp.rename(self.base / "tmp [probe]* with spaces")
+        self.env.update(HOME=str(self.target), TMPDIR=str(self.temp))
+        config = self.target / ".config/atuin/config.toml"
+        config.parent.mkdir(parents=True)
+        shutil.copyfile(self.repo / "atuin/.config/atuin/config.toml", config)
+        expected = str(self.target / ".local/state/atuin/logs")
+        for label, output, reported in (
+            ("resolved", "printf '%s\\n' \"$HOME/.local/state/atuin/logs\"", expected),
+            ("quoted", "printf '\"%s\"\\n' \"$HOME/.local/state/atuin/logs\"", '"' + expected + '"'),
+            ("absolute", "printf '%s\\n' '/var/log/custom atuin/logs'", "/var/log/custom atuin/logs"),
+        ):
+            with self.subTest(path=label):
+                self.mock("atuin", 'case "$*" in\n'
+                          "  'config get --resolved auto_sync' | 'config get --resolved enter_accept') printf 'false\\n' ;;\n"
+                          "  'config get --resolved logs.dir') " + output + " ;;\n"
+                          "  *) exit 2 ;;\nesac\n")
+                log = self.doctor("--only", "atuin")
+                self.assertIn("PASS atuin.logs: configured log path resolves to " + reported
+                              + " (tilde resolved for the real HOME)", log.splitlines())
+
     @unittest.skipUnless(shutil.which("nvim"), "native Neovim is not installed")
     def test_nvim_syntax_is_checked_without_bootstrap(self):
         self.deploy()
