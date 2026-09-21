@@ -172,10 +172,14 @@ local function prepare_treesitter()
   -- nvim-treesitter 会跳过已经匹配的修订。
   assert(ts.install(parsers):wait(600000), "Treesitter installation failed")
   assert(ts.update(parsers):wait(600000), "Treesitter update to pinned parser revisions failed")
+  -- 首次安装前目录尚不存在，lazy.nvim 加载插件时可能将其从 runtimepath 移除；
+  -- 安装完成后补回实际目录，让本次会话能发现新安装的解析器及查询文件。
+  vim.opt.rtp:prepend(require("nvim-treesitter.config").get_install_dir(""))
   local installed = ts.get_installed()
   for _, name in ipairs(parsers) do
     assert(vim.tbl_contains(installed, name), "Treesitter parser missing: " .. name)
-    assert(vim.treesitter.language.add(name), "Treesitter parser cannot be loaded: " .. name)
+    local loaded, err = vim.treesitter.language.add(name)
+    assert(loaded, "Treesitter parser cannot be loaded: " .. name .. ": " .. tostring(err))
   end
   report("READY: configured Treesitter parsers installed and loadable")
 end

@@ -1171,13 +1171,32 @@ class Preparation(unittest.TestCase):
         for command in bindir.iterdir():
             command.chmod(0o755)
         self.env['PATH'] = str(bindir) + ':' + str(data / 'mason/bin') + ':' + self.env['PATH']
-        child = run([REAL_TOOLS['nvim'], '--headless', '-u', 'NONE', '-n', '-i', 'NONE',
-                     '-l', str(REPO / 'scripts/bootstrap/nvim.lua')], env=self.env, cwd=self.root, timeout=90)
-        stdout, stderr = child.stdout, child.stderr
-        self.assertEqual(child.returncode, 0, stdout + stderr)
-        for stage in ('all plugin checkouts match', 'Mason', 'Treesitter parsers installed', 'completion resources'):
-            self.assertIn('READY: ' + stage if stage != 'Treesitter parsers installed' else stage, stdout)
-        self.assertEqual((config / 'lazy-lock.json').read_bytes(), lock)
+        entrypoint = str(REPO / 'scripts/bootstrap/nvim.lua')
+        command = [REAL_TOOLS['nvim'], '--headless', '-u', 'NONE', '-n', '-i', 'NONE', '-l']
+        cached_site = self.root / 'cached-site'
+        (data / 'site').rename(cached_site)
+        for scenario, arguments in (
+                ('first-install', [str(REPO / 'tests/bootstrap/nvim-first-install.lua'), str(cached_site), entrypoint]),
+                ('retry', [entrypoint])):
+            with self.subTest(scenario=scenario):
+                child = run(command + arguments, env=self.env, cwd=self.root, timeout=90)
+                stdout, stderr = child.stdout, child.stderr
+                self.assertEqual(child.returncode, 0, stdout + stderr)
+                if scenario == 'first-install':
+                    self.assertIn('FIXTURE: published parsers during first installation', stdout)
+                for stage in ('all plugin checkouts match', 'Mason', 'Treesitter parsers installed', 'completion resources'):
+                    self.assertIn('READY: ' + stage if stage != 'Treesitter parsers installed' else stage, stdout)
+                self.assertEqual((config / 'lazy-lock.json').read_bytes(), lock)
+
+        # 保留查询和修订记录，让插件仍将 bash 视为已安装；真实加载必须报告缺少解析器。
+        with self.subTest(scenario='missing-parser-diagnostic'):
+            (data / 'site/parser/bash.so').unlink()
+            child = run(command + [entrypoint], env=self.env, cwd=self.root, timeout=90)
+            self.assertEqual(child.returncode, 1, child.stdout + child.stderr)
+            self.assertIn('Treesitter parser cannot be loaded: bash: No parser for language "bash"', child.stderr)
+            self.assertNotIn('READY: configured Treesitter', child.stdout)
+            self.assertNotIn('READY: completion resources', child.stdout)
+            self.assertEqual((config / 'lazy-lock.json').read_bytes(), lock)
 
 
 class Publication(unittest.TestCase):

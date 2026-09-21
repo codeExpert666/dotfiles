@@ -76,8 +76,9 @@ Neovim 的常规配置检查涵盖配置发现、语法和离线选项，不启�
 DOTFILES_TEST_PREPARED_HOME=/path/to/prepared-home bash tests/all.sh
 ```
 
-这些用例复制缓存并核对来源未变；Neovim 准备用例拒绝 Git/curl/wget 下载。缓存集成
-不能代替首次在线安装验收。
+这些用例复制缓存并核对来源未变；Neovim 准备用例拒绝 Git/curl/wget 下载，并延迟到安装
+步骤才放入缓存解析器，覆盖首次创建安装目录、重跑和加载失败的具体诊断。下载和编译由
+预编译缓存代替，其余流程执行真实插件 API；缓存集成不能代替首次在线安装验收。
 
 ## 内部组织与失败诊断
 
@@ -113,5 +114,5 @@ from pathlib import Path
 for path in Path('tests').rglob('*.py'):
     ast.parse(path.read_text(), filename=str(path))
 PY
-stylua --check --indent-type Spaces --indent-width 2 tests/config-loading/nvim.lua
+stylua --check --indent-type Spaces --indent-width 2 tests/config-loading/nvim.lua tests/bootstrap/*.lua
 ```
