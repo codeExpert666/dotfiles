@@ -39,7 +39,7 @@ prepare_platform() {
 # 仅用于把不兼容命令定位到待升级的包；安装清单以 Brewfile 为准。
 macos_package_for() {
 	case $1 in
-		cc | tar | unzip | go) return 1 ;;
+		cc | tar | unzip | go | java | javac | mvn) return 1 ;;
 		python3) printf '%s\n' python ;;
 		rg) printf '%s\n' ripgrep ;;
 		node | npm) printf '%s\n' node@24 ;;
@@ -62,8 +62,8 @@ macos_install_bundle() {
 	fi
 	# --no-upgrade 不保证最低兼容版本；只修复实际命令未满足的要求。
 	while IFS=$'\t' read -r name minimum; do
-		# Go 由入口在平台软件准备后按需安装官方最新稳定版。
-		[[ $name != go ]] || continue
+		# 共享入口按需安装官方 Go、JDK 与 Maven 归档。
+		case $name in go | java | javac | mvn) continue ;; esac
 		if tool_ready "$name" "$minimum"; then continue; fi
 		package=$(macos_package_for "$name") || die "$name is missing; check macOS and Command Line Tools"
 		kind=--formula

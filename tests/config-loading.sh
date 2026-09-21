@@ -43,6 +43,17 @@ assert_git_setting() {
 new_fixture 'prepare deployed configuration'
 run_application "$real_bash" "$case_repo/scripts/deploy.sh" --apply > "$case_log" 2>&1 || fail 'could not prepare deployed configuration'
 
+# 模拟 bootstrap 发布的稳定入口；这些命令只用于检查 Zsh 的选择顺序，不执行。
+managed_jdk="$case_home/.local/share/dotfiles-bootstrap/jdk/jdk-25-fixture"
+mkdir -p "$managed_jdk/bin" "$case_home/.local/bin"
+for command in java javac jar; do
+	printf '#!/bin/sh\nexit 0\n' > "$managed_jdk/bin/$command"
+	chmod +x "$managed_jdk/bin/$command"
+done
+ln -s "$managed_jdk" "$case_home/.local/share/dotfiles-bootstrap/jdk/current"
+printf '#!/bin/sh\nexit 0\n' > "$case_home/.local/bin/mvn"
+chmod +x "$case_home/.local/bin/mvn"
+
 case_label='Zsh noninteractive startup and child shells read the root .zshenv'
 case_phase='application startup and assertions'
 case_log="$case_root/zsh-noninteractive.log"
@@ -52,8 +63,14 @@ run_application "$real_zsh" -c '[[ $ZDOTDIR == "$HOME/.config/zsh" && ${skip_glo
 run_application "$real_zsh" -c 'unset skip_global_compinit; exec zsh -c "$1"' zsh '[[ ${skip_global_compinit-} == 1 ]]' >> "$case_log" 2>&1 || fail 'child Zsh skipped the root startup file'
 # shellcheck disable=SC2016
 run_application "$real_zsh" -c 'exec sh -c "$1"' zsh \
-	'[ "$EDITOR" = nvim ] && [ "$VISUAL" = nvim ] && [ "$SUDO_EDITOR" = nvim ]' \
+	'[ "$EDITOR" = nvim ] && [ "$VISUAL" = nvim ] && [ "$SUDO_EDITOR" = nvim ] &&
+	 [ "$JAVA_HOME" = "$HOME/.local/share/dotfiles-bootstrap/jdk/current" ]' \
 	>> "$case_log" 2>&1 || fail 'editor defaults were not exported to child processes'
+# shellcheck disable=SC2016
+run_application "$real_zsh" -c \
+	'[[ $commands[java] == "$JAVA_HOME/bin/java" && $commands[javac] == "$JAVA_HOME/bin/javac" &&
+	   $commands[jar] == "$JAVA_HOME/bin/jar" && $commands[mvn] == "$HOME/.local/bin/mvn" ]]' \
+	>> "$case_log" 2>&1 || fail 'noninteractive Zsh did not select the managed JDK and Maven commands'
 [[ ! -s $case_log ]] || fail 'noninteractive startup produced output'
 pass
 
@@ -69,7 +86,11 @@ case_label='Zsh login startup loads local.zprofile'
 printf 'DOTFILES_TEST_LOGIN=loaded\n' > "$case_home/.config/zsh/local.zprofile"
 case_log="$case_root/zsh-login.log"
 # shellcheck disable=SC2016
-run_application "$real_zsh" -lc '[[ ${DOTFILES_TEST_LOGIN-} == loaded && $EDITOR == nvim && $VISUAL == nvim ]]' > "$case_log" 2>&1 || fail 'Zsh did not load login settings and editor defaults'
+run_application "$real_zsh" -lc \
+	'[[ ${DOTFILES_TEST_LOGIN-} == loaded && $EDITOR == nvim && $VISUAL == nvim &&
+	   $commands[java] == "$JAVA_HOME/bin/java" && $commands[javac] == "$JAVA_HOME/bin/javac" &&
+	   $commands[jar] == "$JAVA_HOME/bin/jar" && $commands[mvn] == "$HOME/.local/bin/mvn" ]]' \
+	> "$case_log" 2>&1 || fail 'Zsh login startup did not retain managed Java and Maven command precedence'
 pass
 
 case_label='Zsh local overrides run after defaults and before syntax highlighting'

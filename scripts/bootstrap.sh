@@ -33,6 +33,10 @@ uses --no-upgrade; only tools below the compatibility requirements are upgraded.
 Ubuntu uses packages.bash plus packages.desktop.bash and reuses compatible tools.
 On both platforms, compatible Go is reused; otherwise the latest stable Go is
 resolved from go.dev and installed from a SHA256-verified official archive.
+Likewise, a complete JDK 21+ is reused; otherwise the latest stable Eclipse
+Temurin JDK 25 is resolved from Adoptium and SHA256-verified. A stable Maven 3.9 release
+using that JDK is reused or the latest 3.9.x archive is resolved from Maven
+Central and SHA512-verified. Dry-run never performs these network lookups.
 Antidote and fonts use pinned archives on both platforms.
 Conflicting user-owned install paths and dirty plugin checkouts require manual review.
 No whole-system upgrade, configuration migration, account login, history import,
@@ -117,6 +121,7 @@ initialize_scratch
 preview_software
 preview_requirements
 say 'PLAN: reuse compatible Go; otherwise install the latest stable Go from go.dev (resolved only during --apply).'
+say 'PLAN: reuse a complete JDK 21+ and Maven 3.9; otherwise install the latest stable Temurin JDK 25 and verified Maven archive only during --apply.'
 if [[ $profile == desktop ]]; then
 	say 'PLAN: check/install IosevkaTerm Nerd Font and Sarasa Term SC (pinned upstream font archives).'
 fi
@@ -165,9 +170,12 @@ prepare_platform
 install_software
 if ! required_tool_ready go; then
 	run 'install latest stable Go' 1200 python3 -B "$script_dir/bootstrap/resources.py" install-go "$platform-$arch"
+	hash -r
 fi
+prepare_java_and_maven
 verify_requirements base
 verify_build_tools
+verify_java_build_tools
 
 phase='deployment'
 run 'deployment preflight' 120 "$BASH" "$script_dir/deploy.sh" --dry-run

@@ -250,8 +250,143 @@ version_ge() {
 	return 0
 }
 
+physical_directory() {
+	(cd -P -- "$1" 2> /dev/null && pwd -P)
+}
+
+java_jdk_ready() {
+	local minimum="$1" java_binary='' runtime_home='' output='' java_version='' javac_version='' line
+	local version_pattern='version "([0-9]+([.][0-9]+){0,3})'
+	local javac_pattern='javac[[:space:]]+([0-9]+([.][0-9]+){0,3})'
+	java_problem=''
+	selected_java_home=''
+	if [[ -n ${JAVA_HOME-} ]]; then
+		if [[ $JAVA_HOME != /* || ! -x $JAVA_HOME/bin/java ]]; then
+			java_problem="JAVA_HOME does not contain an executable bin/java: $JAVA_HOME"
+			return 1
+		fi
+		java_binary="$JAVA_HOME/bin/java"
+	else
+		java_binary=$(type -P java) || java_binary=''
+		if [[ -z $java_binary || ! -x $java_binary ]]; then
+			java_problem='java is unavailable on PATH and JAVA_HOME is unset'
+			return 1
+		fi
+	fi
+	if ! execute 12 probe "$java_binary" -XshowSettings:properties -version; then
+		java_problem="Java runtime query failed: $java_binary"
+		return 1
+	fi
+	output=$(cat "$scratch/probe.log" "$scratch/probe.err")
+	if [[ $output =~ $version_pattern ]]; then java_version="${BASH_REMATCH[1]}"; else
+		java_problem="Java runtime did not report a supported version: $java_binary"
+		return 1
+	fi
+	while IFS= read -r line; do
+		line="${line%$'\r'}"
+		case $line in *'java.home = '*)
+			runtime_home="${line#*java.home = }"
+			break
+			;;
+		esac
+	done < "$scratch/probe.err"
+	if [[ $runtime_home != /* || ! -x $runtime_home/bin/java || ! -x $runtime_home/bin/javac ]]; then
+		java_problem="selected Java is not a complete JDK: ${runtime_home:-unknown java.home}"
+		return 1
+	fi
+	if [[ -n ${JAVA_HOME-} && $(physical_directory "$JAVA_HOME") != "$(physical_directory "$runtime_home")" ]]; then
+		java_problem="JAVA_HOME and the selected Java runtime disagree: $JAVA_HOME / $runtime_home"
+		return 1
+	fi
+	if ! version_ge "$java_version" "$minimum"; then
+		java_problem="selected Java $java_version is older than $minimum"
+		return 1
+	fi
+	if ! execute 12 probe "$runtime_home/bin/javac" -version; then
+		java_problem="javac query failed in selected JDK: $runtime_home"
+		return 1
+	fi
+	output=$(cat "$scratch/probe.log" "$scratch/probe.err")
+	if [[ $output =~ $javac_pattern ]]; then javac_version="${BASH_REMATCH[1]}"; else
+		java_problem="javac did not report a supported version in selected JDK: $runtime_home"
+		return 1
+	fi
+	if [[ $javac_version != "$java_version" ]] || ! version_ge "$javac_version" "$minimum"; then
+		java_problem="java and javac versions disagree in selected JDK: $java_version / $javac_version"
+		return 1
+	fi
+	selected_java_home="$runtime_home"
+	return 0
+}
+
+activate_java_home() {
+	local home="$1" entry normalized=''
+	local -a entries=()
+	[[ $home == /* && -x $home/bin/java && -x $home/bin/javac ]] || return 1
+	JAVA_HOME="$home"
+	IFS=: read -r -a entries <<< "$PATH"
+	for entry in "${entries[@]}"; do
+		[[ $entry != "$JAVA_HOME/bin" && $entry != "$HOME/.local/bin" ]] || continue
+		normalized="${normalized:+$normalized:}$entry"
+	done
+	PATH="$JAVA_HOME/bin:$HOME/.local/bin${normalized:+:$normalized}"
+	export JAVA_HOME PATH
+}
+
+maven_ready() {
+	local minimum="$1" output version runtime='' line pattern='Apache Maven (3[.]9[.][0-9]+)([[:space:]]|$)'
+	maven_problem=''
+	if ! java_jdk_ready "$(required_minimum java)"; then
+		maven_problem="Java selection failed: $java_problem"
+		return 1
+	fi
+	tool_path=$(type -P mvn) || tool_path=''
+	if [[ -z $tool_path || ! -x $tool_path ]]; then
+		maven_problem='mvn is unavailable on PATH'
+		return 1
+	fi
+	if ! execute 15 probe env MAVEN_SKIP_RC=1 JAVA_HOME="$selected_java_home" PATH="$selected_java_home/bin:$PATH" "$tool_path" --version; then
+		maven_problem="Maven version query failed: $tool_path"
+		return 1
+	fi
+	output=$(cat "$scratch/probe.log" "$scratch/probe.err")
+	if [[ ! $output =~ $pattern ]]; then
+		maven_problem="Maven is not a stable 3.9.x release: $tool_path: ${output%%$'\n'*}"
+		return 1
+	fi
+	version="${BASH_REMATCH[1]}"
+	if ! version_ge "$version" "$minimum"; then
+		maven_problem="Maven $version is older than $minimum"
+		return 1
+	fi
+	while IFS= read -r line; do
+		line="${line%$'\r'}"
+		case $line in *'runtime: '*)
+			runtime="${line##*runtime: }"
+			break
+			;;
+		esac
+	done < <(cat "$scratch/probe.log" "$scratch/probe.err")
+	if [[ $runtime != /* || $(physical_directory "$runtime") != "$(physical_directory "$selected_java_home")" ]]; then
+		maven_problem="Maven runtime does not match selected JAVA_HOME: ${runtime:-missing runtime} / $selected_java_home"
+		return 1
+	fi
+	return 0
+}
+
 tool_ready() {
 	local name="$1" minimum="$2" output version
+	case $name in
+		java | javac)
+			java_jdk_ready "$minimum" || return 1
+			tool_path="$selected_java_home/bin/$name"
+			return 0
+			;;
+		mvn)
+			maven_ready "$minimum"
+			return
+			;;
+	esac
 	tool_path=$(type -P "$name") || tool_path=''
 	if [[ -z $tool_path && $name == fd ]]; then tool_path=$(type -P fdfind) || tool_path=''; fi
 	if [[ -z $tool_path && $name == ghostty && $platform == macos ]]; then
@@ -310,6 +445,16 @@ required_tool_ready() {
 	die "no compatibility requirement declared for command: $command"
 }
 
+required_minimum() {
+	local command="$1" name minimum scope target
+	while IFS=$'\t' read -r name minimum scope target; do
+		[[ $name == "$command" && ($target == any || $target == "$platform") ]] || continue
+		printf '%s\n' "$minimum"
+		return
+	done < "$script_dir/bootstrap/requirements.tsv"
+	die "no compatibility requirement declared for command: $command"
+}
+
 preview_requirements() {
 	local name minimum
 	while IFS=$'\t' read -r name minimum; do
@@ -318,8 +463,33 @@ preview_requirements() {
 			say "FOUND: $name ($tool_path; minimum $minimum)"
 		else
 			say "PLAN: $name >= $minimum is required by the selected configuration"
+			if [[ $name == java && -n ${java_problem-} ]]; then say "  Java selection: $java_problem"; fi
 		fi
 	done < <(requirements_for all)
+}
+
+prepare_java_and_maven() {
+	local managed="$target_dir/.local/share/dotfiles-bootstrap/jdk/current"
+	local java_minimum
+	java_minimum=$(required_minimum java)
+	if java_jdk_ready "$java_minimum"; then
+		activate_java_home "$selected_java_home" || die 'could not activate the selected JDK'
+	else
+		if [[ -x $managed/bin/java && -x $managed/bin/javac ]]; then activate_java_home "$managed"; fi
+		if ! java_jdk_ready "$java_minimum"; then
+			run 'install latest stable JDK 25' 1800 python3 -B "$script_dir/bootstrap/resources.py" install-jdk "$platform-$arch"
+			hash -r
+			activate_java_home "$managed" || die 'managed JDK installation did not publish a complete current JDK'
+		fi
+	fi
+	java_jdk_ready "$java_minimum" || die "JDK >= $java_minimum is still unavailable: ${java_problem:-unknown Java selection error}"
+	activate_java_home "$selected_java_home" || die 'could not activate the verified JDK'
+	if ! required_tool_ready mvn; then
+		run 'install latest stable Maven 3.9' 1200 python3 -B "$script_dir/bootstrap/resources.py" install-maven "$platform-$arch"
+		activate_java_home "$JAVA_HOME" || die 'could not restore the selected JDK after Maven installation'
+		hash -r
+	fi
+	required_tool_ready mvn || die "Maven 3.9 is still unavailable or does not use the selected JAVA_HOME: ${maven_problem:-unknown Maven selection error}"
 }
 
 verify_requirements() {
@@ -357,4 +527,51 @@ verify_build_tools() {
 		fi
 	done
 	say 'READY: npm and native C compilation/execution'
+}
+
+verify_java_build_tools() {
+	local source="$scratch/BootstrapJavaProbe.java" classes="$scratch/java-classes" pom="$scratch/pom.xml"
+	local user_settings="$scratch/maven-user-settings.xml" global_settings="$scratch/maven-global-settings.xml"
+	local user_toolchains="$scratch/maven-user-toolchains.xml" global_toolchains="$scratch/maven-global-toolchains.xml"
+	local repository="$scratch/maven-repository" java_path='' javac_path='' selected_bin=''
+	java_path=$(type -P java) || java_path=''
+	javac_path=$(type -P javac) || javac_path=''
+	selected_bin=$(physical_directory "$JAVA_HOME/bin") || selected_bin=''
+	if [[ -z $selected_bin || -z $java_path || -z $javac_path ]] ||
+		[[ $(physical_directory "${java_path%/*}") != "$selected_bin" ]] ||
+		[[ $(physical_directory "${javac_path%/*}") != "$selected_bin" ]]; then
+		die "PATH does not select java and javac from JAVA_HOME: ${java_path:-missing} / ${javac_path:-missing} / $JAVA_HOME"
+	fi
+	mkdir "$classes" "$repository"
+	cat > "$source" << 'JAVA'
+public final class BootstrapJavaProbe {
+    public static void main(String[] args) { System.out.println("java-bootstrap-ready"); }
+}
+JAVA
+	cat > "$pom" << 'XML'
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>local.bootstrap</groupId><artifactId>probe</artifactId><version>1</version>
+</project>
+XML
+	cat > "$user_settings" << 'XML'
+<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0" />
+XML
+	cp "$user_settings" "$global_settings"
+	cat > "$user_toolchains" << 'XML'
+<toolchains xmlns="http://maven.apache.org/TOOLCHAINS/1.1.0" />
+XML
+	cp "$user_toolchains" "$global_toolchains"
+	if ! execute 30 probe env JAVA_HOME="$JAVA_HOME" PATH="$JAVA_HOME/bin:$PATH" javac -d "$classes" "$source" ||
+		! execute 15 probe env JAVA_HOME="$JAVA_HOME" PATH="$JAVA_HOME/bin:$PATH" java -cp "$classes" BootstrapJavaProbe ||
+		! grep -Fxq 'java-bootstrap-ready' "$scratch/probe.log" ||
+		! execute 60 probe env MAVEN_SKIP_RC=1 JAVA_HOME="$JAVA_HOME" PATH="$JAVA_HOME/bin:$PATH" mvn \
+			--offline --quiet --settings "$user_settings" --global-settings "$global_settings" \
+			--toolchains "$user_toolchains" --global-toolchains "$global_toolchains" \
+			"-Dmaven.repo.local=$repository" --file "$pom" validate; then
+		cat "$scratch/probe.log" "$scratch/probe.err" >&2
+		cat "$scratch/probe.log" "$scratch/probe.err" >> "$log_file"
+		die 'required Java/Javac/Maven capability check failed'
+	fi
+	say "READY: Java compilation/execution and offline Maven validation ($JAVA_HOME)"
 }

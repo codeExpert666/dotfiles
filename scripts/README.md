@@ -80,10 +80,11 @@ doctor 检查源文件可读、目标为普通文件且内容一致；修改仓�
 
 ## bootstrap 的阶段与安装来源
 
-执行顺序：环境和版本预检 → 平台软件 → npm/C 编译能力 → deploy 预检及部署 → Zsh 插件
+执行顺序：环境和版本预检 → 平台软件 → Go/JDK/Maven 准备 → npm、C、Java/Maven 能力探针 → deploy 预检及部署 → Zsh 插件
 → Neovim 插件和工具 → 桌面资源 → 必需工具复查及 doctor → 清理并报告总体结果。
 
-预览只读取安装清单和查询现有命令，不调用包管理器或下载资源。版本查询有 8 秒时限，
+预览只读取安装清单和查询现有命令，不调用包管理器或下载资源。普通版本查询有 8 秒时限，
+Java 运行时属性和 Maven 版本查询分别有 12 秒与 15 秒时限，
 使用真实 PATH 选中的二进制，但 HOME/XDG、日志、临时文件及工作目录均隔离。
 Git/Stow 不满足要求时，部署预检延后到安装完成。预览退出时也清理私有临时目录。
 
@@ -99,6 +100,8 @@ Git/Stow 不满足要求时，部署预检延后到安装完成。预览退出�
 | macOS 软件                | [Brewfile](bootstrap/macos/Brewfile)、[Brewfile.desktop](bootstrap/macos/Brewfile.desktop)                       | 基础软件及 desktop 增量，静态 tap/formula/cask 声明                                   |
 | Ubuntu 软件               | [packages.bash](bootstrap/ubuntu/packages.bash)、[packages.desktop.bash](bootstrap/ubuntu/packages.desktop.bash) | apt 包、命令映射、上游资源和发行版差异                                                |
 | Go 工具链                 | [requirements.tsv](bootstrap/requirements.tsv)、[resources.py](bootstrap/resources.py) | 共用最低要求；缺失或不兼容时从 Go 官方解析最新稳定版与 SHA256 |
+| Java 工具链               | [requirements.tsv](bootstrap/requirements.tsv)、[resources.py](bootstrap/resources.py) | JDTLS 运行下限为 Java 21；bootstrap 要求完整 JDK，不满足时解析最新 Temurin 25 GA 与 SHA256 |
+| Maven                     | [requirements.tsv](bootstrap/requirements.tsv)、[resources.py](bootstrap/resources.py) | 共用 Maven 3.9 最低要求；缺失、不稳定或 runtime 不一致时从 Maven Central 解析最新 3.9.x 与 SHA512 |
 
 macOS 先检查 Command Line Tools 和 Homebrew；首次需要完成 Apple 安装窗口后重新运行。
 Brewfile 表示 Homebrew 管理的安装，即使 PATH 上已有其他来源的兼容命令，仍会补齐对应包。
@@ -124,6 +127,31 @@ Go 1.21 起支持[自动选择和下载工具链](https://go.dev/doc/toolchain)�
 更新版本时可由默认的 `GOTOOLCHAIN=auto` 获取；若个人配置禁用了自动切换，须自行准备
 这些模块要求的 Go 版本。bootstrap 不改写个人 Go 配置。
 
+Java 选择先尊重非空 `JAVA_HOME`，否则从 PATH 的 `java` 查询实际 `java.home`；只有同一 JDK
+中的 `java`、`javac` 都可执行、报告完全相同且不低于 21 的版本时才复用。这个下限来自
+[当前核对的 JDTLS v1.60.0 Java 21 运行要求](https://github.com/eclipse-jdtls/eclipse.jdt.ls/tree/v1.60.0#requirements)。无效或过旧的
+`JAVA_HOME`、仅有 JRE、版本不一致以及 macOS 的启动器都不会被误当作完整 JDK。需要准备时，
+`--apply` 查询 [Adoptium API](https://api.adoptium.net/v3/assets/latest/25/hotspot) 的 Eclipse
+Temurin JDK 25 正式版，验证平台、架构、JDK/HotSpot 元数据和官方 SHA256，再发布稳定入口
+`~/.local/share/dotfiles-bootstrap/jdk/current`。发布前同时验证 `bin/java` 和 `bin/javac`；
+损坏的新归档或旧缓存不会替换原有 `current`。完整 JDK 的其他 `bin` 工具通过
+`$JAVA_HOME/bin` 一并可用。
+
+Maven 只复用版本号严格匹配稳定 `3.9.x`、达到 3.9 最低要求且 runtime 与所选 JDK 相同的
+命令；RC、Maven 4 或使用其他 Java 的 Maven 会触发准备。`--apply` 从
+[Maven Central 元数据](https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/maven-metadata.xml)
+筛选数值最大的稳定 3.9.x，并用同一官方仓库的 SHA512 sidecar 校验归档，入口发布为
+`~/.local/bin/mvn`。Java 和 Maven 达标后的重跑保持离线，不追逐补丁版本；预览也不解析
+远端最新版。Java 查询、Maven 查询、编译、运行及离线 Maven validate 分别设有有限时限；
+Maven 探针禁用用户 RC，显式使用临时 user/global settings、user/global toolchains 与本地仓库，
+不读取或写入个人 `~/.m2`。Java 编译、运行和 Maven validate 的时限分别为 30、15 和 60 秒。
+
+受管 JDK 发布后，根 `.zshenv` 为所有新 Zsh 设置 `JAVA_HOME`，并让 `$JAVA_HOME/bin` 位于
+`~/.local/bin` 和其他 Java 之前；登录 Shell 在 `brew shellenv` 重排 PATH 后恢复同一顺序，
+因此受管 Maven 与完整 JDK 都保持可发现。启动文件只检查受管入口是否完整，不在每次启动时
+运行版本命令。仓库默认会覆盖继承的旧 `JAVA_HOME`；需要使用其他 JDK 时，可在
+`~/.config/zsh/local.zprofile` 中显式重设 `JAVA_HOME` 并同步调整 PATH，该文件在仓库默认之后加载。
+
 Ubuntu 复用兼容命令；需要时先安装 apt 包，再使用已声明的固定上游资源或后备资源。
 包名不等于命令名时，`apt_commands` 用 `包名|命令列表` 声明；空命令列表按 dpkg 状态判断。
 `release_commands` 描述一项资源提供的多个命令，例如 Node/npm；`apt_fallbacks` 只在 apt
@@ -131,8 +159,9 @@ Ubuntu 复用兼容命令；需要时先安装 apt 包，再使用已声明的�
 Ubuntu 24.04 的 Ghostty 使用固定的 mkasberg/ghostty-ubuntu 社区 deb，由 apt 处理依赖；
 26.04 使用发行版包，macOS 使用 Homebrew cask。
 
-上游归档先校验 SHA256，再在私有暂存目录准备并发布；已有有效缓存会复用。除按需解析的
-Go 最新稳定版外，上游归档版本由 `releases.json` 固定。Homebrew 初始
+上游归档先按资源声明校验后在私有暂存目录准备并发布；Maven 使用官方 SHA512，其余当前
+资源使用 SHA256，已有有效缓存会复用。除按需解析的 Go、JDK 25 和 Maven 3.9 最新稳定版外，
+上游归档版本由 `releases.json` 固定。Homebrew 初始
 安装脚本的提交和校验值保留在 macOS 安装器中，因为该阶段尚不能依赖 Python。
 字体按内部族名选择文件，并保留上游许可文件；Sarasa Term SC 的 7z 归档需要 7zz。
 
@@ -184,6 +213,9 @@ doctor 返回 `0` 表示没有 FAIL，`1` 表示健康检查失败，`2` 表示�
 整体计数在必要清理之后输出，单项故障不阻止其他独立检查。
 
 默认检查读取真实环境、受管链接和状态目录；权限检查不试写，也不读取历史内容。
+依赖检查会离线查询实际选择的 Java/Javac/Maven：Java 必须是完整且版本一致的 JDK 21+，
+非空 `JAVA_HOME` 必须与 PATH 和 `java.home` 一致，Maven 必须是稳定 3.9.x 且使用同一 runtime。
+这些查询在临时 HOME 中运行、跳过 Maven RC，并受普通 8 秒探针时限约束。
 Git 保留环境覆盖并检查配置来源；Zsh 解析配置及工具生成的初始化脚本；Neovim 禁止普通启动，
 只编译 Lua、解析 JSON、检查本地插件及工具。锁定 LazyVim 的最低版本说明无法在本地取得时会跳过，
 不联网获取。Starship 使用实际选中配置，Atuin/Shuck 使用所选配置的副本和临时状态。

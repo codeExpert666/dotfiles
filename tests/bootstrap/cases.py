@@ -246,6 +246,133 @@ class Orchestration(unittest.TestCase):
         self.assertTrue((self.bin / 'go').exists())
         self.assertTrue(any(event[0] == 'nvim' for event in self.events()))
 
+    def test_old_jdk_and_other_maven_series_install_before_neovim_and_reuse_offline(self):
+        self.env['BOOTSTRAP_TEST_OLD'] = 'java,mvn'
+        user_bin = self.home / '.local/bin'
+        user_bin.mkdir(parents=True)
+        for name in ('java', 'javac'):
+            shutil.copyfile(self.root / 'fixture.py', user_bin / name)
+            (user_bin / name).chmod(0o755)
+        user_toolchains = self.home / '.m2/toolchains.xml'
+        user_toolchains.parent.mkdir()
+        user_toolchains.write_text('<malformed personal toolchains>\n')
+        output = self.invoke('--apply', '--profile', 'server').stderr
+        self.assertIn('READY: Java compilation/execution and offline Maven validation', output)
+        events = self.events()
+        jdk = ['resources', 'install-jdk', 'linux-arm64']
+        maven = ['resources', 'install-maven', 'linux-arm64']
+        self.assertLess(events.index(jdk), events.index(maven))
+        self.assertLess(events.index(maven), next(index for index, event in enumerate(events) if event[0] == 'nvim'))
+        current = self.home / '.local/share/dotfiles-bootstrap/jdk/current'
+        self.assertTrue((current / 'bin/java').is_file())
+        self.assertTrue((current / 'bin/javac').is_file())
+        self.assertTrue((current / 'bin/jar').is_file(), 'the complete JDK bin directory must remain available')
+        self.assertEqual(user_toolchains.read_text(), '<malformed personal toolchains>\n')
+        shell = run([REAL_TOOLS['zsh'], '-d', '-c',
+                     'print -r -- "$JAVA_HOME"; print -r -- "$commands[java]"; '
+                     'print -r -- "$commands[javac]"; print -r -- "$commands[jar]"'], env=self.env, check=True)
+        self.assertEqual(shell.stdout.splitlines(), [str(current), str(current / 'bin/java'),
+                                                     str(current / 'bin/javac'), str(current / 'bin/jar')])
+        login = run([REAL_TOOLS['zsh'], '-d', '-l', '-c', 'print -r -- "$commands[mvn]"'],
+                    env=self.env, check=True)
+        self.assertEqual(login.stdout.strip(), str(self.home / '.local/bin/mvn'))
+        before = len(events)
+        self.invoke('--apply', '--profile', 'server')
+        self.assertFalse(any(event[:2] in (['resources', 'install-jdk'], ['resources', 'install-maven'])
+                             for event in self.events()[before:]))
+
+    def test_stale_java_home_is_replaced_by_managed_jdk(self):
+        bad = self.root / 'old-java'
+        (bad / 'bin').mkdir(parents=True)
+        for name in ('java', 'javac'):
+            shutil.copyfile(self.root / 'fixture.py', bad / 'bin' / name)
+            (bad / 'bin' / name).chmod(0o755)
+        self.env.update(JAVA_HOME=str(bad), BOOTSTRAP_TEST_OLD='java')
+        result = self.invoke('--apply', '--profile', 'server')
+        self.assertIn('READY: Java compilation/execution', result.stderr)
+        self.assertTrue(any(event[:2] == ['resources', 'install-jdk'] for event in self.events()))
+
+    def test_java_home_with_only_java_is_treated_as_incomplete_jre(self):
+        jre = self.root / 'jre-only'
+        (jre / 'bin').mkdir(parents=True)
+        shutil.copyfile(self.root / 'fixture.py', jre / 'bin/java')
+        (jre / 'bin/java').chmod(0o755)
+        self.env['JAVA_HOME'] = str(jre)
+        result = self.invoke('--apply', '--profile', 'server')
+        self.assertIn('READY: Java compilation/execution', result.stderr)
+        self.assertTrue(any(event[:2] == ['resources', 'install-jdk'] for event in self.events()))
+
+    def test_invalid_java_home_is_explained_in_offline_preview(self):
+        bad = self.root / 'invalid-java'
+        (bad / 'bin').mkdir(parents=True)
+        (bad / 'bin/java').write_text('#!/bin/sh\nexit 0\n')
+        self.env['JAVA_HOME'] = str(bad)
+        output = self.invoke('--profile', 'server').stderr
+        self.assertIn('JAVA_HOME does not contain an executable bin/java', output)
+        self.assertEqual(self.events(), [])
+
+    def test_maven_runtime_path_with_comma_is_reused(self):
+        home = self.root / 'jdk,with-comma'
+        (home / 'bin').mkdir(parents=True)
+        for name in ('java', 'javac'):
+            shutil.copyfile(self.root / 'fixture.py', home / 'bin' / name)
+            (home / 'bin' / name).chmod(0o755)
+        self.env['JAVA_HOME'] = str(home)
+        output = self.invoke('--profile', 'server').stderr
+        self.assertIn('FOUND: mvn', output)
+        self.assertNotIn('PLAN: mvn >=', output)
+        self.assertEqual(self.events(), [])
+
+    def test_java_four_component_version_and_matching_javac_are_required(self):
+        self.env.update(BOOTSTRAP_TEST_JAVA_VERSION='25.0.4.1', BOOTSTRAP_TEST_JAVAC_VERSION='25.0.4.1')
+        output = self.invoke('--profile', 'server').stderr
+        self.assertIn('FOUND: java', output)
+        self.assertIn('FOUND: javac', output)
+        self.env['BOOTSTRAP_TEST_JAVAC_VERSION'] = '25.0.4'
+        output = self.invoke('--profile', 'server').stderr
+        self.assertIn('PLAN: java >= 21.0.0', output)
+        self.assertIn('java and javac versions disagree', output)
+        self.assertEqual(self.events(), [])
+
+    def test_complete_jdk_21_and_24_are_reused_without_jdk_publication(self):
+        for version in ('21', '24.0.2'):
+            with self.subTest(version=version):
+                jdk = self.root / ('compatible-jdk-' + version)
+                (jdk / 'bin').mkdir(parents=True)
+                for name in ('java', 'javac'):
+                    shutil.copyfile(self.root / 'fixture.py', jdk / 'bin' / name)
+                    (jdk / 'bin' / name).chmod(0o755)
+                self.env.update(JAVA_HOME=str(jdk), BOOTSTRAP_TEST_JAVA_VERSION=version,
+                                BOOTSTRAP_TEST_JAVAC_VERSION=version)
+                before = len(self.events())
+                output = self.invoke('--apply', '--profile', 'server').stderr
+                self.assertIn('READY: Java compilation/execution', output)
+                self.assertFalse(any(event[:2] == ['resources', 'install-jdk']
+                                     for event in self.events()[before:]))
+                self.assertFalse((self.home / '.local/share/dotfiles-bootstrap/jdk/current').exists())
+
+    def test_maven_3_9_prerelease_is_replaced_by_stable_series(self):
+        jdk = self.root / 'external-jdk'
+        (jdk / 'bin').mkdir(parents=True)
+        for name in ('java', 'javac'):
+            shutil.copyfile(self.root / 'fixture.py', jdk / 'bin' / name)
+            (jdk / 'bin' / name).chmod(0o755)
+        self.env['JAVA_HOME'] = str(jdk)
+        self.env['BOOTSTRAP_TEST_MAVEN_VERSION'] = '3.9.99-rc-1'
+        self.invoke('--apply', '--profile', 'server')
+        self.assertTrue(any(event[:2] == ['resources', 'install-maven'] for event in self.events()))
+
+    def test_jdk_resolution_failure_stops_before_deployment_and_retries(self):
+        self.env.update(BOOTSTRAP_TEST_OLD='java', BOOTSTRAP_TEST_FAIL='install-jdk')
+        output = self.invoke('--apply', '--profile', 'server', success=1).stderr
+        self.assertIn('install latest stable JDK 25 failed', output)
+        self.assertIn('FAILED phase: software installation', output)
+        self.assertFalse((self.home / '.config/nvim/init.lua').exists())
+        self.assertFalse(any(event[0] in ('nvim', 'doctor') for event in self.events()))
+        self.env.pop('BOOTSTRAP_TEST_FAIL')
+        self.invoke('--apply', '--profile', 'server')
+        self.assertTrue((self.home / '.local/share/dotfiles-bootstrap/jdk/current/bin/javac').is_file())
+
     def test_xdg_override_rejected_before_install(self):
         self.env['XDG_CONFIG_HOME'] = str(self.root / 'elsewhere')
         self.invoke('--apply', '--profile', 'server', success=1)
@@ -1096,6 +1223,37 @@ class Publication(unittest.TestCase):
                 info.size, info.mode = len(content), 0o755
                 archive.addfile(info, io.BytesIO(content))
 
+    def jdk_release(self, key, release_name='jdk-25.0.4.1+1'):
+        jdk_os, arch = {'macos-arm64': ('mac', 'aarch64'), 'linux-arm64': ('linux', 'aarch64'),
+                        'linux-x86_64': ('linux', 'x64')}[key]
+        filename = f'OpenJDK25U-jdk_{arch}_{jdk_os}_hotspot_{release_name[4:].replace("+", "_")}.tar.gz'
+        return {'binary': {'architecture': arch, 'image_type': 'jdk', 'jvm_impl': 'hotspot', 'os': jdk_os,
+                           'package': {'checksum': resources.digest(self.archive), 'name': filename,
+                                       'link': 'https://example.test/' + filename}},
+                'release_name': release_name, 'vendor': 'eclipse',
+                'version': {'major': 25, 'openjdk_version': release_name[4:]}}
+
+    def jdk_archive(self, release_name, *, mac=False, include_javac=True):
+        home = release_name + ('/Contents/Home' if mac else '')
+        with tarfile.open(self.archive, 'w:gz') as archive:
+            for name in ('java', 'javac') if include_javac else ('java',):
+                info = tarfile.TarInfo(home + '/bin/' + name)
+                content = b'#!/bin/sh\nexit 0\n'
+                info.size, info.mode = len(content), 0o755
+                archive.addfile(info, io.BytesIO(content))
+
+    @staticmethod
+    def maven_metadata(*versions):
+        values = ''.join(f'<version>{version}</version>' for version in versions)
+        return '<metadata><versioning><latest>4.0.0-rc-5</latest><versions>' + values + '</versions></versioning></metadata>'
+
+    def maven_archive(self, version):
+        with tarfile.open(self.archive, 'w:gz') as archive:
+            info = tarfile.TarInfo(f'apache-maven-{version}/bin/mvn')
+            content = b'#!/bin/sh\nexit 0\n'
+            info.size, info.mode = len(content), 0o755
+            archive.addfile(info, io.BytesIO(content))
+
     def test_go_release_selects_latest_stable_numerically_for_each_platform(self):
         releases = [self.go_release('go1.27.9'), self.go_release('go1.9.9'),
                     self.go_release('go1.28rc1', stable=False), self.go_release('go1.27.10')]
@@ -1129,6 +1287,112 @@ class Publication(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'unsupported Go platform'):
                 resources.latest_go_release('linux-riscv64')
             lookup.assert_not_called()
+
+    def test_jdk_release_validates_official_latest_schema_and_platform_layout(self):
+        self.jdk_archive('jdk-25.0.4.1+1', mac=True)
+        for key, expected in (('macos-arm64', ('os=mac', 'architecture=aarch64', '/Contents/Home')),
+                              ('linux-arm64', ('os=linux', 'architecture=aarch64', 'jdk-25.0.4.1+1')),
+                              ('linux-x86_64', ('os=linux', 'architecture=x64', 'jdk-25.0.4.1+1'))):
+            release = self.jdk_release(key)
+            with self.subTest(platform=key), patch.object(resources, 'run', return_value=json.dumps([release])) as lookup:
+                item = resources.latest_jdk_release(key)
+                self.assertEqual(item['version'], 'jdk-25.0.4.1+1')
+                self.assertTrue(all(part in lookup.call_args.args[0][-1] for part in expected[:2]))
+                self.assertTrue(next(iter(item['links'].values())).endswith(expected[2]))
+                self.assertEqual(len(item['required_executables']), 2)
+
+    def test_jdk_release_rejects_early_access_incomplete_and_ambiguous_metadata(self):
+        self.jdk_archive('jdk-25.0.4.1+1')
+        valid = self.jdk_release('linux-arm64')
+        cases = []
+        early = dict(valid, release_name='jdk-25-ea+20')
+        cases.append(('early access', [early]))
+        jre = json.loads(json.dumps(valid))
+        jre['binary']['image_type'] = 'jre'
+        cases.append(('not a JDK', [jre]))
+        bad_hash = json.loads(json.dumps(valid))
+        bad_hash['binary']['package']['checksum'] = 'invalid'
+        cases.append(('bad checksum', [bad_hash]))
+        cases.append(('ambiguous', [valid, valid]))
+        for label, releases in cases:
+            with self.subTest(case=label), patch.object(resources, 'run', return_value=json.dumps(releases)):
+                with self.assertRaisesRegex(RuntimeError, 'JDK'):
+                    resources.latest_jdk_release('linux-arm64')
+        with patch.object(resources, 'run') as lookup:
+            with self.assertRaisesRegex(RuntimeError, 'unsupported JDK platform'):
+                resources.latest_jdk_release('linux-riscv64')
+            lookup.assert_not_called()
+
+    def test_maven_release_selects_latest_3_9_and_uses_sha512(self):
+        metadata = self.maven_metadata('3.9.9', '4.0.0-rc-5', '3.9.16', '3.10.0-beta-1', '3.9.15')
+        checksum = 'ab' * 64
+        with patch.object(resources, 'run', side_effect=[metadata, checksum]):
+            item = resources.latest_maven_release('linux-x86_64')
+        self.assertEqual(item['version'], '3.9.16')
+        self.assertEqual(item['assets']['linux-x86_64']['sha512'], checksum)
+        self.assertTrue(item['assets']['linux-x86_64']['url'].endswith('/3.9.16/apache-maven-3.9.16-bin.tar.gz'))
+        for metadata, checksum in ((self.maven_metadata('4.0.0-rc-5'), 'ab' * 64),
+                                   (self.maven_metadata('3.9.16'), 'invalid')):
+            with self.subTest(metadata=metadata, checksum=checksum), patch.object(
+                    resources, 'run', side_effect=[metadata, checksum]):
+                with self.assertRaisesRegex(RuntimeError, 'Maven'):
+                    resources.latest_maven_release('macos-arm64')
+
+    def test_jdk_publication_requires_complete_executable_payload_and_keeps_current(self):
+        self.jdk_archive('jdk-25.0.4.1+1')
+        release = self.jdk_release('linux-arm64')
+        def download(args, **kwargs):
+            if args[-1].startswith(resources.ADOPTIUM_RELEASES_URL):
+                return json.dumps([release])
+            shutil.copyfile(self.archive, args[args.index('--output') + 1])
+            return ''
+        with patch.object(resources, 'run', side_effect=download):
+            self.manager.install_jdk('linux-arm64')
+        current = self.manager.root / 'jdk/current'
+        previous = current.resolve()
+        self.assertTrue((current / 'bin/java').is_file())
+        self.assertTrue((current / 'bin/javac').is_file())
+        self.jdk_archive('jdk-25.0.5+2', include_javac=False)
+        release = self.jdk_release('linux-arm64', 'jdk-25.0.5+2')
+        with patch.object(resources, 'run', side_effect=download):
+            with self.assertRaisesRegex(RuntimeError, 'bin/javac'):
+                self.manager.install_jdk('linux-arm64')
+        self.assertEqual(current.resolve(), previous)
+        self.assertTrue(previous.exists())
+        cached = self.manager.root / 'jdk/jdk-25.0.5+2-linux-arm64'
+        java = cached / 'jdk-25.0.5+2/bin/java'
+        java.parent.mkdir(parents=True)
+        java.write_text('#!/bin/sh\nexit 0\n')
+        java.chmod(0o755)
+        (cached / '.ready.json').write_text(json.dumps({'sha256': resources.digest(self.archive)}) + '\n')
+        with patch.object(resources, 'run', return_value=json.dumps([release])):
+            with self.assertRaisesRegex(RuntimeError, 'bin/javac'):
+                self.manager.install_jdk('linux-arm64')
+        self.assertEqual(current.resolve(), previous, 'a damaged cached JDK must not replace current')
+
+    def test_maven_sha512_archive_is_verified_published_and_reused(self):
+        version = '3.9.16'
+        self.maven_archive(version)
+        metadata = self.maven_metadata('3.9.9', version)
+        checksum = resources.digest(self.archive, 'sha512')
+        def download(args, **kwargs):
+            if args[-1] == resources.MAVEN_METADATA_URL:
+                return metadata
+            if args[-1].endswith('.sha512'):
+                return checksum + '\n'
+            shutil.copyfile(self.archive, args[args.index('--output') + 1])
+            return ''
+        with patch.object(resources, 'run', side_effect=download) as downloads:
+            self.manager.install_maven('macos-arm64')
+            command = self.home / '.local/bin/mvn'
+            self.assertTrue(command.is_symlink())
+            self.assertEqual(run([str(command)]).returncode, 0)
+            receipt = self.manager.root / f'maven/{version}-macos-arm64/.ready.json'
+            self.assertEqual(json.loads(receipt.read_text()), {'sha512': checksum})
+            before = snapshot(self.home)
+            self.manager.install_maven('macos-arm64')
+            self.assertEqual(snapshot(self.home), before)
+            self.assertEqual(downloads.call_count, 5)  # 两次元数据/校验和解析，只下载一次归档。
 
     def test_latest_go_archive_is_verified_installed_and_reused(self):
         self.go_archive('go1.27.1')
@@ -1272,8 +1536,9 @@ class Publication(unittest.TestCase):
             self.assertIn(scope, ('base', 'desktop'))
             self.assertIn(platform, ('any', 'linux', 'macos'))
             requirements[name] = (scope, platform)
-        # Go 由共享入口解析官方最新稳定版，独立于各平台包清单。
-        self.assertEqual(requirements.pop('go'), ('base', 'any'))
+        # 共享入口解析官方 Go、JDK 与 Maven，独立于各平台包清单。
+        for name in ('go', 'java', 'javac', 'mvn'):
+            self.assertEqual(requirements.pop(name), ('base', 'any'))
         manifest = json.loads((REPO / 'scripts/bootstrap/releases.json').read_text())
         for scope in ('base', 'desktop'):
             for release in ('24.04', '26.04'):

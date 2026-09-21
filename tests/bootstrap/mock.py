@@ -171,6 +171,35 @@ elif name == 'resources-fixture':
     if args[0] == 'install-go':
         installed_commands('go', 'release')
         installed_commands('gofmt', 'release')
+    elif args[0] == 'install-jdk':
+        home = Path(os.environ['HOME']) / '.local/share/dotfiles-bootstrap/jdk' / ('jdk-25-fixture-' + args[1])
+        bin_directory = home / 'bin'
+        bin_directory.mkdir(parents=True, exist_ok=True)
+        for command in ('java', 'javac', 'jar', 'javadoc', 'jshell'):
+            shutil.copyfile(root / 'fixture.py', bin_directory / command)
+            (bin_directory / command).chmod(0o755)
+        for command in ('java', 'javac'):
+            (root / ('installed-' + command)).touch()
+        current = home.parent / 'current'
+        if current.is_symlink():
+            current.unlink()
+        elif current.exists():
+            raise RuntimeError('fixture JDK current path conflict')
+        current.symlink_to(home)
+    elif args[0] == 'install-maven':
+        home = Path(os.environ['HOME']) / '.local/share/dotfiles-bootstrap/maven' / ('3.9.99-' + args[1])
+        binary = home / 'apache-maven-3.9.99/bin/mvn'
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(root / 'fixture.py', binary)
+        binary.chmod(0o755)
+        (root / 'installed-mvn').touch()
+        link = Path(os.environ['HOME']) / '.local/bin/mvn'
+        link.parent.mkdir(parents=True, exist_ok=True)
+        if link.is_symlink():
+            link.unlink()
+        elif link.exists():
+            raise RuntimeError('fixture Maven command path conflict')
+        link.symlink_to(binary)
     elif args[0] == 'install':
         installed_commands(args[1], 'release')
         if args[1] == 'antidote':
@@ -210,6 +239,66 @@ elif name == 'go':
     incompatible = name in words('BOOTSTRAP_TEST_STUCK') or (
         name in old and not (root / ('installed-' + name)).exists())
     print('go version go' + ('1.20.14' if incompatible else '1.21.0') + ' linux/arm64')
+elif name == 'java':
+    old = words('BOOTSTRAP_TEST_OLD') | words('BOOTSTRAP_TEST_APT_OLD')
+    managed = '.local/share/dotfiles-bootstrap/jdk/' in str(Path(sys.argv[0]).resolve())
+    incompatible = name in words('BOOTSTRAP_TEST_STUCK') or (
+        name in old and not managed)
+    version = '20.0.2' if incompatible else os.environ.get('BOOTSTRAP_TEST_JAVA_VERSION', '25')
+    runtime = os.environ.get('BOOTSTRAP_TEST_JAVA_RUNTIME', str(Path(sys.argv[0]).resolve().parent.parent))
+    if args == ['-XshowSettings:properties', '-version']:
+        print('Property settings:\n    java.home = ' + runtime, file=sys.stderr)
+        print('openjdk version "' + version + '" fixture', file=sys.stderr)
+    elif '-cp' in args and args[-1] == 'BootstrapJavaProbe':
+        print('java-bootstrap-ready')
+    else:
+        print('fixture: unexpected java invocation ' + repr(args), file=sys.stderr)
+        sys.exit(2)
+elif name == 'javac':
+    old = words('BOOTSTRAP_TEST_OLD') | words('BOOTSTRAP_TEST_APT_OLD')
+    managed = '.local/share/dotfiles-bootstrap/jdk/' in str(Path(sys.argv[0]).resolve())
+    incompatible = name in words('BOOTSTRAP_TEST_STUCK') or (
+        name in old and not managed)
+    version = '20.0.2' if incompatible else os.environ.get(
+        'BOOTSTRAP_TEST_JAVAC_VERSION', os.environ.get('BOOTSTRAP_TEST_JAVA_VERSION', '25'))
+    if args == ['-version']:
+        print('javac ' + version)
+    elif '-d' in args:
+        output = Path(args[args.index('-d') + 1]) / 'BootstrapJavaProbe.class'
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b'fixture class')
+    else:
+        print('fixture: unexpected javac invocation ' + repr(args), file=sys.stderr)
+        sys.exit(2)
+elif name == 'mvn':
+    if not os.environ.get('JAVA_HOME') or not (Path(os.environ['JAVA_HOME']) / 'bin/java').is_file():
+        print('JAVA_HOME is invalid', file=sys.stderr)
+        sys.exit(1)
+    old = words('BOOTSTRAP_TEST_OLD') | words('BOOTSTRAP_TEST_APT_OLD')
+    managed = '.local/share/dotfiles-bootstrap/maven/' in str(Path(sys.argv[0]).resolve())
+    incompatible = name in words('BOOTSTRAP_TEST_STUCK') or (
+        name in old and not managed)
+    if args == ['--version']:
+        version = '4.0.0-rc-5' if incompatible else (
+            '3.9.99' if managed else os.environ.get('BOOTSTRAP_TEST_MAVEN_VERSION', '3.9.99'))
+        print('Apache Maven ' + version + ' (fixture)')
+        print('Java version: 25, vendor: Fixture, runtime: ' + str(Path(os.environ['JAVA_HOME']).resolve()))
+    elif 'validate' in args:
+        required = ('--offline', '--settings', '--global-settings', '--toolchains', '--global-toolchains', '--file')
+        if os.environ.get('MAVEN_SKIP_RC') != '1' or not all(option in args for option in required) or not any(
+                option.startswith('-Dmaven.repo.local=') for option in args):
+            print('fixture: Maven probe isolation is incomplete', file=sys.stderr)
+            sys.exit(2)
+        for option in ('--toolchains', '--global-toolchains'):
+            toolchains = Path(args[args.index(option) + 1])
+            if not toolchains.is_file() or '<toolchains ' not in toolchains.read_text():
+                print('fixture: Maven toolchains isolation is incomplete', file=sys.stderr)
+                sys.exit(2)
+        if os.environ.get('BOOTSTRAP_TEST_CAPABILITY_FAIL') == 'maven':
+            sys.exit(48)
+    else:
+        print('fixture: unexpected mvn invocation ' + repr(args), file=sys.stderr)
+        sys.exit(2)
 elif '--version' in args:
     if name == 'npm' and os.environ.get('BOOTSTRAP_TEST_CAPABILITY_FAIL') == 'npm':
         sys.exit(48)

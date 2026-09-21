@@ -75,6 +75,33 @@ class DoctorTests(unittest.TestCase):
         self.env["PATH"] = str(self.bindir) + os.pathsep + os.environ["PATH"]
         return path
 
+    def java_dependencies_fixture(self, *, java_version="25.0.4.1", javac_version=None,
+                                  maven_version="3.9.16", reported_home=None,
+                                  maven_runtime=None, java_home=True):
+        jdk = self.base / "fixture jdk"
+        binary = jdk / "bin"
+        binary.mkdir(parents=True, exist_ok=True)
+        reported = Path(reported_home) if reported_home is not None else jdk
+        runtime = Path(maven_runtime) if maven_runtime is not None else reported
+        java = binary / "java"
+        java.write_text("#!/bin/sh\n"
+                        "printf '%s\\n' " + shlex.quote("    java.home = " + str(reported)) + " >&2\n"
+                        "printf '%s\\n' " + shlex.quote('openjdk version "' + java_version + '" fixture') + " >&2\n")
+        java.chmod(0o755)
+        javac = binary / "javac"
+        javac.write_text("#!/bin/sh\nprintf '%s\\n' "
+                         + shlex.quote("javac " + (javac_version or java_version)) + "\n")
+        javac.chmod(0o755)
+        self.mock("mvn", "printf '%s\\n' " + shlex.quote("Apache Maven " + maven_version + " (fixture)")
+                  + "\nprintf '%s\\n' " + shlex.quote("Java version: " + java_version
+                                                         + ", vendor: Fixture, runtime: " + str(runtime)) + "\n")
+        self.env["PATH"] = str(binary) + os.pathsep + str(self.bindir) + os.pathsep + os.environ["PATH"]
+        if java_home:
+            self.env["JAVA_HOME"] = str(jdk)
+        else:
+            self.env.pop("JAVA_HOME", None)
+        return jdk
+
     def minimal_path(self, *extra):
         for name in ("uname", "mkdir", "mktemp", "rm", "sleep", "env", "cp", "cmp", "cat") + extra:
             path = shutil.which(name)
@@ -295,6 +322,72 @@ class DoctorTests(unittest.TestCase):
         self.minimal_path("stow")
         log = self.doctor("--only", "dependencies", code=1)
         self.assertIn("PASS dependencies.stow-capability", log)
+
+    def test_java_and_maven_dependencies_require_a_complete_consistent_toolchain(self):
+        jdk = self.java_dependencies_fixture()
+        self.mock("delta", "exit 7\n")
+        self.env["PATH"] = str(jdk / "bin") + os.pathsep + str(self.bindir) + os.pathsep + os.environ["PATH"]
+        log = self.doctor("--only", "dependencies", code=1)
+        self.assertIn("PASS dependencies.java: complete JDK 25.0.4.1 selected", log)
+        self.assertIn("PASS dependencies.javac", log)
+        self.assertIn("PASS dependencies.maven: Maven 3.9.16 uses the selected JDK", log)
+
+    def test_java_dependency_accepts_complete_jdk_21_and_24(self):
+        for version in ("21", "24.0.2"):
+            with self.subTest(version=version):
+                jdk = self.java_dependencies_fixture(java_version=version)
+                self.mock("delta", "exit 7\n")
+                self.env["PATH"] = (str(jdk / "bin") + os.pathsep + str(self.bindir)
+                                    + os.pathsep + os.environ["PATH"])
+                log = self.doctor("--only", "dependencies", code=1)
+                self.assertIn("PASS dependencies.java: complete JDK " + version + " selected", log)
+                self.assertIn("PASS dependencies.maven: Maven 3.9.16 uses the selected JDK", log)
+
+    def test_java_dependency_reports_missing_old_and_incomplete_jdks(self):
+        self.minimal_path()
+        self.env.pop("JAVA_HOME", None)
+        log = self.doctor("--only", "dependencies", code=1)
+        self.assertIn("FAIL dependencies.java: java is unavailable", log)
+
+        for version in ("17.0.12", "20.0.2"):
+            jdk = self.java_dependencies_fixture(java_version=version)
+            log = self.doctor("--only", "dependencies", code=1)
+            self.assertIn("FAIL dependencies.java: Java " + version + " is older", log)
+
+        (jdk / "bin/javac").unlink()
+        log = self.doctor("--only", "dependencies", code=1)
+        self.assertIn("FAIL dependencies.java-home: JAVA_HOME is not a complete JDK", log)
+
+    def test_java_dependency_reports_java_home_and_path_disagreement(self):
+        other = self.base / "reported jdk"
+        (other / "bin").mkdir(parents=True)
+        for name in ("java", "javac"):
+            path = other / "bin" / name
+            path.write_text("#!/bin/sh\nexit 0\n")
+            path.chmod(0o755)
+        self.java_dependencies_fixture(reported_home=other)
+        log = self.doctor("--only", "dependencies", code=1)
+        self.assertIn("FAIL dependencies.java-home: JAVA_HOME and the selected Java runtime disagree", log)
+
+        jdk = self.java_dependencies_fixture()
+        shadow = self.bindir / "java"
+        shadow.write_text("#!/bin/sh\nexit 0\n")
+        shadow.chmod(0o755)
+        self.env["PATH"] = str(self.bindir) + os.pathsep + str(jdk / "bin") + os.pathsep + os.environ["PATH"]
+        log = self.doctor("--only", "dependencies", code=1)
+        self.assertIn("FAIL dependencies.java-path: PATH does not select java and javac from JAVA_HOME", log)
+
+    def test_maven_dependency_rejects_prerelease_and_wrong_runtime(self):
+        self.java_dependencies_fixture(maven_version="3.9.16-rc-1")
+        log = self.doctor("--only", "dependencies", code=1)
+        self.assertIn("FAIL dependencies.maven:", log)
+        self.assertIn("not a stable Maven 3.9 release", log)
+
+        other = self.base / "other runtime"
+        other.mkdir()
+        self.java_dependencies_fixture(maven_runtime=other)
+        log = self.doctor("--only", "dependencies", code=1)
+        self.assertIn("FAIL dependencies.maven-runtime: Maven runtime does not match", log)
 
     def test_relative_path_and_config_keep_calling_directory_meaning(self):
         self.deploy()

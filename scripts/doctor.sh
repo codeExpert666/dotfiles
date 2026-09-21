@@ -3,7 +3,7 @@
 # 当前机器的诊断入口。默认只读取用户配置，所有探测输出写入私有临时目录。
 # Bash 3.2+；校验：bash -n、shellcheck；格式：shfmt -ci -sr。
 # 每项检查显式处理失败，不使用 set -e，以便一次报告所有独立问题。
-# shellcheck disable=SC2317 # check_* 函数由已验证的模块白名单动态调度。
+# shellcheck disable=SC2317,SC2329 # check_* 函数由已验证的模块白名单动态调度。
 unset CDPATH
 umask 077
 
@@ -48,6 +48,8 @@ Configuration queries use temporary state; actual path discovery and Git
 queries inspect the inherited environment. Explicit-path parsing is labeled
 separately from discovery and runtime validation. GUI rendering/clipboard
 and remote client fonts require manual verification.
+Dependency checks require a complete, consistent JDK 21+ for JDTLS and stable
+Maven 3.9.x using that JDK; their version and runtime queries remain offline.
 
 Requirements: Linux or macOS, Bash 3.2+, standard Unix utilities.
 Native checks without their application are skipped after reporting it missing.
@@ -476,8 +478,145 @@ check_deployment() {
 	fi
 }
 
+doctor_version_ge() {
+	local actual="$1" required="$2" actual_part required_part
+	while [[ -n $actual || -n $required ]]; do
+		actual_part="${actual%%.*}"
+		required_part="${required%%.*}"
+		[[ $actual_part != "$actual" ]] && actual="${actual#*.}" || actual=''
+		[[ $required_part != "$required" ]] && required="${required#*.}" || required=''
+		actual_part="${actual_part:-0}"
+		required_part="${required_part:-0}"
+		if ((10#$actual_part > 10#$required_part)); then return 0; fi
+		if ((10#$actual_part < 10#$required_part)); then return 1; fi
+	done
+	return 0
+}
+
+doctor_required_minimum() {
+	local wanted="$1" name minimum _scope target
+	while IFS=$'\t' read -r name minimum _scope target; do
+		[[ $name == "$wanted" && ($target == any || $target == "$platform") ]] || continue
+		printf '%s\n' "$minimum"
+		return 0
+	done < "$script_dir/bootstrap/requirements.tsv"
+	return 1
+}
+
+doctor_physical_directory() {
+	(cd -P -- "$1" 2> /dev/null && pwd -P)
+}
+
+check_java_dependencies() {
+	local java_minimum maven_minimum java_binary='' javac_binary='' maven_binary=''
+	local output='' java_version='' javac_version='' maven_version='' runtime_home='' maven_runtime='' line
+	local java_pattern='version "([0-9]+([.][0-9]+){0,3})' javac_pattern='javac[[:space:]]+([0-9]+([.][0-9]+){0,3})'
+	local maven_pattern='Apache Maven (3[.]9[.][0-9]+)([[:space:]]|$)'
+	java_minimum=$(doctor_required_minimum java) || {
+		report FAIL dependencies.java 'Java requirement is missing from bootstrap/requirements.tsv'
+		return
+	}
+	maven_minimum=$(doctor_required_minimum mvn) || {
+		report FAIL dependencies.maven 'Maven requirement is missing from bootstrap/requirements.tsv'
+		return
+	}
+	if [[ -n ${JAVA_HOME-} ]]; then
+		if [[ $JAVA_HOME != /* || ! -x $JAVA_HOME/bin/java || ! -x $JAVA_HOME/bin/javac ]]; then
+			report FAIL dependencies.java-home "JAVA_HOME is not a complete JDK: $JAVA_HOME" 'Run bootstrap to prepare Temurin JDK 25, or point JAVA_HOME at a complete JDK 21+ with java and javac.'
+			return
+		fi
+		java_binary="$JAVA_HOME/bin/java"
+	else
+		java_binary=$(type -P java) || java_binary=''
+		if [[ -z $java_binary || ! -x $java_binary ]]; then
+			report FAIL dependencies.java 'java is unavailable and JAVA_HOME is unset' 'Run bootstrap to prepare the latest stable Temurin JDK 25.'
+			return
+		fi
+	fi
+	if ! clean_probe 8 "$java_binary" -XshowSettings:properties -version; then
+		native_error dependencies.java "$java_binary could not report its runtime properties" 'Repair this Java installation or rerun bootstrap.'
+		return
+	fi
+	output=$(cat "$probe_stdout" "$probe_stderr")
+	if [[ $output =~ $java_pattern ]]; then java_version="${BASH_REMATCH[1]}"; fi
+	while IFS= read -r line; do
+		line="${line%$'\r'}"
+		case $line in *'java.home = '*)
+			runtime_home="${line#*java.home = }"
+			break
+			;;
+		esac
+	done < "$probe_stderr"
+	if [[ -z $java_version ]]; then
+		report FAIL dependencies.java "$java_binary did not report a supported Java version" 'Repair this Java installation or rerun bootstrap.'
+		return
+	fi
+	if [[ $runtime_home != /* || ! -x $runtime_home/bin/java || ! -x $runtime_home/bin/javac ]]; then
+		report FAIL dependencies.java-home "selected Java is not a complete JDK: ${runtime_home:-missing java.home}" 'Run bootstrap to prepare Temurin JDK 25, or select a complete JDK 21+ with both java and javac.'
+		return
+	fi
+	if [[ -n ${JAVA_HOME-} && $(doctor_physical_directory "$JAVA_HOME") != "$(doctor_physical_directory "$runtime_home")" ]]; then
+		report FAIL dependencies.java-home "JAVA_HOME and the selected Java runtime disagree: $JAVA_HOME / $runtime_home" 'Point JAVA_HOME at the JDK reported by java.home, or rerun bootstrap.'
+		return
+	fi
+	if ! doctor_version_ge "$java_version" "$java_minimum"; then
+		report FAIL dependencies.java "Java $java_version is older than required $java_minimum for JDTLS" 'Run bootstrap to prepare the latest stable Temurin JDK 25.'
+		return
+	fi
+	javac_binary="$runtime_home/bin/javac"
+	if ! clean_probe 8 "$javac_binary" -version; then
+		native_error dependencies.javac "$javac_binary could not report its version" 'Repair the selected JDK or rerun bootstrap.'
+		return
+	fi
+	output=$(cat "$probe_stdout" "$probe_stderr")
+	if [[ $output =~ $javac_pattern ]]; then javac_version="${BASH_REMATCH[1]}"; fi
+	if [[ -z $javac_version || $javac_version != "$java_version" ]] || ! doctor_version_ge "${javac_version:-0}" "$java_minimum"; then
+		report FAIL dependencies.javac "java and javac versions disagree or are too old: $java_version / ${javac_version:-unknown}" 'Use java and javac from the same complete JDK 21+ installation.'
+		return
+	fi
+	if [[ -n ${JAVA_HOME-} ]]; then
+		java_binary=$(type -P java) || java_binary=''
+		javac_binary=$(type -P javac) || javac_binary=''
+		if [[ -z $java_binary || -z $javac_binary || ! $java_binary -ef $runtime_home/bin/java || ! $javac_binary -ef $runtime_home/bin/javac ]]; then
+			report FAIL dependencies.java-path "PATH does not select java and javac from JAVA_HOME: ${java_binary:-missing} / ${javac_binary:-missing}" "Put \$JAVA_HOME/bin before other Java command directories in PATH."
+			return
+		fi
+	fi
+	report PASS dependencies.java "complete JDK $java_version selected from $runtime_home"
+	report PASS dependencies.javac "$javac_binary matches the selected Java runtime"
+	maven_binary=$(type -P mvn) || maven_binary=''
+	if [[ -z $maven_binary || ! -x $maven_binary ]]; then
+		report FAIL dependencies.maven 'mvn is unavailable on PATH' 'Run bootstrap to prepare the latest stable Maven 3.9 release.'
+		return
+	fi
+	if ! clean_probe 8 env MAVEN_SKIP_RC=1 JAVA_HOME="$runtime_home" PATH="$runtime_home/bin:$PATH" "$maven_binary" --version; then
+		native_error dependencies.maven "$maven_binary could not report its version" 'Repair Maven or rerun bootstrap.'
+		return
+	fi
+	output=$(cat "$probe_stdout" "$probe_stderr")
+	if [[ $output =~ $maven_pattern ]]; then maven_version="${BASH_REMATCH[1]}"; fi
+	if [[ -z $maven_version ]] || ! doctor_version_ge "$maven_version" "$maven_minimum"; then
+		report FAIL dependencies.maven "$maven_binary is not a stable Maven 3.9 release at or above $maven_minimum" 'Run bootstrap to prepare the latest stable Maven 3.9 release.'
+		return
+	fi
+	while IFS= read -r line; do
+		line="${line%$'\r'}"
+		case $line in *'runtime: '*)
+			maven_runtime="${line##*runtime: }"
+			break
+			;;
+		esac
+	done < <(cat "$probe_stdout" "$probe_stderr")
+	if [[ $maven_runtime != /* || $(doctor_physical_directory "$maven_runtime") != "$(doctor_physical_directory "$runtime_home")" ]]; then
+		report FAIL dependencies.maven-runtime "Maven runtime does not match the selected JDK: ${maven_runtime:-missing runtime} / $runtime_home" 'Ensure mvn uses JAVA_HOME, then rerun bootstrap if the installation remains inconsistent.'
+		return
+	fi
+	report PASS dependencies.maven "Maven $maven_version uses the selected JDK ($maven_binary)"
+}
+
 check_dependencies() {
 	local name severity version location alternatives alternative distinct
+	check_java_dependencies
 	for name in git stow zsh nvim delta vim lazygit fzf atuin zoxide starship shuck rg fd curl node cc tree-sitter shellcheck shfmt; do
 		severity=WARN
 		case $name in git | zsh | nvim | delta) severity=FAIL ;; esac

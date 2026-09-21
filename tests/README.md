@@ -53,6 +53,13 @@ Homebrew 替身检查第三方 formula 的显式信任，并区分 Tree-sitter �
 Go 用例覆盖 `go version` 探测、缺少或版本过旧时在 Neovim 准备前安装官方最新版、达标
 时不解析版本，以及失败停止和重跑复用。官方元数据与本地归档夹具覆盖稳定版排序、平台
 选择、无效元数据、下载校验、入口发布及失败时保留旧安装；这些用例不访问真实下载服务。
+JDK/Maven 用例同样使用本地元数据和小型归档：覆盖缺失、旧版、仅 JRE、Java/Javac 不一致、
+无效 `JAVA_HOME`、完整 JDK 21/24 的离线复用、低于 21 时安装 JDK 25、稳定版筛选、
+SHA256/SHA512 校验、损坏缓存不发布、失败重试及离线复用。
+能力探针还检查实际 PATH 选择、Java 编译执行和隔离的离线 Maven validate。doctor 夹具覆盖
+完整 JDK、PATH/JAVA_HOME/java.home 分歧、Maven 预发布版及 runtime 分歧；配置加载套件确认
+新非交互和登录 Zsh 选择受管 JDK 全部命令与 `~/.local/bin/mvn`。这些替身证明编排和失败
+传播，不代替真实官方归档、原生 JVM/Maven 或目标平台首次下载验收。
 Zsh 准备用例在真实伪终端中调用原生 Zsh，以嵌套进程的 `read -d` 复现 Antidote 的终端
 操作，并验证缓存发布、前台终端保留，以及后台任务超时和 Ctrl-C 后的子进程清理。
 Neovim 的常规配置检查涵盖配置发现、语法和离线选项，不启动插件安装。

@@ -11,6 +11,13 @@ typeset -U path PATH
 [[ -d /usr/local/bin ]] && path=(/usr/local/bin $path)
 [[ -d /opt/homebrew/bin ]] && path=(/opt/homebrew/bin $path)
 [[ -d "$HOME/.local/bin" ]] && path=("$HOME/.local/bin" $path)
+
+managed_java_home="$HOME/.local/share/dotfiles-bootstrap/jdk/current"
+if [[ -x "$managed_java_home/bin/java" && -x "$managed_java_home/bin/javac" ]]; then
+	export JAVA_HOME="$managed_java_home"
+	path=("$JAVA_HOME/bin" $path)
+fi
+unset managed_java_home
 export PATH
 
 # nvim 从默认 ~/.config/nvim 加载 LazyVim；子进程和 sudoedit 使用同一编辑入口。

@@ -19,11 +19,15 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import urllib.parse
 import zipfile
+import xml.etree.ElementTree as ElementTree
 
 
 HERE = Path(__file__).resolve().parent
 GO_RELEASES_URL = 'https://go.dev/dl/?mode=json'
+ADOPTIUM_RELEASES_URL = 'https://api.adoptium.net/v3/assets/latest/25/hotspot'
+MAVEN_METADATA_URL = 'https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/maven-metadata.xml'
 
 
 # ===== 命令执行、路径检查与归档解压 =====
@@ -49,8 +53,10 @@ def real_directory(path):
     path.mkdir(mode=0o700)
 
 
-def digest(path):
-    result = hashlib.sha256()
+def digest(path, algorithm='sha256'):
+    if algorithm not in ('sha256', 'sha512'):
+        raise RuntimeError(f'unsupported checksum algorithm: {algorithm}')
+    result = hashlib.new(algorithm)
     with path.open('rb') as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b''):
             result.update(chunk)
@@ -173,6 +179,88 @@ def latest_go_release(key):
             'assets': {key: {'url': 'https://go.dev/dl/' + filename, 'sha256': asset['sha256']}}}
 
 
+def latest_jdk_release(key):
+    platforms = {'macos-arm64': ('mac', 'aarch64'),
+                 'linux-arm64': ('linux', 'aarch64'), 'linux-x86_64': ('linux', 'x64')}
+    if key not in platforms:
+        raise RuntimeError(f'unsupported JDK platform: {key}')
+    jdk_os, jdk_arch = platforms[key]
+    url = (ADOPTIUM_RELEASES_URL + '?architecture=' + jdk_arch
+           + '&image_type=jdk&os=' + jdk_os + '&vendor=eclipse')
+    releases = json.loads(run(
+        ['curl', '--fail', '--silent', '--show-error', '--location', '--proto', '=https',
+         '--proto-redir', '=https', '--retry', '2', '--connect-timeout', '15', '--max-time', '30',
+         '--max-filesize', '2097152', url], timeout=120))
+    if not isinstance(releases, list) or len(releases) != 1 or not isinstance(releases[0], dict):
+        raise RuntimeError(f'expected one official JDK 25 release for {key}')
+    release = releases[0]
+    version = release.get('version')
+    binary = release.get('binary')
+    if (release.get('vendor') != 'eclipse' or release.get('release_type', 'ga') != 'ga'
+            or not isinstance(version, dict) or version.get('major') != 25
+            or not isinstance(binary, dict) or binary.get('architecture') != jdk_arch
+            or binary.get('os') != jdk_os or binary.get('image_type') != 'jdk'
+            or binary.get('jvm_impl') != 'hotspot'):
+        raise RuntimeError(f'invalid JDK 25 release metadata for {key}')
+    release_name = release.get('release_name')
+    if not isinstance(release_name, str) or not re.fullmatch(r'jdk-25(?:\.\d+){0,3}\+\d+', release_name):
+        raise RuntimeError(f'invalid JDK 25 release name for {key}')
+    package = binary.get('package')
+    if not isinstance(package, dict):
+        raise RuntimeError(f'invalid JDK 25 package metadata for {key}')
+    package_url, filename, checksum = package.get('link'), package.get('name'), package.get('checksum')
+    if (not isinstance(package_url, str) or not package_url.startswith('https://')
+            or not isinstance(filename, str) or not re.fullmatch(r'[A-Za-z0-9_.+()-]+\.tar\.gz', filename)
+            or urllib.parse.unquote(PurePosixPath(urllib.parse.urlparse(package_url).path).name) != filename
+            or not isinstance(checksum, str) or not re.fullmatch(r'[a-f0-9]{64}', checksum)):
+        raise RuntimeError(f'invalid JDK 25 archive metadata for {key}')
+    home = release_name + ('/Contents/Home' if jdk_os == 'mac' else '')
+    return {'version': release_name, 'source': url, 'kind': 'archive',
+            'links': {'.local/share/dotfiles-bootstrap/jdk/current': home},
+            'required_executables': [home + '/bin/java', home + '/bin/javac'],
+            'assets': {key: {'url': package_url, 'sha256': checksum}}}
+
+
+def latest_maven_release(key):
+    if key not in ('macos-arm64', 'linux-arm64', 'linux-x86_64'):
+        raise RuntimeError(f'unsupported Maven platform: {key}')
+    xml = run(
+        ['curl', '--fail', '--silent', '--show-error', '--location', '--proto', '=https',
+         '--proto-redir', '=https', '--retry', '2', '--connect-timeout', '15', '--max-time', '30',
+         '--max-filesize', '1048576', MAVEN_METADATA_URL], timeout=120)
+    try:
+        root = ElementTree.fromstring(xml)
+    except ElementTree.ParseError as error:
+        raise RuntimeError(f'invalid Maven release metadata: {error}') from error
+    versions = [element.text for element in root.findall('./versioning/versions/version')
+                if isinstance(element.text, str) and re.fullmatch(r'3\.9\.\d+', element.text)]
+    if not versions:
+        raise RuntimeError('Maven release metadata contains no stable 3.9 release')
+    version = max(versions, key=lambda item: tuple(int(part) for part in item.split('.')))
+    filename = f'apache-maven-{version}-bin.tar.gz'
+    base = f'https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/{version}/'
+    checksum = run(
+        ['curl', '--fail', '--silent', '--show-error', '--location', '--proto', '=https',
+         '--proto-redir', '=https', '--retry', '2', '--connect-timeout', '15', '--max-time', '30',
+         '--max-filesize', '1024', base + filename + '.sha512'], timeout=120).strip().lower()
+    if not re.fullmatch(r'[a-f0-9]{128}', checksum):
+        raise RuntimeError(f'invalid Maven SHA512 for {version}')
+    return {'version': version, 'source': MAVEN_METADATA_URL, 'kind': 'archive',
+            'links': {'.local/bin/mvn': f'apache-maven-{version}/bin/mvn'},
+            'assets': {key: {'url': base + filename, 'sha512': checksum}}}
+
+
+def asset_checksum(asset):
+    checksums = [(name, asset[name]) for name in ('sha256', 'sha512') if name in asset]
+    if len(checksums) != 1:
+        raise RuntimeError('resource must declare exactly one supported checksum')
+    algorithm, expected = checksums[0]
+    length = 64 if algorithm == 'sha256' else 128
+    if not isinstance(expected, str) or not re.fullmatch(rf'[a-f0-9]{{{length}}}', expected):
+        raise RuntimeError(f'invalid {algorithm.upper()} checksum')
+    return algorithm, expected
+
+
 class Resources:
     def __init__(self, home=None, manifest=None):
         self.home = Path(home or os.environ['HOME']).resolve(strict=True)
@@ -182,14 +270,14 @@ class Resources:
 
     def fetch(self, name, key):
         item = self.manifest[name]['assets'][key]
-        sha = item['sha256']
-        if not re.fullmatch(r'[a-f0-9]{64}', sha) or not item['url'].startswith('https://'):
+        algorithm, expected = asset_checksum(item)
+        if not isinstance(item.get('url'), str) or not item['url'].startswith('https://'):
             raise RuntimeError(f"invalid pinned resource: {name}/{key}")
         real_directory(self.cache)
-        cached = self.cache / sha
+        cached = self.cache / expected
         if cached.is_symlink() or (cached.exists() and not cached.is_file()):
             raise RuntimeError(f"invalid download cache entry: {cached}")
-        if cached.exists() and digest(cached) == sha:
+        if cached.exists() and digest(cached, algorithm) == expected:
             return cached
         with tempfile.TemporaryDirectory(prefix='.download-', dir=self.cache) as temporary:
             path = Path(temporary) / 'asset'
@@ -197,8 +285,8 @@ class Resources:
             run(['curl', '--fail', '--silent', '--show-error', '--location', '--proto', '=https',
                  '--proto-redir', '=https', '--retry', '2', '--connect-timeout', '15', '--max-time', '900',
                  '--output', str(path), item['url']], timeout=1000)
-            if digest(path) != sha:
-                raise RuntimeError(f"SHA256 mismatch for {name}; downloaded content was not installed")
+            if digest(path, algorithm) != expected:
+                raise RuntimeError(f"{algorithm.upper()} mismatch for {name}; downloaded content was not installed")
             path.replace(cached)
         return cached
 
@@ -228,13 +316,20 @@ class Resources:
             raise RuntimeError(f"expected exactly one payload path {suffix}, found {len(matches)}")
         return matches[0]
 
+    def validate_required_executables(self, item, root):
+        for suffix in item.get('required_executables', []):
+            path = self.locate(root, suffix)
+            if not path.is_file() or not path.stat().st_mode & 0o111:
+                raise RuntimeError(f'required payload is not executable: {suffix}')
+
     def install(self, name, key):
         item = self.manifest[name]
         for relative in item.get('links', {}):
             self.check_link(self.home / relative)
         real_directory(self.root / name)
         destination = self.root / name / (item['version'] + '-' + key)
-        receipt = {'sha256': item['assets'][key]['sha256']}
+        algorithm, expected = asset_checksum(item['assets'][key])
+        receipt = {algorithm: expected}
         if destination.is_symlink():
             raise RuntimeError(f"invalid managed installation: {destination}")
         if destination.exists():
@@ -250,8 +345,10 @@ class Resources:
                     path = self.locate(staged, suffix)
                     if relative.startswith('.local/bin/'):
                         path.chmod(path.stat().st_mode | 0o111)
+                self.validate_required_executables(item, staged)
                 (staged / '.ready.json').write_text(json.dumps(receipt) + '\n')
                 staged.rename(destination)
+        self.validate_required_executables(item, destination)
         for relative, suffix in item.get('links', {}).items():
             self.link(self.home / relative, self.locate(destination, suffix))
         print(f"Prepared {name} {item['version']}: {destination}")
@@ -259,6 +356,14 @@ class Resources:
     def install_go(self, key):
         self.manifest['go'] = latest_go_release(key)
         self.install('go', key)
+
+    def install_jdk(self, key):
+        self.manifest['jdk'] = latest_jdk_release(key)
+        self.install('jdk', key)
+
+    def install_maven(self, key):
+        self.manifest['maven'] = latest_maven_release(key)
+        self.install('maven', key)
 
     def font_families(self, platform):
         if platform == 'linux':
@@ -394,6 +499,10 @@ def main():
         resources.install(*args)
     elif command == 'install-go':
         resources.install_go(*args)
+    elif command == 'install-jdk':
+        resources.install_jdk(*args)
+    elif command == 'install-maven':
+        resources.install_maven(*args)
     elif command == 'fetch':
         source = resources.fetch(args[0], args[1])
         # 调用方提供私有临时目录内的目标路径。
