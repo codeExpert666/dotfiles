@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.parse
 import zipfile
 import xml.etree.ElementTree as ElementTree
@@ -365,9 +366,9 @@ class Resources:
         self.manifest['maven'] = latest_maven_release(key)
         self.install('maven', key)
 
-    def font_families(self, platform):
+    def font_families(self, platform, family, *, timeout=30):
         if platform == 'linux':
-            output = run(['fc-list', '--format=%{family}\n'], timeout=30)
+            output = run(['fc-list', '--format=%{family}\n'], timeout=timeout)
             return {part.strip() for line in output.splitlines() for part in line.split(',')}
         binary = shutil.which('ghostty')
         if not binary:
@@ -375,22 +376,45 @@ class Resources:
                           self.home / 'Applications/Ghostty.app/Contents/MacOS/ghostty'] if path.is_file()), None)
         if not binary:
             raise RuntimeError('Ghostty font enumerator unavailable')
-        return {line.strip() for line in run([binary, '+list-fonts'], timeout=30).splitlines()}
+        # 默认列表只显示等宽字体；按族名查询与 Ghostty 的 font-family 配置一致。
+        output = run([binary, '+list-fonts', '--family=' + family], timeout=timeout)
+        # 无缩进的行是族名，缩进的样式名不能作为族名匹配。
+        return {line.strip() for line in output.splitlines() if line and not line[0].isspace()}
+
+    def wait_for_font(self, platform, family):
+        if platform != 'macos':
+            return family in self.font_families(platform, family)
+        # 字体目录发布后，macOS 的字体服务可能还未发现新文件。
+        # 仅重试成功查询但缺少目标族名的情况；命令错误仍直接报告。
+        deadline = time.monotonic() + 30
+        waiting = False
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            if family in self.font_families(platform, family, timeout=remaining):
+                return True
+            if not waiting:
+                print(f"Waiting for macOS font discovery: {family}", flush=True)
+                waiting = True
+            time.sleep(min(1, max(0, deadline - time.monotonic())))
 
     def font(self, name, platform):
         family = self.manifest[name]['family']
-        if family in self.font_families(platform):
+        if family in self.font_families(platform, family):
             print(f"Font family present: {family}")
             return
         base = self.home / ('.local/share/fonts' if platform == 'linux' else 'Library/Fonts')
         destination = base / 'dotfiles-bootstrap' / name
         real_directory(destination.parent)
-        if platform == 'linux' and destination.is_dir() and not destination.is_symlink() and (destination / '.ready.json').is_file():
+        if destination.is_dir() and not destination.is_symlink() and (destination / '.ready.json').is_file():
             receipt = json.loads((destination / '.ready.json').read_text())
             if receipt.get('family') == family:
-                run(['fc-cache', '-f', str(destination)], timeout=120)
-                if family in self.font_families(platform):
-                    print(f"Font cache restored: {family}")
+                if platform == 'linux':
+                    run(['fc-cache', '-f', str(destination)], timeout=120)
+                if self.wait_for_font(platform, family):
+                    message = 'Font cache restored' if platform == 'linux' else 'Font family present'
+                    print(f"{message}: {family}")
                     return
         if destination.exists() or destination.is_symlink():
             raise RuntimeError(f"font directory exists but family is unavailable: {destination}; inspect it and the font cache")
@@ -417,8 +441,8 @@ class Resources:
             selected.rename(destination)
         if platform == 'linux':
             run(['fc-cache', '-f', str(destination)], timeout=120)
-        if family not in self.font_families(platform):
-            raise RuntimeError(f"font files installed but {family} is not enumerated; refresh the desktop font service and rerun")
+        if not self.wait_for_font(platform, family):
+            raise RuntimeError(f"font files installed but {family} is not enumerated: {destination}; check the desktop font service and rerun")
         print(f"Font family prepared: {family}")
 
 

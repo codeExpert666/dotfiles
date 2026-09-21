@@ -45,9 +45,15 @@ Bash 入口和支持文件保持 Bash 3.2 语法，Python 需要 3.9+。
 未安装的可选应用（Neovim、Shuck、Lazygit/delta、Starship、Atuin、Ghostty）会明确标为
 `SKIP`。已安装但无法完成验证的应用会报错。Ghostty 检查仅验证配置解析，图形效果仍需
 在对应桌面环境查看。
+macOS 的 Ghostty 检查同时查找 PATH 和系统、用户的 `Applications/Ghostty.app`，避免
+应用已安装却因缺少 PATH 入口而跳过；校验使用 `+validate-config --config-file=...`。
 
 常规回归不安装系统软件或下载插件，使用包管理器替身和本地归档。macOS 模拟同时替换
 副本中的固定 Homebrew 路径，以免误调用宿主包管理器；模拟分支不代表原生 macOS 验证。
+字体用例模拟 Ghostty 默认列表遗漏、按族名查询可用的情况，覆盖安装后验收、重跑复用、
+精确族名与样式名区分、查询失败后的独立诊断，以及 Linux fontconfig 别名匹配。
+macOS 首次发布后的延迟发现、发现超时保留文件及重跑恢复使用虚拟时钟验证；原生命令
+错误直接失败，Linux 缓存刷新不会进入 macOS 的等待流程。
 Homebrew 替身检查第三方 formula 的显式信任，并区分 Tree-sitter 库与 CLI；用例覆盖
 信任失败后重跑、仅有库时补装 CLI，以及 CLI 版本不兼容时的定向升级。
 Go 用例覆盖 `go version` 探测、缺少或版本过旧时在 Neovim 准备前安装官方最新版、达标

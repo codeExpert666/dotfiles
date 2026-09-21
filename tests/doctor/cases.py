@@ -308,9 +308,18 @@ class DoctorTests(unittest.TestCase):
 
     def test_missing_optional_application(self):
         self.minimal_path()
-        log = self.doctor("--only", "ghostty")
-        self.assertIn("WARN ghostty.command", log)
+        # 选择仅从 PATH 查找的应用；Ghostty 还可能来自宿主的 /Applications。
+        log = self.doctor("--only", "starship")
+        self.assertIn("WARN starship.command", log)
         self.assertIn("FAIL=0", log)
+
+    def test_ghostty_validation_uses_explicit_config_without_unsupported_flags(self):
+        self.deploy()
+        config = self.target / '.config/ghostty/config.ghostty'
+        self.mock('ghostty', 'test "$#" -eq 2 && test "$1" = +validate-config && test "$2" = '
+                  + shlex.quote('--config-file=' + str(config)) + '\n')
+        log = self.doctor('--only', 'ghostty')
+        self.assertIn('PASS ghostty.parse', log)
 
     def test_missing_required_application_continues_other_modules(self):
         self.minimal_path()
@@ -403,10 +412,53 @@ class DoctorTests(unittest.TestCase):
         self.assertIn(str(selected), log)
         self.assertEqual(observed.read_text().strip(), str(selected))
 
-    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux fontconfig branch")
+    def test_ghostty_font_query_finds_families_outside_default_list(self):
+        self.mock("ghostty", r'''
+case "$#:$1:${2-}" in
+    '1:+list-fonts:') printf 'Menlo\n  Menlo Regular\n' ;;
+    '2:+list-fonts:--family=IosevkaTerm Nerd Font') printf 'IosevkaTerm Nerd Font\n  IosevkaTerm NF\n' ;;
+    '2:+list-fonts:--family=Sarasa Term SC') printf 'Sarasa Term SC\n  Sarasa Term SC Regular\n' ;;
+    *) exit 2 ;;
+esac
+''')
+        for platform in ('Darwin', 'Linux'):
+            with self.subTest(platform=platform):
+                self.mock('uname', 'printf "%s\\n" ' + shlex.quote(platform) + '\n')
+                log = self.doctor("--only", "terminal", env=dict(self.env, TERM="dumb"))
+                self.assertIn("PASS terminal.font.IosevkaTerm Nerd Font", log)
+                self.assertIn("PASS terminal.font.Sarasa Term SC", log)
+                self.assertNotIn("WARN terminal.font.", log)
+
+    def test_ghostty_font_query_rejects_missing_family_and_style_matches(self):
+        for output in ('', 'IosevkaTerm Nerd Font Mono\n  IosevkaTerm Nerd Font\n',
+                       'Other Family\n  IosevkaTerm Nerd Font\n'):
+            with self.subTest(output=output):
+                self.mock("ghostty", 'case "$#:$1:${2-}" in\n'
+                          "'2:+list-fonts:--family=IosevkaTerm Nerd Font') printf '%s' " + shlex.quote(output) + ' ;;\n'
+                          "'2:+list-fonts:--family=Sarasa Term SC') printf 'Sarasa Term SC\\n' ;;\n"
+                          '*) exit 2 ;;\nesac\n')
+                log = self.doctor("--only", "terminal", env=dict(self.env, TERM="dumb"))
+                self.assertIn("WARN terminal.font.IosevkaTerm Nerd Font", log)
+                self.assertIn("PASS terminal.font.Sarasa Term SC", log)
+
+    def test_ghostty_font_query_failure_does_not_skip_other_family(self):
+        self.mock("ghostty", r'''
+case "$#:$1:${2-}" in
+    '2:+list-fonts:--family=IosevkaTerm Nerd Font') echo 'font query failed' >&2; exit 7 ;;
+    '2:+list-fonts:--family=Sarasa Term SC') printf 'Sarasa Term SC\n' ;;
+    *) exit 2 ;;
+esac
+''')
+        log = self.doctor("--only", "terminal", "--verbose", code=1, env=dict(self.env, TERM="dumb"))
+        self.assertIn("FAIL terminal.font.IosevkaTerm Nerd Font: font enumeration failed; command exit 7", log)
+        self.assertIn("native: font query failed", log)
+        self.assertIn("PASS terminal.font.Sarasa Term SC", log)
+
     def test_font_fallback_family_does_not_count_as_exact_match(self):
-        self.mock("fc-list", "printf 'IosevkaTerm Nerd Font Mono,Sarasa Term SC\\n'\n")
         self.minimal_path()
+        self.mock("uname", "printf 'Linux\\n'\n")
+        self.mock("fc-list", "printf 'IosevkaTerm Nerd Font Mono,Sarasa Term SC\\n'\n")
+        self.env["PATH"] = str(self.bindir)
         log = self.doctor("--only", "terminal", env=dict(self.env, TERM="dumb"))
         self.assertIn("WARN terminal.font.IosevkaTerm Nerd Font", log)
         self.assertIn("PASS terminal.font.Sarasa Term SC", log)

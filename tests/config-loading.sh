@@ -216,10 +216,19 @@ else
 fi
 
 case_label='native Ghostty parses deployed includes'
-if real_ghostty=$(command -v ghostty); then
+real_ghostty=$(command -v ghostty || :)
+if [[ -z $real_ghostty && $host_kernel == Darwin ]]; then
+	for ghostty_candidate in /Applications/Ghostty.app/Contents/MacOS/ghostty "$HOME/Applications/Ghostty.app/Contents/MacOS/ghostty"; do
+		if [[ -x $ghostty_candidate ]]; then
+			real_ghostty="$ghostty_candidate"
+			break
+		fi
+	done
+fi
+if [[ -n $real_ghostty ]]; then
 	case_log="$case_root/ghostty.log"
-	# 禁用宿主默认文件查找；只验证本次部署的入口及其相对 include，不启动窗口。
-	run_application "$real_ghostty" +validate-config --config-default-files=false \
+	# 显式 --config-file 只验证所选入口及其相对 include，不读取默认配置、不启动窗口。
+	run_application "$real_ghostty" +validate-config \
 		"--config-file=$case_home/.config/ghostty/config.ghostty" > "$case_log" 2>&1 || fail 'Ghostty rejected the deployed configuration'
 	pass
 else

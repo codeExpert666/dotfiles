@@ -1586,7 +1586,7 @@ done
                 self.assertTrue(asset['url'].startswith('https://'), name)
                 self.assertRegex(asset['sha256'], r'^[0-9a-f]{64}$', name)
 
-    def test_font_family_selection_and_cache_failure_recovery(self):
+    def font_fixture(self, name, family):
         def ttf(family):
             # 最小 SFNT 夹具仅含一个 name 表和一条 UTF-16BE 族名记录。
             # 18 = 6 字节表头 + 12 字节记录；28 = 12 字节文件头 + 16 字节表目录。
@@ -1596,20 +1596,131 @@ done
         archive = self.root / 'fonts.zip'
         # 归档包含两个不同族名，验证只发布清单指定的字体。
         with zipfile.ZipFile(archive, 'w') as zipped:
-            zipped.writestr('selected.ttf', ttf('Sarasa Term SC'))
+            zipped.writestr('selected.ttf', ttf(family))
             zipped.writestr('unrelated.ttf', ttf('Sarasa Term TC'))
         sha = resources.digest(archive)
-        manifest = {'sarasa': {'version': 'v1', 'kind': 'archive', 'family': 'Sarasa Term SC',
+        manifest = {name: {'version': 'v1', 'kind': 'archive', 'family': family,
                     'assets': {'universal': {'url': 'https://example.test/fonts.zip', 'sha256': sha}}}}
         manager = resources.Resources(self.home, manifest)
         manager.cache.mkdir(parents=True)
         shutil.copyfile(archive, manager.cache / sha)
+        return manager
+
+    def test_macos_font_outside_default_list_installs_and_reuses(self):
+        family = 'IosevkaTerm Nerd Font'
+        manager = self.font_fixture('iosevka', family)
+        destination = self.home / 'Library/Fonts/dotfiles-bootstrap/iosevka'
+
+        def enumerate_fonts(args, **kwargs):
+            # 默认列表只显示等宽字体；按族名查询才能看到已发布的目标字体。
+            if args[1:] == ['+list-fonts']:
+                return 'Menlo\n  Menlo Regular\n'
+            self.assertEqual(args[1:], ['+list-fonts', '--family=' + family])
+            if (destination / 'selected.ttf').is_file():
+                return family + '\n  IosevkaTerm NF\n'
+            return ''
+
+        with patch.object(resources.shutil, 'which', return_value='/fixture bin/ghostty'), \
+                patch.object(resources, 'run', side_effect=enumerate_fonts), \
+                patch.object(manager, 'fetch', wraps=manager.fetch) as fetch:
+            manager.font('iosevka', 'macos')
+            self.assertTrue((destination / 'selected.ttf').is_file())
+            self.assertFalse((destination / 'unrelated.ttf').exists())
+            installed = snapshot(self.home)
+            manager.font('iosevka', 'macos')
+            self.assertEqual(snapshot(self.home), installed)
+            fetch.assert_called_once_with('iosevka', 'universal')
+
+    def test_macos_font_rejects_fallback_and_style_names(self):
+        family = 'IosevkaTerm Nerd Font'
+        manager = self.font_fixture('iosevka', family)
+        destination = self.home / 'Library/Fonts/dotfiles-bootstrap/iosevka'
+        destination.mkdir(parents=True)
+        (destination / 'existing.ttf').write_bytes(b'preserve existing font')
+        before = snapshot(self.home)
+        for output in ('', family + ' Mono\n  ' + family + '\n', 'Other Family\n  ' + family + '\n'):
+            with self.subTest(output=output), \
+                    patch.object(resources.shutil, 'which', return_value='/fixture bin/ghostty'), \
+                    patch.object(resources, 'run', return_value=output), \
+                    patch.object(manager, 'fetch') as fetch:
+                with self.assertRaisesRegex(RuntimeError, 'font directory exists but family is unavailable'):
+                    manager.font('iosevka', 'macos')
+                self.assertEqual(snapshot(self.home), before)
+                fetch.assert_not_called()
+
+    def test_macos_font_waits_for_discovery_after_install(self):
+        family = 'Sarasa Term SC'
+        manager = self.font_fixture('sarasa', family)
+        destination = self.home / 'Library/Fonts/dotfiles-bootstrap/sarasa'
+        elapsed = 0
+
+        def advance(seconds):
+            nonlocal elapsed
+            elapsed += seconds
+
+        def families(platform, requested, **kwargs):
+            if (destination / 'selected.ttf').is_file() and elapsed >= 2:
+                return {family}
+            return set()
+
+        with patch.object(resources, 'time') as clock, \
+                patch.object(manager, 'font_families', side_effect=families):
+            clock.monotonic.side_effect = lambda: elapsed
+            clock.sleep.side_effect = advance
+            manager.font('sarasa', 'macos')
+            self.assertGreaterEqual(elapsed, 2)
+            self.assertTrue((destination / '.ready.json').is_file())
+
+    def test_macos_font_discovery_timeout_preserves_install_and_retry_recovers(self):
+        family = 'Sarasa Term SC'
+        manager = self.font_fixture('sarasa', family)
+        destination = self.home / 'Library/Fonts/dotfiles-bootstrap/sarasa'
+        elapsed = 0
+
+        def advance(seconds):
+            nonlocal elapsed
+            elapsed += seconds
+
+        with patch.object(resources, 'time') as clock:
+            clock.monotonic.side_effect = lambda: elapsed
+            clock.sleep.side_effect = advance
+            with patch.object(manager, 'font_families', return_value=set()):
+                with self.assertRaisesRegex(RuntimeError, 'font files installed but Sarasa Term SC is not enumerated'):
+                    manager.font('sarasa', 'macos')
+            self.assertEqual(elapsed, 30)
+            self.assertTrue((destination / 'selected.ttf').is_file())
+            self.assertEqual(json.loads((destination / '.ready.json').read_text())['family'], family)
+            installed = snapshot(self.home)
+            with patch.object(manager, 'font_families', side_effect=lambda *args, **kwargs: {family} if elapsed >= 32 else set()), \
+                    patch.object(manager, 'fetch') as fetch:
+                manager.font('sarasa', 'macos')
+                self.assertEqual(snapshot(self.home), installed)
+                fetch.assert_not_called()
+
+    def test_macos_font_discovery_query_failure_is_not_retried(self):
+        manager = self.font_fixture('sarasa', 'Sarasa Term SC')
+        with patch.object(resources, 'time') as clock, \
+                patch.object(manager, 'font_families', side_effect=[set(), RuntimeError('font query failed')]) as query:
+            clock.monotonic.return_value = 0
+            with self.assertRaisesRegex(RuntimeError, 'font query failed'):
+                manager.font('sarasa', 'macos')
+            self.assertEqual(query.call_count, 2)
+            clock.sleep.assert_not_called()
+            self.assertTrue((self.home / 'Library/Fonts/dotfiles-bootstrap/sarasa/selected.ttf').is_file())
+
+    def test_font_family_selection_and_cache_failure_recovery(self):
+        manager = self.font_fixture('sarasa', 'Sarasa Term SC')
         with patch.object(manager, 'font_families', return_value=set()), patch.object(resources, 'run', side_effect=RuntimeError('cache failure')):
             with self.assertRaisesRegex(RuntimeError, 'cache failure'):
                 manager.font('sarasa', 'linux')
         destination = self.home / '.local/share/fonts/dotfiles-bootstrap/sarasa'
         self.assertTrue((destination / 'selected.ttf').exists())
         self.assertFalse((destination / 'unrelated.ttf').exists())
+        with patch.object(manager, 'font_families', return_value=set()), \
+                patch.object(resources, 'run', return_value=''), patch.object(resources, 'time') as clock:
+            with self.assertRaisesRegex(RuntimeError, 'font directory exists but family is unavailable'):
+                manager.font('sarasa', 'linux')
+            clock.sleep.assert_not_called()
         with patch.object(manager, 'font_families', side_effect=[set(), {'Sarasa Term SC'}]), patch.object(resources, 'run', return_value='') as run:
             manager.font('sarasa', 'linux')
             self.assertEqual(run.call_args.args[0][0], 'fc-cache')

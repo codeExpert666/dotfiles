@@ -1010,7 +1010,8 @@ check_ghostty() {
 	need_tool ghostty WARN ghostty.command || return 0
 	ghostty_bin="$tool_path"
 	check_file ghostty.config "$config" || return 0
-	if clean_probe 8 "$ghostty_bin" +validate-config --config-default-files=false "--config-file=$config"; then
+	# validate-config 的 --config-file 已限定入口，不接受 GUI 的 config-default-files 参数。
+	if clean_probe 8 "$ghostty_bin" +validate-config "--config-file=$config"; then
 		report PASS ghostty.parse 'explicit entry and relative includes pass native validation'
 	else
 		native_error ghostty.parse 'configuration validation failed' 'Review Ghostty version, include files and platform-specific settings.'
@@ -1019,7 +1020,7 @@ check_ghostty() {
 }
 
 check_terminal() {
-	local font fonts line alias found aliases=() command_args=()
+	local font fonts line alias found ghostty_bin='' aliases=() command_args=()
 	if [[ -z ${TERM-} || $TERM == dumb ]]; then
 		report SKIP terminal.terminfo 'no interactive terminal type is available'
 	elif need_tool infocmp WARN terminal.infocmp; then
@@ -1034,20 +1035,30 @@ check_terminal() {
 		return 0
 	fi
 	if find_tool ghostty; then
-		command_args=("$tool_path" +list-fonts)
+		ghostty_bin="$tool_path"
 	elif [[ $platform == linux ]] && find_tool fc-list; then
 		command_args=("$tool_path" --format '%{family}\n')
 	else
 		report SKIP terminal.fonts 'no native font enumerator is available' 'Check IosevkaTerm Nerd Font and Sarasa Term SC in Ghostty on the desktop.'
 		return 0
 	fi
-	# 保留真实 HOME 及数据、配置目录以枚举用户字体；缓存和状态仍指向临时目录。
-	if capture 8 env XDG_CACHE_HOME="$scratch/home/.cache" XDG_STATE_HOME="$scratch/home/.local/state" "${command_args[@]}"; then
-		fonts=$(< "$probe_stdout")
-		for font in 'IosevkaTerm Nerd Font' 'Sarasa Term SC'; do
+	for font in 'IosevkaTerm Nerd Font' 'Sarasa Term SC'; do
+		if [[ -n $ghostty_bin ]]; then
+			# 默认列表只显示等宽字体；按族名查询与 Ghostty 的 font-family 配置一致。
+			command_args=("$ghostty_bin" +list-fonts "--family=$font")
+		fi
+		# 保留真实 HOME 及数据、配置目录以枚举用户字体；缓存和状态仍指向临时目录。
+		if capture 8 env XDG_CACHE_HOME="$scratch/home/.cache" XDG_STATE_HOME="$scratch/home/.local/state" "${command_args[@]}"; then
+			fonts=$(< "$probe_stdout")
 			found=no
 			while IFS= read -r line; do
-				IFS=, read -r -a aliases <<< "$line"
+				if [[ -n $ghostty_bin ]]; then
+					# Ghostty 的缩进行是样式名，只有无缩进的族名行参与匹配。
+					[[ $line != [[:space:]]* ]] || continue
+					aliases=("$line")
+				else
+					IFS=, read -r -a aliases <<< "$line"
+				fi
 				for alias in "${aliases[@]}"; do
 					alias="${alias#"${alias%%[![:space:]]*}"}"
 					alias="${alias%"${alias##*[![:space:]]}"}"
@@ -1059,10 +1070,10 @@ check_terminal() {
 			else
 				report WARN "terminal.font.$font" 'font family is absent from native enumeration' 'Install this font during bootstrap; font fallback can hide a missing family.'
 			fi
-		done
-	else
-		native_error terminal.fonts 'font enumeration failed' 'Use the desktop font manager to verify configured font families.'
-	fi
+		else
+			native_error "terminal.font.$font" 'font enumeration failed' 'Use the desktop font manager to verify configured font families.'
+		fi
+	done
 }
 
 check_state() {
