@@ -31,6 +31,8 @@ macOS uses Brewfile plus Brewfile.desktop for desktop, ensuring Homebrew-managed
 packages are installed even when compatible commands exist elsewhere. Bundle
 uses --no-upgrade; only tools below the compatibility requirements are upgraded.
 Ubuntu uses packages.bash plus packages.desktop.bash and reuses compatible tools.
+On both platforms, compatible Go is reused; otherwise the latest stable Go is
+resolved from go.dev and installed from a SHA256-verified official archive.
 Antidote and fonts use pinned archives on both platforms.
 Conflicting user-owned install paths and dirty plugin checkouts require manual review.
 No whole-system upgrade, configuration migration, account login, history import,
@@ -114,6 +116,7 @@ esac
 initialize_scratch
 preview_software
 preview_requirements
+say 'PLAN: reuse compatible Go; otherwise install the latest stable Go from go.dev (resolved only during --apply).'
 if [[ $profile == desktop ]]; then
 	say 'PLAN: check/install IosevkaTerm Nerd Font and Sarasa Term SC (pinned upstream font archives).'
 fi
@@ -160,6 +163,9 @@ say "Apply log: $log_file"
 phase='software installation'
 prepare_platform
 install_software
+if ! required_tool_ready go; then
+	run 'install latest stable Go' 1200 python3 -B "$script_dir/bootstrap/resources.py" install-go "$platform-$arch"
+fi
 verify_requirements base
 verify_build_tools
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""下载固定资源并准备用户工具、字体和 Neovim 插件；仅使用 Python 标准库。
+"""下载资源并准备用户工具、字体和 Neovim 插件；仅使用 Python 标准库。
 
 工具归档先校验并解压到暂存目录，再发布安装目录并逐个更新入口链接。
 目录和各链接分别发布；后续失败保留已发布内容，修复问题后可重试。
@@ -23,6 +23,7 @@ import zipfile
 
 
 HERE = Path(__file__).resolve().parent
+GO_RELEASES_URL = 'https://go.dev/dl/?mode=json'
 
 
 # ===== 命令执行、路径检查与归档解压 =====
@@ -135,7 +136,42 @@ def extract(archive, destination, kind, binary_name):
                     shutil.copymode(target, path)
 
 
-# ===== 固定资源与字体发布 =====
+# ===== 官方 Go 版本解析、校验资源与字体发布 =====
+
+def latest_go_release(key):
+    platforms = {'macos-arm64': ('darwin', 'arm64'),
+                 'linux-arm64': ('linux', 'arm64'), 'linux-x86_64': ('linux', 'amd64')}
+    if key not in platforms:
+        raise RuntimeError(f'unsupported Go platform: {key}')
+    go_os, go_arch = platforms[key]
+    releases = json.loads(run(
+        ['curl', '--fail', '--silent', '--show-error', '--location', '--proto', '=https',
+         '--proto-redir', '=https', '--retry', '2', '--connect-timeout', '15', '--max-time', '30',
+         '--max-filesize', '1048576', GO_RELEASES_URL], timeout=120))
+    if not isinstance(releases, list):
+        raise RuntimeError('invalid Go release metadata: expected a release list')
+    stable = [item for item in releases if isinstance(item, dict) and item.get('stable') is True
+              and isinstance(item.get('version'), str) and re.fullmatch(r'go\d+\.\d+\.\d+', item['version'])]
+    if not stable:
+        raise RuntimeError('Go release metadata contains no stable release')
+    release = max(stable, key=lambda item: tuple(int(part) for part in item['version'][2:].split('.')))
+    version = release['version']
+    filename = f'{version}.{go_os}-{go_arch}.tar.gz'
+    files = release.get('files')
+    if not isinstance(files, list):
+        raise RuntimeError(f'invalid Go release metadata: missing files for {version}')
+    assets = [item for item in files if isinstance(item, dict) and item.get('os') == go_os
+              and item.get('arch') == go_arch and item.get('kind') == 'archive']
+    if len(assets) != 1:
+        raise RuntimeError(f'expected one official Go archive for {version}/{key}')
+    asset = assets[0]
+    if (asset.get('filename') != filename or asset.get('version') != version
+            or not isinstance(asset.get('sha256'), str) or not re.fullmatch(r'[a-f0-9]{64}', asset['sha256'])):
+        raise RuntimeError(f'invalid Go archive metadata for {version}/{key}')
+    return {'version': version, 'source': GO_RELEASES_URL, 'kind': 'archive',
+            'links': {'.local/bin/go': 'go/bin/go', '.local/bin/gofmt': 'go/bin/gofmt'},
+            'assets': {key: {'url': 'https://go.dev/dl/' + filename, 'sha256': asset['sha256']}}}
+
 
 class Resources:
     def __init__(self, home=None, manifest=None):
@@ -219,6 +255,10 @@ class Resources:
         for relative, suffix in item.get('links', {}).items():
             self.link(self.home / relative, self.locate(destination, suffix))
         print(f"Prepared {name} {item['version']}: {destination}")
+
+    def install_go(self, key):
+        self.manifest['go'] = latest_go_release(key)
+        self.install('go', key)
 
     def font_families(self, platform):
         if platform == 'linux':
@@ -352,6 +392,8 @@ def main():
     command, *args = sys.argv[1:]
     if command == 'install':
         resources.install(*args)
+    elif command == 'install-go':
+        resources.install_go(*args)
     elif command == 'fetch':
         source = resources.fetch(args[0], args[1])
         # 调用方提供私有临时目录内的目标路径。

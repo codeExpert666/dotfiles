@@ -262,7 +262,12 @@ tool_ready() {
 	[[ -n $tool_path && -x $tool_path ]] || return 1
 	# 无版本约束的系统工具先按可执行文件判断，实际功能由安装/验收阶段验证。
 	[[ $minimum != 0 ]] || return 0
-	execute 8 probe "$tool_path" --version || return 1
+	if [[ $name == go ]]; then
+		# Go 使用 version 子命令；只查询本地工具链，避免预览触发工具链下载。
+		execute 8 probe env GOTOOLCHAIN=local "$tool_path" version || return 1
+	else
+		execute 8 probe "$tool_path" --version || return 1
+	fi
 	output=$(< "$scratch/probe.log")
 	if [[ $name == lazygit ]]; then
 		[[ $output =~ version=([0-9]+\.[0-9]+\.[0-9]+) ]] || return 1

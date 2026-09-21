@@ -168,7 +168,10 @@ elif name == 'resources-fixture':
     event('resources', args)
     if os.environ.get('BOOTSTRAP_TEST_FAIL') == args[0]:
         sys.exit(43)
-    if args[0] == 'install':
+    if args[0] == 'install-go':
+        installed_commands('go', 'release')
+        installed_commands('gofmt', 'release')
+    elif args[0] == 'install':
         installed_commands(args[1], 'release')
         if args[1] == 'antidote':
             entry = Path(os.environ['HOME']) / '.local/share/antidote/antidote.zsh'
@@ -198,6 +201,15 @@ elif name == 'cc' and '-x' in args:
     code = 47 if os.environ.get('BOOTSTRAP_TEST_CAPABILITY_FAIL') == 'executable' else 0
     output.write_text(f'#!/bin/sh\nexit {code}\n')
     output.chmod(0o755)
+elif name == 'go':
+    # Go 只接受 version 子命令，不能让通用的 --version 替身掩盖探测错误。
+    if args != ['version']:
+        print('fixture: expected go version', file=sys.stderr)
+        sys.exit(2)
+    old = words('BOOTSTRAP_TEST_OLD') | words('BOOTSTRAP_TEST_APT_OLD')
+    incompatible = name in words('BOOTSTRAP_TEST_STUCK') or (
+        name in old and not (root / ('installed-' + name)).exists())
+    print('go version go' + ('1.20.14' if incompatible else '1.21.0') + ' linux/arm64')
 elif '--version' in args:
     if name == 'npm' and os.environ.get('BOOTSTRAP_TEST_CAPABILITY_FAIL') == 'npm':
         sys.exit(48)

@@ -204,6 +204,48 @@ class Orchestration(unittest.TestCase):
         self.assertIn('DEFER: deployment preview', output.stderr)
         self.assertEqual(self.events(), [])
 
+    def test_go_preview_checks_version_and_reports_missing_runtime(self):
+        before = snapshot(self.home)
+        output = self.invoke('--profile', 'server').stderr
+        self.assertIn('FOUND: go (', output)
+        self.assertNotIn('PLAN: go >=', output)
+        self.hide_tools('go')
+        output = self.invoke('--profile', 'server').stderr
+        self.assertIn('PLAN: go >= 1.21.0', output)
+        self.assertIn('latest stable Go from go.dev (resolved only during --apply)', output)
+        self.assertEqual(snapshot(self.home), before)
+        self.assertEqual(self.events(), [])
+
+    def test_incompatible_go_stops_before_deployment(self):
+        self.env.update(BOOTSTRAP_TEST_STUCK='go', BOOTSTRAP_TEST_BREW_INSTALLED='all')
+        for kernel, arch in (('Linux', 'aarch64'), ('Darwin', 'arm64')):
+            with self.subTest(kernel=kernel):
+                self.env.update(BOOTSTRAP_TEST_KERNEL=kernel, BOOTSTRAP_TEST_ARCH=arch)
+                before = len(self.events())
+                output = self.invoke('--apply', '--profile', 'server', success=1).stderr
+                self.assertIn('go >= 1.21.0 is still unavailable', output)
+                self.assertIn('FAILED phase: software installation', output)
+                self.assertFalse((self.home / '.config/nvim/init.lua').exists())
+                attempts = self.events()[before:]
+                self.assertTrue(any(event[:2] == ['resources', 'install-go'] for event in attempts))
+                self.assertFalse(any(event[0] in ('nvim', 'doctor') or
+                                     (event[0] == 'resources' and event[1] != 'install-go') for event in attempts))
+                self.assertFalse((self.home / '.local/state/dotfiles-bootstrap/lock').exists())
+
+    def test_go_resolution_failure_stops_before_deployment_and_retries(self):
+        self.hide_tools('go')
+        self.env['BOOTSTRAP_TEST_FAIL'] = 'install-go'
+        output = self.invoke('--apply', '--profile', 'server', success=1).stderr
+        self.assertIn('install latest stable Go failed', output)
+        self.assertIn('FAILED phase: software installation', output)
+        self.assertFalse((self.home / '.config/nvim/init.lua').exists())
+        self.assertFalse(any(event[0] in ('nvim', 'doctor') for event in self.events()))
+        self.assertFalse((self.home / '.local/state/dotfiles-bootstrap/lock').exists())
+        self.env.pop('BOOTSTRAP_TEST_FAIL')
+        self.invoke('--apply', '--profile', 'server')
+        self.assertTrue((self.bin / 'go').exists())
+        self.assertTrue(any(event[0] == 'nvim' for event in self.events()))
+
     def test_xdg_override_rejected_before_install(self):
         self.env['XDG_CONFIG_HOME'] = str(self.root / 'elsewhere')
         self.invoke('--apply', '--profile', 'server', success=1)
@@ -277,6 +319,7 @@ class Orchestration(unittest.TestCase):
         self.assertIn(['apt-get', 'install', '-y', '--no-install-recommends', 'shfmt'], self.events())
         self.assertTrue(any(e[0] == 'doctor' and '--runtime' in e for e in self.events()))
         self.assertFalse(any(e[:2] == ['resources', 'font'] for e in self.events()))
+        self.assertFalse(any(e[:2] == ['resources', 'install-go'] for e in self.events()))
         self.assertEqual(original, snapshot(self.repo / 'nvim'))
         first = len(self.events())
         self.invoke('--apply', '--profile', 'server')
@@ -416,6 +459,7 @@ class Orchestration(unittest.TestCase):
         self.assertEqual({path.name for path in self.root.glob('brew-trusted-*')},
                          {'brew-trusted-formula-ewhauser_tap_shuck-cli'})
         self.assertFalse(any(event[:2] == ['brew', 'upgrade'] for event in self.events()))
+        self.assertFalse(any(event[:2] == ['resources', 'install-go'] for event in self.events()))
         self.assertFalse(any(event[0] == 'apt-get' or event[:2] == ['resources', 'font'] for event in self.events()))
         before = len(self.events())
         self.invoke('--apply', '--profile', 'server')
@@ -451,6 +495,30 @@ class Orchestration(unittest.TestCase):
         self.assertTrue((self.root / 'brew-tree-sitter-cli').exists())
         self.assertTrue((self.bin / 'tree-sitter').exists())
         self.assertFalse(any(event[:2] == ['brew', 'upgrade'] for event in self.events()))
+
+    def test_macos_installs_missing_go_before_neovim_and_reuses_on_retry(self):
+        self.macos()
+        self.hide_tools('go')
+        self.invoke('--apply', '--profile', 'server')
+        events = self.events()
+        self.assertFalse((self.root / 'brew-go').exists())
+        self.assertTrue((self.bin / 'go').exists())
+        self.assertLess(events.index(['resources', 'install-go', 'macos-arm64']),
+                        next(index for index, event in enumerate(events) if event[0] == 'nvim'))
+        before = len(events)
+        self.invoke('--apply', '--profile', 'server')
+        self.assertEqual(self.brew_installs(self.events()[before:]), [])
+        self.assertFalse(any(event[:2] == ['brew', 'upgrade'] for event in self.events()[before:]))
+        self.assertFalse(any(event[:2] == ['resources', 'install-go'] for event in self.events()[before:]))
+
+    def test_macos_upgrades_incompatible_go_before_neovim(self):
+        self.macos(BOOTSTRAP_TEST_BREW_INSTALLED='all', BOOTSTRAP_TEST_OLD='go')
+        self.invoke('--apply', '--profile', 'server')
+        events = self.events()
+        self.assertEqual(self.brew_installs(), [])
+        self.assertFalse(any(event[:2] == ['brew', 'upgrade'] for event in events))
+        self.assertLess(events.index(['resources', 'install-go', 'macos-arm64']),
+                        next(index for index, event in enumerate(events) if event[0] == 'nvim'))
 
     def test_macos_upgrades_incompatible_tree_sitter_cli(self):
         self.macos(BOOTSTRAP_TEST_BREW_INSTALLED='all', BOOTSTRAP_TEST_OLD='tree-sitter')
@@ -530,6 +598,28 @@ class Orchestration(unittest.TestCase):
         self.assertIn(install, events)
         self.assertLess(next(index for index, event in enumerate(events) if event[0] == 'nvim'), events.index(install))
         self.assertLess(events.index(install), events.index(['resources', 'font', 'iosevka', 'linux']))
+
+    def test_ubuntu_installs_missing_go_before_neovim_and_reuses_on_retry(self):
+        self.hide_tools('go')
+        self.invoke('--apply', '--profile', 'server')
+        events = self.events()
+        install = ['resources', 'install-go', 'linux-arm64']
+        self.assertTrue((self.bin / 'go').exists())
+        self.assertFalse(any(event[0] == 'apt-get' for event in events))
+        self.assertLess(events.index(install),
+                        next(index for index, event in enumerate(events) if event[0] == 'nvim'))
+        before = len(events)
+        self.invoke('--apply', '--profile', 'server')
+        self.assertFalse(any(event[0] in ('sudo', 'apt-get') for event in self.events()[before:]))
+        self.assertFalse(any(event[:2] == ['resources', 'install-go'] for event in self.events()[before:]))
+
+    def test_ubuntu_upgrades_incompatible_go_before_neovim(self):
+        self.env['BOOTSTRAP_TEST_OLD'] = 'go'
+        self.invoke('--apply', '--profile', 'server')
+        events = self.events()
+        self.assertFalse(any(event[0] == 'apt-get' for event in events))
+        self.assertLess(events.index(['resources', 'install-go', 'linux-arm64']),
+                        next(index for index, event in enumerate(events) if event[0] == 'nvim'))
 
     def test_ubuntu_server_does_not_install_missing_desktop_tools(self):
         self.hide_tools('fc-list', 'fc-cache', 'wl-copy', 'wl-paste', 'xclip', '7zz', 'ghostty')
@@ -992,6 +1082,108 @@ class Publication(unittest.TestCase):
         self.manager.cache.mkdir(parents=True)
         shutil.copyfile(self.archive, self.manager.cache / resources.digest(self.archive))
 
+    def go_release(self, version, stable=True):
+        return {'version': version, 'stable': stable, 'files': [
+            {'filename': f'{version}.{go_os}-{arch}.tar.gz', 'os': go_os, 'arch': arch,
+             'version': version, 'sha256': resources.digest(self.archive), 'kind': 'archive'}
+            for go_os, arch in (('darwin', 'arm64'), ('linux', 'arm64'), ('linux', 'amd64'))]}
+
+    def go_archive(self, version):
+        with tarfile.open(self.archive, 'w:gz') as archive:
+            for name in ('go', 'gofmt'):
+                info = tarfile.TarInfo('go/bin/' + name)
+                content = f'#!/bin/sh\nprintf "%s\\n" "go version {version} fixture"\n'.encode()
+                info.size, info.mode = len(content), 0o755
+                archive.addfile(info, io.BytesIO(content))
+
+    def test_go_release_selects_latest_stable_numerically_for_each_platform(self):
+        releases = [self.go_release('go1.27.9'), self.go_release('go1.9.9'),
+                    self.go_release('go1.28rc1', stable=False), self.go_release('go1.27.10')]
+        for key, suffix in (('macos-arm64', 'darwin-arm64'), ('linux-arm64', 'linux-arm64'),
+                            ('linux-x86_64', 'linux-amd64')):
+            with self.subTest(platform=key), patch.object(resources, 'run', return_value=json.dumps(releases)):
+                item = resources.latest_go_release(key)
+                self.assertEqual(item['version'], 'go1.27.10')
+                self.assertEqual(item['assets'][key], {
+                    'url': f'https://go.dev/dl/go1.27.10.{suffix}.tar.gz',
+                    'sha256': resources.digest(self.archive)})
+
+    def test_go_release_rejects_unusable_metadata_without_falling_back(self):
+        missing = self.go_release('go1.27.1')
+        missing['files'] = []
+        bad_hash = self.go_release('go1.27.1')
+        bad_hash['files'][0]['sha256'] = 'invalid'
+        bad_path = self.go_release('go1.27.1')
+        bad_path['files'][0]['filename'] = '../../other.tar.gz'
+        duplicate = self.go_release('go1.27.1')
+        duplicate['files'].append(duplicate['files'][0])
+        cases = [('not a list', {}), ('no stable release', [self.go_release('go1.28rc1', stable=False)]),
+                 ('latest has no archive', [self.go_release('go1.26.9'), missing]),
+                 ('invalid checksum', [bad_hash]), ('invalid archive path', [bad_path]),
+                 ('ambiguous archive', [duplicate])]
+        for label, releases in cases:
+            with self.subTest(case=label), patch.object(resources, 'run', return_value=json.dumps(releases)):
+                with self.assertRaisesRegex(RuntimeError, 'Go'):
+                    resources.latest_go_release('macos-arm64')
+        with patch.object(resources, 'run') as lookup:
+            with self.assertRaisesRegex(RuntimeError, 'unsupported Go platform'):
+                resources.latest_go_release('linux-riscv64')
+            lookup.assert_not_called()
+
+    def test_latest_go_archive_is_verified_installed_and_reused(self):
+        self.go_archive('go1.27.1')
+        release = self.go_release('go1.27.1')
+        def download(args, **kwargs):
+            if args[-1] == resources.GO_RELEASES_URL:
+                return json.dumps([release])
+            self.assertEqual(args[-1], 'https://go.dev/dl/go1.27.1.darwin-arm64.tar.gz')
+            shutil.copyfile(self.archive, args[args.index('--output') + 1])
+            return ''
+        with patch.object(resources, 'run', side_effect=download) as downloads:
+            self.manager.install_go('macos-arm64')
+            for name in ('go', 'gofmt'):
+                target = self.home / '.local/bin' / name
+                self.assertEqual(target.resolve(), self.manager.root / 'go/go1.27.1-macos-arm64/go/bin' / name)
+                self.assertIn('go1.27.1', run([str(target), 'version'], check=True).stdout)
+            receipt = self.manager.root / 'go/go1.27.1-macos-arm64/.ready.json'
+            self.assertEqual(json.loads(receipt.read_text()), {'sha256': resources.digest(self.archive)})
+            before = snapshot(self.home)
+            self.manager.install_go('macos-arm64')
+            self.assertEqual(snapshot(self.home), before)
+            self.assertEqual(downloads.call_count, 3)  # 两次版本解析，只下载一次归档。
+
+    def test_latest_go_corrupt_download_and_lookup_failure_keep_previous_installation(self):
+        self.go_archive('go1.27.0')
+        release = self.go_release('go1.27.0')
+        def download(args, **kwargs):
+            if args[-1] == resources.GO_RELEASES_URL:
+                return json.dumps([release])
+            shutil.copyfile(self.archive, args[args.index('--output') + 1])
+            return ''
+        with patch.object(resources, 'run', side_effect=download):
+            self.manager.install_go('linux-arm64')
+        targets = {name: (self.home / '.local/bin' / name).resolve() for name in ('go', 'gofmt')}
+        before = snapshot(self.home)
+        with patch.object(resources, 'run', side_effect=RuntimeError('Go release lookup failed')):
+            with self.assertRaisesRegex(RuntimeError, 'lookup failed'):
+                self.manager.install_go('linux-arm64')
+        self.assertEqual(snapshot(self.home), before)
+        self.go_archive('go1.27.1')
+        release = self.go_release('go1.27.1')
+        def corrupt_download(args, **kwargs):
+            if args[-1] == resources.GO_RELEASES_URL:
+                return json.dumps([release])
+            Path(args[args.index('--output') + 1]).write_bytes(b'corrupted')
+            return ''
+        with patch.object(resources, 'run', side_effect=corrupt_download):
+            with self.assertRaisesRegex(RuntimeError, 'SHA256 mismatch'):
+                self.manager.install_go('linux-arm64')
+        for name, previous in targets.items():
+            self.assertEqual((self.home / '.local/bin' / name).resolve(), previous)
+            self.assertTrue(previous.exists())
+        self.assertFalse((self.manager.root / 'go/go1.27.1-linux-arm64').exists())
+        self.assertEqual(list(self.manager.cache.glob('.download-*')), [])
+
     def test_verified_archive_installs_atomically_and_reuses(self):
         self.seed_cache()
         self.manager.install('tool', 'linux-arm64')
@@ -1080,6 +1272,8 @@ class Publication(unittest.TestCase):
             self.assertIn(scope, ('base', 'desktop'))
             self.assertIn(platform, ('any', 'linux', 'macos'))
             requirements[name] = (scope, platform)
+        # Go 由共享入口解析官方最新稳定版，独立于各平台包清单。
+        self.assertEqual(requirements.pop('go'), ('base', 'any'))
         manifest = json.loads((REPO / 'scripts/bootstrap/releases.json').read_text())
         for scope in ('base', 'desktop'):
             for release in ('24.04', '26.04'):

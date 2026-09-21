@@ -98,6 +98,7 @@ Git/Stow 不满足要求时，部署预检延后到安装完成。预览退出�
 | 固定下载资源              | [releases.json](bootstrap/releases.json)                                                                         | 版本、平台资产、URL、SHA256 和安装入口                                                |
 | macOS 软件                | [Brewfile](bootstrap/macos/Brewfile)、[Brewfile.desktop](bootstrap/macos/Brewfile.desktop)                       | 基础软件及 desktop 增量，静态 tap/formula/cask 声明                                   |
 | Ubuntu 软件               | [packages.bash](bootstrap/ubuntu/packages.bash)、[packages.desktop.bash](bootstrap/ubuntu/packages.desktop.bash) | apt 包、命令映射、上游资源和发行版差异                                                |
+| Go 工具链                 | [requirements.tsv](bootstrap/requirements.tsv)、[resources.py](bootstrap/resources.py) | 共用最低要求；缺失或不兼容时从 Go 官方解析最新稳定版与 SHA256 |
 
 macOS 先检查 Command Line Tools 和 Homebrew；首次需要完成 Apple 安装窗口后重新运行。
 Brewfile 表示 Homebrew 管理的安装，即使 PATH 上已有其他来源的兼容命令，仍会补齐对应包。
@@ -110,6 +111,19 @@ Shuck 的 Brewfile 条目用 `trusted: true` 显式信任 `ewhauser/tap/shuck-cl
 `tree-sitter` 命令由 `tree-sitter-cli` 包提供；Homebrew 的 `tree-sitter` 包仅提供库，
 安装清单和最低版本检查的升级映射均使用 CLI 包。
 
+Neovim 启用了 Go 支持，Mason 安装 Delve、gopls、goimports 等工具时需要先有 `go`。
+两个 profile、macOS 和 Ubuntu 共用 Go 准备逻辑：以 `GOTOOLCHAIN=local go version`
+离线检查实际 PATH 中的 Go，达到 `requirements.tsv` 的最低要求（当前为 1.21.0）即复用。
+只有缺失或版本不达标时，`--apply` 才查询 [Go 官方版本列表](https://go.dev/dl/?mode=json)，
+选择最新稳定版（排除 beta/RC），下载对应系统与架构的官方归档并校验列表提供的 SHA256。
+Go 不再列入 Brewfile 或 apt 清单；安装目录为 `~/.local/share/dotfiles-bootstrap/go/`，
+`go`、`gofmt` 入口放在 `~/.local/bin/`，优先于系统旧版。已有非受管入口冲突时保留并报错。
+预览不联网查询最新版本；达标后的重跑也不查询或追逐新版本。解析、下载或校验失败会停止
+软件阶段，保留已有安装；版本号写入本次日志，校验值写入安装回执。
+Go 1.21 起支持[自动选择和下载工具链](https://go.dev/doc/toolchain)，Mason 安装的模块要求
+更新版本时可由默认的 `GOTOOLCHAIN=auto` 获取；若个人配置禁用了自动切换，须自行准备
+这些模块要求的 Go 版本。bootstrap 不改写个人 Go 配置。
+
 Ubuntu 复用兼容命令；需要时先安装 apt 包，再使用已声明的固定上游资源或后备资源。
 包名不等于命令名时，`apt_commands` 用 `包名|命令列表` 声明；空命令列表按 dpkg 状态判断。
 `release_commands` 描述一项资源提供的多个命令，例如 Node/npm；`apt_fallbacks` 只在 apt
@@ -117,7 +131,8 @@ Ubuntu 复用兼容命令；需要时先安装 apt 包，再使用已声明的�
 Ubuntu 24.04 的 Ghostty 使用固定的 mkasberg/ghostty-ubuntu 社区 deb，由 apt 处理依赖；
 26.04 使用发行版包，macOS 使用 Homebrew cask。
 
-上游归档先校验 SHA256，再在私有暂存目录准备并发布；已有有效缓存会复用。Homebrew 初始
+上游归档先校验 SHA256，再在私有暂存目录准备并发布；已有有效缓存会复用。除按需解析的
+Go 最新稳定版外，上游归档版本由 `releases.json` 固定。Homebrew 初始
 安装脚本的提交和校验值保留在 macOS 安装器中，因为该阶段尚不能依赖 Python。
 字体按内部族名选择文件，并保留上游许可文件；Sarasa Term SC 的 7z 归档需要 7zz。
 
