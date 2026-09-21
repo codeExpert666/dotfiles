@@ -902,19 +902,22 @@ for ln_mode in git-file git-directory git-directory-link git-dangling git-fail g
 done
 
 new_case 'Git write failure leaves no partial config or staging and permits retry'
-case_kernel=Linux
-case_limit_writes=yes
-install_mock uname
+# 仅在真实 Git 配置写入处启用限制；初始化、Stow 和清理都保持正常。
+case_environment=("BASH_ENV=$source_repo/tests/deploy/git-write-failure.bash")
 run_deploy 1 --apply
-grep -Fq 'error: failed to create Git config:' "$case_log" || fail 'write failure was not diagnosed'
+assert_log_sequence 'git entry output:' \
+	'test printf: limiting Git config write after partial output' \
+	"error: failed to create Git config: $case_target/.config/git/config"
 assert_link "$case_target/.vimrc" "$case_repo/vim/.vimrc"
 assert_absent "$case_target/.config/git/config"
 assert_no_temporary_entries
 assert_no_log '^CREATE: Git config:'
 assert_failure_result 'git entry' 1
-case_limit_writes=no
+case_environment=()
 run_deploy 0 --apply
-verify_layout Linux
+verify_layout "$host_kernel"
+assert_no_temporary_entries
+assert_result 'result: deployment completed'
 pass
 
 # 创建失败可能发生在目录已经分配且路径已输出之后，EXIT 仍须回收它。

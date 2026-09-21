@@ -19,7 +19,6 @@ new_case() {
 	case_rm_mode=''
 	case_mktemp_mode=''
 	case_stow_options=''
-	case_limit_writes='no'
 	case_run_count=0
 }
 
@@ -70,8 +69,8 @@ start_deploy() {
 		trap 'exit 130' INT
 		trap 'exit 143' TERM
 		cd "$case_work" || exit 98
-		# 管道让日志不受写入限制影响，pipefail 保留退出码；单引号中的变量交给子 Bash 展开。
-		# 通道检查用例单独捕获 stdout，其余用例沿用合并管道以覆盖写入限制和信号清理。
+		# 管道让日志不受目标写入子 Shell 的限制影响，pipefail 保留退出码。
+		# 通道检查用例单独捕获 stdout；单引号中的变量交给子 Bash 展开。
 		# shellcheck disable=SC2016
 		env -i PATH="$case_path" HOME="$case_home" "${case_environment[@]}" \
 			LC_ALL=C GIT_CONFIG_NOSYSTEM=1 \
@@ -85,15 +84,10 @@ start_deploy() {
 			DOTFILES_TEST_STOW_ARGS="$case_root/stow.args" stow_options="$case_stow_options" \
 			DOTFILES_TEST_READY="$case_root/mock.ready" \
 			DOTFILES_TEST_RELEASE="$case_root/mock.release" DOTFILES_TEST_STAGING_PATH="$case_root/staging.path" \
-			DOTFILES_TEST_LIMIT_WRITES="$case_limit_writes" \
 			DOTFILES_TEST_SEPARATE_OUTPUT="$case_separate_output" DOTFILES_TEST_STDOUT_LOG="$case_stdout" \
 			"$real_bash" -c '
 				if [[ $DOTFILES_TEST_SEPARATE_OUTPUT == yes ]]; then
 					exec > "$DOTFILES_TEST_STDOUT_LOG"
-				fi
-				if [[ $DOTFILES_TEST_LIMIT_WRITES == yes ]]; then
-					ulimit -c 0 || exit 98
-					ulimit -f 0 || exit 98
 				fi
 				exec "$@"
 			' bash "$real_bash" "$case_repo/scripts/deploy.sh" "$@" 2>&1 | (

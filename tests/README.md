@@ -76,6 +76,9 @@ DOTFILES_TEST_PREPARED_HOME=/path/to/prepared-home bash tests/all.sh
 ## 内部组织与失败诊断
 
 - `deploy/support.bash` 与 `deploy/mock-command.sh`：部署专用夹具、命令替身和断言。
+  `deploy/git-write-failure.bash` 仅在 Git 写入失败用例中通过 `BASH_ENV` 加载，先写入部分
+  配置，再在目标写入子 Shell 中用 `ulimit -f 0` 触发真实失败；不限制初始化时 Bash 3.2
+  的 here-string 临时文件写入。用例核对注入命中、失败阶段、清理及解除故障后的重试。
 - `doctor/cases.py`：诊断用例，以及诊断执行器和共享进程设施的回归。
 - `bootstrap/cases.py` 与 `bootstrap/mock.py`：安装编排、资源和准备用例，以及命令替身。
 - `config-loading/lazygit.py` 与 `config-loading/nvim.lua`：原生应用会话及应用内部断言。
