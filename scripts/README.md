@@ -104,6 +104,12 @@ Brewfile 表示 Homebrew 管理的安装，即使 PATH 上已有其他来源的�
 Bundle 使用 `--no-upgrade`，随后只对不满足最低要求的工具定向升级；它不固定首次安装版本，
 包管理器仍可能更新所需依赖。单独运行 Brewfile 只准备软件，不执行部署、插件准备和完整验收。
 
+Shuck 的 Brewfile 条目用 `trusted: true` 显式信任 `ewhauser/tap/shuck-cli`，授权范围仅为
+该 formula；`tap "ewhauser/tap"` 本身不授予整个 tap 的信任，见
+[Homebrew 的信任声明](https://docs.brew.sh/Brew-Bundle-and-Brewfile#trusted)。
+`tree-sitter` 命令由 `tree-sitter-cli` 包提供；Homebrew 的 `tree-sitter` 包仅提供库，
+安装清单和最低版本检查的升级映射均使用 CLI 包。
+
 Ubuntu 复用兼容命令；需要时先安装 apt 包，再使用已声明的固定上游资源或后备资源。
 包名不等于命令名时，`apt_commands` 用 `包名|命令列表` 声明；空命令列表按 dpkg 状态判断。
 `release_commands` 描述一项资源提供的多个命令，例如 Node/npm；`apt_fallbacks` 只在 apt
@@ -116,6 +122,9 @@ Ubuntu 24.04 的 Ghostty 使用固定的 mkasberg/ghostty-ubuntu 社区 deb，�
 字体按内部族名选择文件，并保留上游许可文件；Sarasa Term SC 的 7z 归档需要 7zz。
 
 Antidote 读取仓库的 Zsh 插件清单，下载缺失插件并更新必要缓存，不主动更新已有插件。
+插件准备在无控制终端的后台任务中执行，避免 Antidote 的 Zsh 子进程操作终端时触发
+SIGTTOU，停在 `RUN: Zsh plugin preparation`。任务仍保留原进程组，超时和中断会一并
+清理其子进程；输出继续实时写入终端与日志。
 Zsh 插件清单尚未锁定提交，新机器使用下载时的上游版本。Neovim 使用配置副本和
 `lazy-lock.json` 准备、恢复插件，禁止写回锁文件；Mason 根据实际配置准备工具，包版本仍由
 registry 解析。Treesitter parser 修订跟随锁定插件；补全资源也必须准备成功。

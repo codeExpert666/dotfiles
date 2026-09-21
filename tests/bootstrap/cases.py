@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """bootstrap 的离线行为测试：安装编排、应用准备与资源发布。"""
+import errno
 import importlib.util
 import io
 import json
 import os
+import select
 import shlex
 from pathlib import Path
 import shutil
 import signal
 import struct
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -18,12 +21,36 @@ from unittest.mock import patch
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'support'))
-from harness import REPO, Process, cleanup_on_exit, run, running, snapshot
+from harness import REPO, Process, cleanup_on_exit, run, running, snapshot, terminal
 BASH = os.environ.get('DOTFILES_TEST_BASH') or shutil.which('bash')
 REAL_TOOLS = {name: shutil.which(name) for name in ('git', 'stow', 'rm', 'rmdir', 'mktemp', 'zsh', 'nvim', 'starship', 'cc', 'npm')}
 spec = importlib.util.spec_from_file_location('bootstrap_resources', REPO / 'scripts/bootstrap/resources.py')
 resources = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(resources)
+
+
+def zsh_fixture(home, root, env):
+    manager = home / '.local/share/antidote'
+    manager.mkdir(parents=True)
+    # 模拟 Antidote 在另一个真实 Zsh 中读取 here-doc 的调用方式。
+    # read -d 会访问控制终端；仅用 cat 替身或无终端测试不能复现 SIGTTOU。
+    cli = manager / 'cli.zsh'
+    cli.write_text("read -rd '' initialization <<'EOS' || true\nfixture initialization\nEOS\n"
+                   'case $1 in\nbundle) cat "$TEST_BUNDLE" ;;\n'
+                   'path) print -r -- "$ANTIDOTE_HOME/$2" ;;\nesac\n')
+    (manager / 'antidote.zsh').write_text('antidote() { zsh -d -f "$TEST_ANTIDOTE_CLI" "$@" }\n')
+    cache = home / '.cache/antidote'
+    for name in ('zsh-autosuggestions', 'zsh-syntax-highlighting'):
+        plugin = cache / 'zsh-users' / name
+        plugin.mkdir(parents=True)
+        (plugin / (name + '.zsh')).write_text('typeset -g prepared=yes\n')
+    manifest = root / 'plugins.txt'
+    manifest.write_text('zsh-users/zsh-autosuggestions\nzsh-users/zsh-syntax-highlighting kind:clone\n')
+    os.utime(manifest, (1, 1))
+    bundle = root / 'bundle.zsh'
+    bundle.write_text('source "$ANTIDOTE_HOME/zsh-users/zsh-autosuggestions/zsh-autosuggestions.zsh"\n')
+    env.update(TEST_BUNDLE=str(bundle), TEST_ANTIDOTE_CLI=str(cli))
+    return manifest, bundle, cache
 
 
 class Orchestration(unittest.TestCase):
@@ -136,9 +163,10 @@ class Orchestration(unittest.TestCase):
 
     def hide_tools(self, *names):
         # 将 PATH 限制到夹具目录，避免宿主命令使缺失依赖探测意外通过。
-        for path in Path('/usr/bin').iterdir():
-            if path.name not in names and not (self.bin / path.name).exists() and path.is_file():
-                (self.bin / path.name).symlink_to(path)
+        for directory in ('/usr/bin', '/bin'):
+            for path in Path(directory).iterdir():
+                if path.name not in names and not (self.bin / path.name).exists() and path.is_file():
+                    (self.bin / path.name).symlink_to(path)
         for name in names:
             (self.bin / name).unlink(missing_ok=True)
         self.env['PATH'] = str(self.bin)
@@ -385,12 +413,51 @@ class Orchestration(unittest.TestCase):
         self.assertEqual(len(installs), 1)
         self.assertIn('--no-upgrade', installs[0])
         self.assertEqual(installs[0][-1], '--file=' + str(self.repo / 'scripts/bootstrap/macos/Brewfile'))
+        self.assertEqual({path.name for path in self.root.glob('brew-trusted-*')},
+                         {'brew-trusted-formula-ewhauser_tap_shuck-cli'})
         self.assertFalse(any(event[:2] == ['brew', 'upgrade'] for event in self.events()))
         self.assertFalse(any(event[0] == 'apt-get' or event[:2] == ['resources', 'font'] for event in self.events()))
         before = len(self.events())
         self.invoke('--apply', '--profile', 'server')
         self.assertEqual(self.brew_installs(self.events()[before:]), [])
         self.assertFalse(any(event[:2] == ['brew', 'upgrade'] for event in self.events()[before:]))
+
+    def test_macos_untrusted_formula_stops_before_deployment_and_retries(self):
+        self.macos()
+        self.hide_tools('shuck')
+        manifest = self.repo / 'scripts/bootstrap/macos/Brewfile'
+        saved = manifest.read_text()
+        try:
+            manifest.write_text(saved.replace('brew "ewhauser/tap/shuck-cli", trusted: true',
+                                              'brew "ewhauser/tap/shuck-cli"'))
+            output = self.invoke('--apply', '--profile', 'server', success=1).stderr
+            self.assertIn('untrusted tap ewhauser/tap', output)
+            self.assertTrue((self.root / 'brew-git').exists())
+            self.assertFalse((self.root / 'brew-ewhauser_tap_shuck-cli').exists())
+            self.assertFalse((self.home / '.config/nvim/init.lua').exists())
+            self.assertFalse(any(event[0] in ('resources', 'nvim', 'doctor') for event in self.events()))
+            self.assertFalse((self.home / '.local/state/dotfiles-bootstrap/lock').exists())
+        finally:
+            manifest.write_text(saved)
+        self.invoke('--apply', '--profile', 'server')
+        self.assertTrue((self.root / 'brew-ewhauser_tap_shuck-cli').exists())
+        self.assertTrue((self.bin / 'shuck').exists())
+        self.assertTrue(any(event[:2] == ['doctor', '--runtime'] for event in self.events()))
+
+    def test_macos_installs_tree_sitter_cli_when_only_library_is_installed(self):
+        self.macos(BOOTSTRAP_TEST_BREW_INSTALLED='tree-sitter')
+        self.hide_tools('tree-sitter')
+        self.invoke('--apply', '--profile', 'server')
+        self.assertTrue((self.root / 'brew-tree-sitter-cli').exists())
+        self.assertTrue((self.bin / 'tree-sitter').exists())
+        self.assertFalse(any(event[:2] == ['brew', 'upgrade'] for event in self.events()))
+
+    def test_macos_upgrades_incompatible_tree_sitter_cli(self):
+        self.macos(BOOTSTRAP_TEST_BREW_INSTALLED='all', BOOTSTRAP_TEST_OLD='tree-sitter')
+        self.invoke('--apply', '--profile', 'server')
+        self.assertEqual(self.brew_installs(), [])
+        self.assertEqual([event for event in self.events() if event[:2] == ['brew', 'upgrade']],
+                         [['brew', 'upgrade', '--formula', 'tree-sitter-cli']])
 
     def test_macos_desktop_adds_manifest_before_fonts(self):
         self.macos()
@@ -584,7 +651,7 @@ class Orchestration(unittest.TestCase):
 
     def test_initialization_group_signal_preserves_allocated_path_for_cleanup(self):
         helper = self.bin / 'mktemp'
-        helper.write_text('#!' + sys.executable + '\n' +
+        helper.write_text('#!' + sys.executable + ' -B\n' +
             'import os, pathlib, subprocess, sys, time\n' +
             f'root = pathlib.Path({str(self.root)!r})\n' +
             f'path = subprocess.check_output([{REAL_TOOLS["mktemp"]!r}, *sys.argv[1:]], text=True).strip()\n' +
@@ -689,6 +756,123 @@ class Orchestration(unittest.TestCase):
         self.assertTrue(self.brew_installs())
         self.assertIn(['brew', 'upgrade', '--formula', 'neovim'], self.events())
 
+    @unittest.skipUnless(REAL_TOOLS['zsh'], 'native Zsh is required')
+    def test_zsh_preparation_from_terminal_keeps_foreground_session(self):
+        _, bundle, cache = zsh_fixture(self.home, self.root, self.env)
+        self.mock_shell('zsh', 'exec ' + shlex.quote(REAL_TOOLS['zsh']) + ' "$@"\n')
+        self.prepare_environment()
+        output = terminal([BASH, '-c', 'set -e\n"$@"\nstty -g </dev/tty >/dev/null\n'
+                           'printf "Foreground terminal is still attached.\\n"\n',
+                           'bootstrap-terminal', BASH, str(self.repo / 'scripts/bootstrap.sh'),
+                           '--apply', '--profile', 'server'], env=self.env, cwd=self.root, timeout=60).decode()
+        self.assertIn('READY: Zsh plugin preparation', output)
+        self.assertIn('Bootstrap complete.', output)
+        self.assertIn('Foreground terminal is still attached.', output)
+        self.assertEqual((cache / 'zsh_plugins.zsh').read_bytes(), bundle.read_bytes())
+        self.assertEqual(list(cache.glob('.bootstrap.*')), [])
+        self.assertFalse((self.home / '.local/state/dotfiles-bootstrap/lock').exists())
+        self.assertEqual(list(self.scratch.iterdir()), [])
+
+
+class Execution(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix='bootstrap-execution-test-')
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+        self.helper = REPO / 'scripts/bootstrap/without_tty.py'
+        self.env = {'HOME': str(self.root), 'PATH': os.environ['PATH'], 'LC_ALL': 'C',
+                    'TMPDIR': str(self.root)}
+
+    def start(self, seconds):
+        task = self.root / 'task.py'
+        task.write_text('import errno, json, os, pathlib, signal, subprocess, sys, time\n'
+                        'try:\n    os.open("/dev/tty", os.O_RDWR)\n'
+                        'except OSError as error:\n    assert error.errno == errno.ENXIO\n'
+                        'else:\n    raise RuntimeError("task still has a controlling terminal")\n'
+                        'signal.signal(signal.SIGTERM, signal.SIG_IGN)\n'
+                        'child = subprocess.Popen([sys.executable, "-B", "-c", "import time; time.sleep(60)"])\n'
+                        'pathlib.Path("ready").write_text(json.dumps(dict(parent=os.getpid(), child=child.pid, '
+                        'session=os.getsid(0), group=os.getpgrp())))\n'
+                        'time.sleep(60)\n')
+        # 调用生产执行器，测试任务和日志管道在超时/终端 Ctrl-C 后的实际清理。
+        driver = '''set -e
+source "$1"
+scratch="$2" log_file="$2/task.log" active_pid='' timer_pid=''
+registering=no interrupted_status=0
+shift 2
+trap 'stop_children' EXIT
+trap 'interrupt_bootstrap 130' INT
+trap 'interrupt_bootstrap 143' TERM
+execute "$@"
+'''
+        process = Process([BASH, '-c', driver, 'bootstrap-execution',
+                           str(REPO / 'scripts/bootstrap/common.bash'), str(self.root), str(seconds), 'log',
+                           sys.executable, '-B', str(self.helper), sys.executable, '-B', str(task)],
+                          terminal=True, env=self.env, cwd=self.root)
+        self.addCleanup(process.close)
+        return process
+
+    def assert_cleaned(self, process):
+        data = json.loads((self.root / 'ready').read_text())
+        self.assertEqual(data['session'], process.pid, 'task escaped the original session')
+        self.assertNotEqual(data['group'], process.pid, 'task lost its separate process group')
+        for key in ('parent', 'child'):
+            self.assertFalse(running(data[key]), f'{key} survived command cleanup')
+        self.assertEqual(process.groups(), set(), 'task or watchdog descendants survived cleanup')
+
+    def wait_terminal(self, process):
+        # macOS 会在会话退出时等待终端输出排空（包括 Ctrl-C 的回显）。
+        # 必须持续读取 PTY，不能像普通文件日志那样只 wait。
+        deadline = time.monotonic() + 10
+        output = bytearray()
+        while process.poll() is None:
+            self.assertLess(time.monotonic(), deadline, repr(bytes(output)))
+            if select.select([process.master], [], [], .05)[0]:
+                try:
+                    block = os.read(process.master, 65536)
+                except OSError as error:
+                    if error.errno != errno.EIO:
+                        raise
+                    break
+                if not block:
+                    break
+                output.extend(block)
+        return process.wait(timeout=max(0, deadline - time.monotonic()))
+
+    def test_detached_task_timeout_stops_descendants(self):
+        process = self.start(2)
+        self.assertEqual(self.wait_terminal(process), 124)
+        self.assertTrue((self.root / 'timed-out').exists())
+        self.assert_cleaned(process)
+
+    def test_terminal_ctrl_c_stops_detached_task_and_descendants(self):
+        process = self.start(60)
+        deadline = time.monotonic() + 5
+        while not (self.root / 'ready').exists():
+            self.assertIsNone(process.poll())
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(.02)
+        os.write(process.master, b'\x03')
+        self.assertEqual(self.wait_terminal(process), 130)
+        self.assertFalse((self.root / 'timed-out').exists())
+        self.assert_cleaned(process)
+
+    def test_command_without_terminal_preserves_exit_status(self):
+        result = run([sys.executable, '-B', str(self.helper), sys.executable, '-B', '-c',
+                      'import sys; print("command completed"); sys.exit(37)'], env=self.env, cwd=self.root)
+        self.assertEqual(result.returncode, 37, result.stderr)
+        self.assertEqual(result.stdout, 'command completed\n')
+
+    def test_terminal_session_leader_is_rejected(self):
+        marker = self.root / 'should-not-run'
+        with self.assertRaises(subprocess.CalledProcessError) as failure:
+            terminal([sys.executable, '-B', str(self.helper), sys.executable, '-B', '-c',
+                      f'from pathlib import Path; Path({str(marker)!r}).touch()'],
+                     env=self.env, cwd=self.root, timeout=5)
+        self.assertEqual(failure.exception.returncode, 1)
+        self.assertFalse(marker.exists())
+
+
 class Preparation(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix='bootstrap-native-test-')
@@ -714,33 +898,13 @@ class Preparation(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(list(physical.iterdir()), [], 'nested driver did not clean its fixtures')
 
-    def zsh_fixture(self):
-        manager = self.home / '.local/share/antidote'
-        manager.mkdir(parents=True)
-        # 仅替换 Antidote 提供插件的边界；准备脚本、Zsh 语法检查
-        # 和缓存发布均使用实际实现。
-        (manager / 'antidote.zsh').write_text(
-            'antidote() {\ncase $1 in\nbundle) cat "$TEST_BUNDLE" ;;\n'
-            'path) print -r -- "$ANTIDOTE_HOME/$2" ;;\nesac\n}\n')
-        cache = self.home / '.cache/antidote'
-        plugin = cache / 'zsh-users/zsh-autosuggestions'
-        plugin.mkdir(parents=True)
-        (plugin / 'zsh-autosuggestions.zsh').write_text('typeset -g prepared=yes\n')
-        manifest = self.root / 'plugins.txt'
-        manifest.write_text('zsh-users/zsh-autosuggestions\n')
-        os.utime(manifest, (1, 1))
-        bundle = self.root / 'bundle.zsh'
-        bundle.write_text('source "$ANTIDOTE_HOME/zsh-users/zsh-autosuggestions/zsh-autosuggestions.zsh"\n')
-        self.env['TEST_BUNDLE'] = str(bundle)
-        return manifest, bundle, cache
-
     def prepare_zsh(self, manifest):
         return run([REAL_TOOLS['zsh'], '-d', '-f', str(REPO / 'scripts/bootstrap/zsh.zsh'), str(manifest)],
                    env=self.env, cwd=self.root, timeout=10)
 
     @unittest.skipUnless(REAL_TOOLS['zsh'], 'native Zsh is required')
     def test_zsh_cache_publication_and_reuse(self):
-        manifest, bundle, cache = self.zsh_fixture()
+        manifest, bundle, cache = zsh_fixture(self.home, self.root, self.env)
         result = self.prepare_zsh(manifest)
         self.assertEqual(result.returncode, 0, result.stderr)
         generated = cache / 'zsh_plugins.zsh'
@@ -754,7 +918,7 @@ class Preparation(unittest.TestCase):
 
     @unittest.skipUnless(REAL_TOOLS['zsh'], 'native Zsh is required')
     def test_invalid_zsh_bundle_keeps_existing_cache(self):
-        manifest, bundle, cache = self.zsh_fixture()
+        manifest, bundle, cache = zsh_fixture(self.home, self.root, self.env)
         generated = cache / 'zsh_plugins.zsh'
         generated.write_text('# 保留已有缓存。\n')
         before = (generated.stat().st_ino, generated.stat().st_mtime_ns, generated.read_bytes())

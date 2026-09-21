@@ -47,6 +47,7 @@ macos_package_for() {
 		delta) printf '%s\n' git-delta ;;
 		infocmp | tic) printf '%s\n' ncurses ;;
 		shuck) printf '%s\n' ewhauser/tap/shuck-cli ;;
+		tree-sitter) printf '%s\n' tree-sitter-cli ;;
 		7zz) printf '%s\n' sevenzip ;;
 		*) printf '%s\n' "$1" ;;
 	esac

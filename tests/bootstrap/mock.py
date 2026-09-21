@@ -1,5 +1,5 @@
-#!/usr/bin/env python3
-"""仅复制到临时测试目录中执行的命令替身。"""
+#!/usr/bin/env -S python3 -B
+"""仅复制到临时测试目录中执行的命令替身；禁用字节码以免污染待校验 HOME。"""
 import json
 import os
 from pathlib import Path
@@ -40,6 +40,7 @@ def installed_commands(package, installer):
                 'fd-find': ['fd'], 'build-essential': ['cc', 'make'], 'xz-utils': ['xz'],
                 'ncurses-bin': ['infocmp', 'tic'], 'ncurses': ['infocmp', 'tic'],
                 'ewhauser/tap/shuck-cli': ['shuck'], 'sevenzip': ['7zz'], '7zip': ['7zz'],
+                'tree-sitter-cli': ['tree-sitter'], 'tree-sitter': [] if installer == 'brew' else ['tree-sitter'],
                 'fontconfig': ['fc-list', 'fc-cache'], 'wl-clipboard': ['wl-copy', 'wl-paste']}.get(package, [package])
     for command in commands:
         if installer == 'apt' and command in words('BOOTSTRAP_TEST_APT_OLD'):
@@ -65,17 +66,23 @@ def brew_mark(package):
     installed_commands(package, 'brew')
 
 
+def brew_trust_path(kind, package):
+    kind = 'formula' if kind == 'brew' else kind
+    return root / ('brew-trusted-' + kind + '-' + package.replace('/', '_'))
+
+
 def brewfile_entries(file):
-    # 仓库中的 Brewfile 仅使用静态声明；替身遇到不支持的语法就报错，
+    # 仓库中的 Brewfile 仅使用静态声明及 trusted 布尔选项；替身遇到不支持的语法就报错，
     # 避免静默接受不完整的包清单。
     entries = []
     for line in Path(file).read_text().splitlines():
         if not line.strip() or line.lstrip().startswith('#'):
             continue
-        match = re.fullmatch(r'\s*(tap|brew|cask) "([^"]+)"(?:\s*#.*)?\s*', line)
+        match = re.fullmatch(r'\s*(tap|brew|cask) "([^"]+)"(?:,\s*trusted: (true|false))?(?:\s*#.*)?\s*', line)
         if not match:
             raise RuntimeError('unsupported Brewfile fixture syntax: ' + line)
-        entries.append(match.groups())
+        kind, package, trusted = match.groups()
+        entries.append((kind, package, trusted == 'true'))
     return entries
 
 
@@ -110,11 +117,18 @@ elif name == 'brew':
         file = next(arg.removeprefix('--file=') for arg in args if arg.startswith('--file='))
         entries = brewfile_entries(file)
         if args[1] == 'check':
-            sys.exit(0 if all(brew_has(package) for _, package in entries) else 1)
+            sys.exit(0 if all(brew_has(package) for _, package, _ in entries) else 1)
         if os.environ.get('BOOTSTRAP_TEST_FAIL') == 'brew' or (
                 os.environ.get('BOOTSTRAP_TEST_FAIL') == 'bundle-desktop' and Path(file).name == 'Brewfile.desktop'):
             sys.exit(42)
-        for kind, package in entries:
+        for kind, package, trusted in entries:
+            if trusted:
+                brew_trust_path(kind, package).touch()
+            if kind != 'tap' and '/' in package and not package.startswith('homebrew/'):
+                tap = package.rsplit('/', 1)[0]
+                if not (brew_trust_path(kind, package).exists() or brew_trust_path('tap', tap).exists()):
+                    print(f'Error: Refusing to load {package} from untrusted tap {tap}.', file=sys.stderr)
+                    sys.exit(1)
             if not brew_has(package):
                 if kind == 'tap':
                     (root / ('brew-' + package.replace('/', '_'))).touch()

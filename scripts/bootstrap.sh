@@ -172,7 +172,8 @@ phase='Zsh plugins'
 if [[ ! -r $HOME/.local/share/antidote/antidote.zsh ]]; then
 	run 'Antidote installation' 600 python3 -B "$script_dir/bootstrap/resources.py" install antidote universal
 fi
-run 'Zsh plugin preparation' 900 zsh -d -f "$script_dir/bootstrap/zsh.zsh" "$HOME/.config/zsh/.zsh_plugins.txt"
+run 'Zsh plugin preparation' 900 python3 -B "$script_dir/bootstrap/without_tty.py" \
+	zsh -d -f "$script_dir/bootstrap/zsh.zsh" "$HOME/.config/zsh/.zsh_plugins.txt"
 
 phase='Neovim plugins'
 run 'stage Neovim configuration and locked managers' 900 python3 -B "$script_dir/bootstrap/resources.py" stage-nvim "$repo_root" "$scratch/config"
