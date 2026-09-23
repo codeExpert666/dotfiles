@@ -5,7 +5,7 @@
 apt_packages=(
 	git stow zsh vim curl python3 build-essential
 	tar unzip xz-utils ncurses-bin less ripgrep fd-find
-	git-delta zoxide shellcheck shfmt ca-certificates lesspipe
+	git-delta zoxide shellcheck shfmt ca-certificates
 )
 
 # 包名与命令不一致时声明「包名|命令列表」；空列表按 dpkg 安装状态检查。
@@ -18,7 +18,6 @@ apt_commands=(
 	'fd-find|fd'
 	'git-delta|delta'
 	'ca-certificates|'
-	'lesspipe|'
 )
 
 # ID 对应 releases.json；仅在实际命令不满足要求时安装固定资源。

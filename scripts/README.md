@@ -1,6 +1,6 @@
 # 脚本使用与维护
 
-三个入口分别负责配置部署、状态诊断和新机器准备，可从任意工作目录调用。
+四个入口分别负责配置部署、状态诊断、本机环境准备和 Multipass 开发机，可从任意工作目录调用。
 以下相对路径命令均在仓库根目录执行；完整参数以各入口的 `--help` 为准。
 
 | 入口                         | 用途                                                 | 默认行为                             |
@@ -8,6 +8,7 @@
 | [deploy.sh](deploy.sh)       | 用 GNU Stow 部署链接，创建个人 Git 入口和 Codex 角色副本 | 模拟部署；显式 `--apply` 才写入      |
 | [doctor.sh](doctor.sh)       | 检查环境、部署和应用配置；可选受控运行               | 离线检查，累积独立故障；不安装或修复 |
 | [bootstrap.sh](bootstrap.sh) | 准备软件、插件和桌面资源，调用 deploy，再调用 doctor | 离线预览；必须指定 profile           |
+| [multipass.sh](multipass.sh) | 创建、重新配置、检查和接入 Ubuntu 开发机            | create/provision 默认预览            |
 
 ```sh
 # 已有软件，只需部署或检查配置
@@ -29,7 +30,7 @@ bash scripts/doctor.sh --verbose 2>doctor.log
 Sarasa Term SC，以及 Linux 剪贴板工具。远程机器上的字体通常属于终端客户端；已有 Ghostty
 SSH 集成负责向远端提供终端定义。
 
-三个入口的帮助均写入 stdout，执行报告、错误与提示均写入 stderr。
+四个入口的帮助均写入 stdout，执行报告、错误与提示均写入 stderr。
 
 ## 支持范围与目标目录
 
@@ -38,6 +39,7 @@ SSH 集成负责向远端提供终端定义。
 | deploy    | Linux/macOS，Bash 3.2+                                                       | GNU Stow 支持 `--no-folding`，Git 支持 `--fixed-value`；新建 Git 入口和 Codex 副本需要硬链接 |
 | doctor    | Linux/macOS，Bash 3.2+                                                       | 原生应用可按可用性检查；`--runtime` 需要 Python 3.7+ 标准库及已准备的插件       |
 | bootstrap | Ubuntu 24.04/26.04（x86_64、arm64）；macOS 15/26（Apple Silicon），Bash 3.2+ | 普通用户运行；安装阶段按需在前台 sudo 认证，随后准备 Python 3.9+ 等依赖         |
+| multipass | macOS 15+ Apple Silicon，Bash 3.2+、Python 3.9+                            | 公共 HTTPS 仓库、完整 SHA、专用 SSH 公钥和已加载的 agent 身份；见[使用说明](../environments/multipass/README.md) |
 
 HOME 必须是已存在的绝对目录。四个 XDG 变量须未设置、为空，或指向默认的
 `~/.config`、`~/.local/share`、`~/.local/state`、`~/.cache`；已存在的目录可按实际目录身份识别别名。
@@ -250,12 +252,12 @@ Zsh/Neovim 会话须实际完成检查；提前退出会报告失败。
 
 ## 代码导航与验证
 
-`.sh` 是三个公开命令入口；[layout.bash](layout.bash) 是唯一跨入口布局库。
+`.sh` 是四个公开命令入口；[layout.bash](layout.bash) 是 deploy/bootstrap/doctor 的跨入口布局库。
 `bootstrap/` 和 `doctor/` 内的文件是各自私有实现：Bash 负责调度，Python 标准库负责复杂
 文件操作和 PTY，Lua/Zsh 调用对应运行时的能力。source 文件只声明函数或数据，入口持有
 运行状态和 trap。平台安装器保留各自政策，不把安装要求、健康等级与部署规则合成通用清单。
 
-全量回归入口为 [tests/all.sh](../tests/all.sh)。四套独立测试的职责、单用例运行、依赖、
+全量回归入口为 [tests/all.sh](../tests/all.sh)。五套独立离线测试的职责、单用例运行、依赖、
 缓存集成和测试代码静态检查见 [测试说明](../tests/README.md)。
 
 ```sh

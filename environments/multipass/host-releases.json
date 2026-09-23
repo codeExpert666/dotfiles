@@ -1,0 +1,8 @@
+{
+  "minimum": "1.16.4",
+  "macos_pkg": {
+    "version": "1.16.4",
+    "url": "https://github.com/canonical/multipass/releases/download/v1.16.4/multipass-1.16.4+mac-Darwin.pkg",
+    "sha256": "e481704f65bc1650ae8aa5c873eb9137e8b9b403eac60aa603b68d8b4d2c281c"
+  }
+}

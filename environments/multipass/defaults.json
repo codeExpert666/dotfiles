@@ -1,0 +1,18 @@
+{
+  "name": "ubuntu-dev",
+  "image": "24.04",
+  "cpus": 4,
+  "memory": "8G",
+  "disk": "40G",
+  "repo_url": "https://github.com/codeExpert666/dotfiles.git",
+  "guest_home": "/home/ubuntu",
+  "workspace": "/home/ubuntu/workspace",
+  "timeouts": {
+    "query": 15,
+    "download": 600,
+    "install": 1800,
+    "cloud_init": 3600,
+    "reboot": 600,
+    "bootstrap": 7200
+  }
+}

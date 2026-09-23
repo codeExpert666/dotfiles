@@ -13,10 +13,13 @@
 - Codex custom agents live in `codex/agents/` and deploy as regular copies
   outside Stow because Codex rejects symlinked role files; personal Codex config,
   credentials, and runtime state remain outside version control.
-- `scripts/` contains deploy, doctor, and bootstrap entrypoints. Bootstrap and
-  doctor helpers stay in their corresponding subdirectories; `layout.bash`
-  centralizes shared deployment paths and package lists.
-- `tests/` contains four independent suites and shared fixtures in `tests/support/`.
+- `scripts/` contains deploy, doctor, bootstrap, and Multipass entrypoints.
+  Their helpers stay in corresponding subdirectories; `layout.bash` centralizes
+  shared deployment paths and package lists.
+- `environments/multipass/` contains VM defaults, cloud-init, and the installer
+  manifest. It is not a Stow package.
+- `tests/` contains five independent offline suites, a separate live Multipass
+  acceptance entrypoint, and shared fixtures in `tests/support/`.
 
 ## Build, Test, and Development Commands
 
@@ -26,7 +29,8 @@ There is no build step. Run these commands from the repository root:
 - `bash scripts/bootstrap.sh --dry-run --profile server`: preview environment
   preparation; use `desktop` for GUI tools and fonts.
 - `bash scripts/doctor.sh`: check dependencies, deployment, and configuration.
-- `bash tests/all.sh`: run deploy, doctor, bootstrap, and config-loading suites.
+- `bash tests/all.sh`: run the five offline suites, including Multipass.
+- `bash tests/multipass-live.sh --help`: review explicit two-image VM acceptance.
 - `bash tests/config-loading.sh`: verify application configuration independently.
 
 See [scripts/README.md](scripts/README.md) for maintenance and static checks.

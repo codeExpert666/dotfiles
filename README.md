@@ -8,7 +8,7 @@
 - **先预览后写入**：环境准备脚本 `bootstrap.sh` 和配置部署脚本 `deploy.sh` 默认只做预览；
   显式传入 `--apply` 后，才会安装软件或部署配置。
 - **可诊断**：诊断脚本 `doctor.sh` 分模块检查依赖、部署与配置，可选受控运行会话。
-- **可回归**：四套独立测试覆盖脚本行为与应用实际加载结果。
+- **可回归**：五套独立离线测试覆盖脚本行为与应用实际加载结果。
 
 ## 受管配置
 
@@ -44,6 +44,7 @@ Zsh 中用 `Ctrl-R` 打开 Atuin 历史搜索，`Ctrl-T` 打开 fzf 文件选择
 | bootstrap | Ubuntu 24.04/26.04（x86_64、arm64）、macOS 15/26（Apple Silicon）         |
 | deploy    | Linux/macOS；GNU Stow（支持 `--no-folding`）、Git（支持 `--fixed-value`） |
 | doctor    | Linux/macOS；`--runtime` 另需 Python 3.7+ 与已准备的插件                  |
+| multipass | macOS 15+ Apple Silicon、Python 3.9+；创建 Ubuntu 24.04/26.04 开发机      |
 
 bootstrap 在 `--apply` 时准备所需的软件和插件；请以普通用户运行，并按提示
 提供 `sudo` 认证。各项软件的最低版本见
@@ -108,6 +109,13 @@ bash scripts/bootstrap.sh --apply --profile server
 bash scripts/deploy.sh --dry-run   # 预览链接与冲突
 bash scripts/deploy.sh --apply     # 建立符号链接
 ```
+
+### Multipass Ubuntu 开发机
+
+在 Apple Silicon Mac 上，用 [Multipass 开发机说明](environments/multipass/README.md)
+从指定远程提交创建 Ubuntu 24.04 或 26.04 虚拟机。`scripts/multipass.sh` 默认预览，
+复用合格的 Multipass，并在客户机运行 `bootstrap.sh --profile server`；生成的 SSH
+入口与状态保存在仓库之外。`environments/` 不通过 Stow 部署。
 
 ### 部署后检查
 
@@ -216,9 +224,9 @@ bash scripts/deploy.sh --apply
 
 ## 更多文档
 
-- [脚本使用与维护](scripts/README.md)：三个入口的完整行为、安装来源、日志、
+- [脚本使用与维护](scripts/README.md)：四个入口的完整行为、安装来源、日志、
   失败与重试、doctor 的证据范围。
-- [测试](tests/README.md)：四套测试的职责、单用例运行与静态检查。
+- [测试](tests/README.md)：五套离线测试的职责、单用例运行与静态检查。
 - [仓库约定](AGENTS.md)：目录组织、代码风格、提交信息与验证要求。
 
 ## 许可证

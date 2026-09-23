@@ -5,14 +5,15 @@
 
 | 入口                                   | 验证范围                                               | 运行时机             |
 | -------------------------------------- | ------------------------------------------------------ | -------------------- |
-| [all.sh](all.sh)                       | 按顺序运行下列四套，任一失败立即停止                   | 完整回归、跨套件调整 |
+| [all.sh](all.sh)                       | 按顺序运行下列五套，任一失败立即停止                   | 完整回归、跨套件调整 |
 | [deploy.sh](deploy.sh)                 | 链接布局、平台包选择、冲突、幂等性、错误报告和清理     | 调整部署行为         |
 | [doctor.sh](doctor.sh)                 | 诊断的状态和输出、独立故障、只读保证、受控运行及清理   | 调整诊断行为         |
 | [bootstrap.sh](bootstrap.sh)           | 安装来源和清单、阶段顺序、失败重试、资源发布、插件准备 | 调整环境准备行为     |
 | [config-loading.sh](config-loading.sh) | 应用实际发现配置，并加载出预期选项或行为               | 调整应用配置         |
+| [multipass.sh](multipass.sh)           | VM 参数、安装复用、SSH 信任、固定提交及冲突保护         | 调整 Multipass 编排  |
 
 `all.sh` 是全量运行的便利命令，不持有夹具或断言；中断时把信号转交当前套件并等待清理。
-四套测试可以独立运行。
+五套测试可以独立运行。真实 VM 验收只由显式的 `multipass-live.sh` 运行，不在 `all.sh` 内。
 共享 Skill 在 deploy 中验证源文件与 Claude 别名的一致性、资源可读性、重复部署及冲突
 保留，以及包内 `src` 和元数据不被部署、已有 `~/src` 在部署和卸载时保持不变。在 doctor
 中验证断链、正文缺失或变成文件链接、包内入口指向错误 Skill，以及源目录或排除规则缺失
@@ -40,6 +41,7 @@ bash tests/all.sh
 bash tests/config-loading.sh
 bash tests/doctor.sh DoctorTests.test_multiple_independent_link_faults
 bash tests/bootstrap.sh Publication.test_requirements_and_platform_manifests_agree
+bash tests/multipass.sh
 ```
 
 入口也可以从任意工作目录按绝对路径调用。用 `/path/to/bash tests/all.sh` 指定 Bash，
@@ -94,6 +96,7 @@ DOTFILES_TEST_PREPARED_HOME=/path/to/prepared-home bash tests/all.sh
 - `doctor/cases.py` 与 `doctor/lazygit-fixture.py`：诊断用例、Lazygit 交互夹具，
   以及诊断执行器和共享进程设施的回归。
 - `bootstrap/cases.py` 与 `bootstrap/mock.py`：安装编排、资源和准备用例，以及命令替身。
+- `multipass/cases.py`：无网络的参数、安装策略、SSH 配置、Git 提交及预览用例。
 - `config-loading/lazygit.py` 与 `config-loading/nvim.lua`：原生应用会话及应用内部断言。
 - `support/harness.bash` 与 `support/harness.py`：跨套件的夹具、快照、进程清理和终端设施。
 
@@ -110,7 +113,7 @@ DOTFILES_TEST_PREPARED_HOME=/path/to/prepared-home bash tests/all.sh
 在仓库根目录执行；工具缺失应记录为未验证，不能算通过：
 
 ```sh
-files=(tests/*.sh tests/deploy/*.sh tests/deploy/*.bash tests/support/*.bash)
+files=(tests/*.sh tests/deploy/*.sh tests/deploy/*.bash tests/support/*.bash scripts/multipass.sh)
 for file in "${files[@]}"; do bash -n "$file" || exit; done
 shellcheck -x "${files[@]}"
 shfmt -d -ci -sr "${files[@]}"

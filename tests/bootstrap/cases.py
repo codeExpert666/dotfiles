@@ -779,13 +779,19 @@ class Orchestration(unittest.TestCase):
                              for event in self.events()[before:]))
 
     def test_ubuntu_installs_packages_without_commands(self):
-        self.env['BOOTSTRAP_TEST_PACKAGES'] = 'ca-certificates,lesspipe'
+        self.env['BOOTSTRAP_TEST_PACKAGES'] = 'ca-certificates'
         self.invoke('--apply', '--profile', 'server')
         self.assertIn(['apt-get', 'install', '-y', '--no-install-recommends',
-                       'ca-certificates', 'lesspipe'], self.events())
+                       'ca-certificates'], self.events())
         before = len(self.events())
         self.invoke('--apply', '--profile', 'server')
         self.assertFalse(any(event[0] == 'apt-get' for event in self.events()[before:]))
+
+    def test_ubuntu_base_does_not_request_nonexistent_lesspipe_package(self):
+        for release in ('24.04', '26.04'):
+            (self.root / 'os-release').write_text(f'ID=ubuntu\nVERSION_ID={release}\n')
+            output = self.invoke('--profile', 'server').stderr
+            self.assertNotIn('lesspipe', output)
 
     def test_ubuntu_node_prepares_missing_npm(self):
         self.hide_tools('npm')

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # 全量回归入口；单套回归直接调用 deploy/doctor/bootstrap/config-loading.sh。
-# 固定顺序运行四个独立套件；夹具、断言和清理由各套件持有。
+# 固定顺序运行五个独立套件；夹具、断言和清理由各套件持有。
 # 用目标 Bash 启动本文件即可将它传到 Python 测试及被测子入口。
 set -e
 unset CDPATH
@@ -37,7 +37,7 @@ script_parent="${BASH_SOURCE[0]%/*}"
 [[ $script_parent != "${BASH_SOURCE[0]}" ]] || script_parent=.
 test_dir=$(cd -- "$script_parent" && pwd -P)
 printf 'Test interpreter: %s (%s)\n' "$BASH" "$BASH_VERSION"
-for suite in deploy doctor bootstrap config-loading; do
+for suite in deploy doctor bootstrap config-loading multipass; do
 	printf '\nRunning %s tests\n' "$suite"
 	registering=yes
 	# 作业控制保留子入口接收 INT 的能力；父入口用 wait 及时处理信号。
