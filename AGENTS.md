@@ -2,6 +2,9 @@
 
 ## Project Structure & Module Organization
 
+- The core prepares, deploys, and checks a personal terminal environment on an
+  existing macOS or Ubuntu machine. Multipass is an optional Ubuntu development
+  machine extension that creates a guest and runs the core server bootstrap there.
 - Top-level GNU Stow packages (`zsh/`, `git/`, `nvim/`, `ghostty/`, etc.) mirror
   paths beneath HOME, usually `<package>/.config/<app>/`.
 - Neovim Lua lives in `nvim/.config/nvim/lua/`; Ghostty shader assets live in
@@ -13,13 +16,17 @@
 - Codex custom agents live in `codex/agents/` and deploy as regular copies
   outside Stow because Codex rejects symlinked role files; personal Codex config,
   credentials, and runtime state remain outside version control.
-- `scripts/` contains deploy, doctor, bootstrap, and Multipass entrypoints.
-  Their helpers stay in corresponding subdirectories; `layout.bash` centralizes
-  shared deployment paths and package lists.
+- `scripts/` contains the core deploy, doctor, and bootstrap entrypoints plus the
+  optional Multipass entrypoint. Their helpers stay in corresponding subdirectories;
+  `layout.bash` centralizes core deployment paths and package lists.
 - `environments/multipass/` contains VM defaults, cloud-init, and the installer
-  manifest. It is not a Stow package.
+  manifest. It is not a Stow package; its [README](environments/multipass/README.md)
+  owns the extension's setup, daily use, state, and recovery guidance.
 - `tests/` contains five independent offline suites, a separate live Multipass
   acceptance entrypoint, and shared fixtures in `tests/support/`.
+- The root README owns the terminal environment quick start and links to the
+  extension. `scripts/README.md` documents core script behavior; `tests/README.md`
+  navigates all suites. Historical plans and validation reports live in `docs/`.
 
 ## Build, Test, and Development Commands
 

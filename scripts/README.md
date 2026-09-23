@@ -1,14 +1,16 @@
 # 脚本使用与维护
 
-四个入口分别负责配置部署、状态诊断、本机环境准备和 Multipass 开发机，可从任意工作目录调用。
-以下相对路径命令均在仓库根目录执行；完整参数以各入口的 `--help` 为准。
+核心入口 bootstrap、deploy 和 doctor 用于在当前机器准备、部署和检查终端环境，
+可从任意工作目录调用。以下相对路径命令均在仓库根目录执行；
+完整参数以各入口的 `--help` 为准。
+
+## 核心入口
 
 | 入口                         | 用途                                                 | 默认行为                             |
 | ---------------------------- | ---------------------------------------------------- | ------------------------------------ |
 | [deploy.sh](deploy.sh)       | 用 GNU Stow 部署链接，创建个人 Git 入口和 Codex 角色副本 | 模拟部署；显式 `--apply` 才写入      |
 | [doctor.sh](doctor.sh)       | 检查环境、部署和应用配置；可选受控运行               | 离线检查，累积独立故障；不安装或修复 |
 | [bootstrap.sh](bootstrap.sh) | 准备软件、插件和桌面资源，调用 deploy，再调用 doctor | 离线预览；必须指定 profile           |
-| [multipass.sh](multipass.sh) | 创建、重新配置、检查和接入 Ubuntu 开发机            | create/provision 默认预览            |
 
 ```sh
 # 已有软件，只需部署或检查配置
@@ -17,7 +19,7 @@ bash scripts/deploy.sh --apply
 bash scripts/doctor.sh
 bash scripts/doctor.sh --only zsh --only nvim --runtime
 
-# 新机器：先预览，再执行所选准备流程
+# 需要准备软件的当前机器：先预览，再执行所选准备流程
 bash scripts/bootstrap.sh --profile server
 bash scripts/bootstrap.sh --apply --profile server
 bash scripts/bootstrap.sh --apply --profile desktop
@@ -30,21 +32,28 @@ bash scripts/doctor.sh --verbose 2>doctor.log
 Sarasa Term SC，以及 Linux 剪贴板工具。远程机器上的字体通常属于终端客户端；已有 Ghostty
 SSH 集成负责向远端提供终端定义。
 
-四个入口的帮助均写入 stdout，执行报告、错误与提示均写入 stderr。
+上述三个核心入口的帮助写入 stdout，执行报告、错误与提示写入 stderr。
 
-## 支持范围与目标目录
+## 可选扩展入口
+
+[multipass.sh](multipass.sh) 在 Apple Silicon Mac 宿主机上创建、重新配置、检查和接入
+Ubuntu 开发机，客户机内复用核心 `bootstrap.sh --profile server`。
+`create` 和 `provision` 默认预览；宿主要求、命令、状态输出与恢复流程统一见
+[Multipass 开发机说明](../environments/multipass/README.md)。
+
+## 核心入口的支持范围与目标目录
 
 | 入口      | 系统与解释器                                                                 | 其他前提                                                                        |
 | --------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
 | deploy    | Linux/macOS，Bash 3.2+                                                       | GNU Stow 支持 `--no-folding`，Git 支持 `--fixed-value`；新建 Git 入口和 Codex 副本需要硬链接 |
 | doctor    | Linux/macOS，Bash 3.2+                                                       | 原生应用可按可用性检查；`--runtime` 需要 Python 3.7+ 标准库及已准备的插件       |
 | bootstrap | Ubuntu 24.04/26.04（x86_64、arm64）；macOS 15/26（Apple Silicon），Bash 3.2+ | 普通用户运行；安装阶段按需在前台 sudo 认证，随后准备 Python 3.9+ 等依赖         |
-| multipass | macOS 15+ Apple Silicon，Bash 3.2+、Python 3.9+                            | 公共 HTTPS 仓库、完整 SHA、专用 SSH 公钥和已加载的 agent 身份；见[使用说明](../environments/multipass/README.md) |
 
-HOME 必须是已存在的绝对目录。四个 XDG 变量须未设置、为空，或指向默认的
+核心入口要求 HOME 是已存在的绝对目录。四个 XDG 变量须未设置、为空，或指向默认的
 `~/.config`、`~/.local/share`、`~/.local/state`、`~/.cache`；已存在的目录可按实际目录身份识别别名。
-HOME 的逻辑表示会传给子入口，物理目标另行计算。不要导出 `ZDOTDIR`；仓库根 `.zshenv`
-负责设置未导出的 ZDOTDIR。bootstrap 还要求 `NVIM_APPNAME` 未设置或为 `nvim`。
+bootstrap/deploy 将 HOME 的逻辑表示传给子入口，物理目标另行计算。不要导出
+`ZDOTDIR`；仓库根 `.zshenv` 负责设置未导出的 ZDOTDIR。bootstrap 还要求
+`NVIM_APPNAME` 未设置或为 `nvim`。
 
 bootstrap 在安装前拒绝继承的 Git 仓库上下文：`GIT_DIR`、`GIT_WORK_TREE`、`GIT_COMMON_DIR`、
 `GIT_INDEX_FILE`、`GIT_OBJECT_DIRECTORY`、`GIT_ALTERNATE_OBJECT_DIRECTORIES`、`GIT_SHALLOW_FILE`、
@@ -253,10 +262,12 @@ Zsh/Neovim 会话须实际完成检查；提前退出会报告失败。
 
 ## 代码导航与验证
 
-`.sh` 是四个公开命令入口；[layout.bash](layout.bash) 是 deploy/bootstrap/doctor 的跨入口布局库。
+`.sh` 是公开命令入口；[layout.bash](layout.bash) 是三个核心入口的共享布局库。
 `bootstrap/` 和 `doctor/` 内的文件是各自私有实现：Bash 负责调度，Python 标准库负责复杂
 文件操作和 PTY，Lua/Zsh 调用对应运行时的能力。source 文件只声明函数或数据，入口持有
 运行状态和 trap。平台安装器保留各自政策，不把安装要求、健康等级与部署规则合成通用清单。
+`multipass.sh` 及 `multipass/` 下的 Python 文件是可选的宿主机编排实现；
+它们使用客户机脚本，但不共享核心入口的所有环境与输出约定。
 
 全量回归入口为 [tests/all.sh](../tests/all.sh)。五套独立离线测试的职责、单用例运行、依赖、
 缓存集成和测试代码静态检查见 [测试说明](../tests/README.md)。
@@ -276,6 +287,12 @@ shellcheck -x "${files[@]}"
 shfmt -d -ci -sr "${files[@]}"
 for file in scripts/bootstrap/zsh.zsh scripts/doctor/zsh.zsh; do zsh -n "$file" || exit; done
 stylua --check --indent-type Spaces --indent-width 2 scripts/*/*.lua
+python3 -B - <<'PY'
+import ast
+from pathlib import Path
+for path in Path('scripts').rglob('*.py'):
+    ast.parse(path.read_text(), filename=str(path))
+PY
 ```
 
 更新资源时核对 URL/SHA256、最低要求和平台清单；更新插件锁时同步验收 Neovim 内部 API

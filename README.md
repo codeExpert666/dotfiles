@@ -8,7 +8,7 @@
 - **先预览后写入**：环境准备脚本 `bootstrap.sh` 和配置部署脚本 `deploy.sh` 默认只做预览；
   显式传入 `--apply` 后，才会安装软件或部署配置。
 - **可诊断**：诊断脚本 `doctor.sh` 分模块检查依赖、部署与配置，可选受控运行会话。
-- **可回归**：五套独立离线测试覆盖脚本行为与应用实际加载结果。
+- **可回归**：四套终端环境离线测试和一套 Multipass 扩展离线测试覆盖脚本行为与应用配置。
 
 ## 受管配置
 
@@ -33,18 +33,17 @@ Zsh 中用 `Ctrl-R` 打开 Atuin 历史搜索，`Ctrl-T` 打开 fzf 文件选择
 `z`/`zi` 通过 zoxide 跳转目录。
 原生 Zsh 历史保存到 `~/.local/state/zsh/history`；macOS Terminal 的额外会话保存与恢复已禁用。
 
-## 部署说明
+## 终端环境部署说明
 
 ### 平台与依赖
 
-三个脚本均需 Bash 3.2+，适用范围如下：
+bootstrap、deploy 和 doctor 在当前机器上运行，均需 Bash 3.2+，适用范围如下：
 
 | 入口      | 支持范围                                                                  |
 | --------- | ------------------------------------------------------------------------- |
 | bootstrap | Ubuntu 24.04/26.04（x86_64、arm64）、macOS 15/26（Apple Silicon）         |
 | deploy    | Linux/macOS；GNU Stow（支持 `--no-folding`）、Git（支持 `--fixed-value`） |
 | doctor    | Linux/macOS；`--runtime` 另需 Python 3.7+ 与已准备的插件                  |
-| multipass | macOS 15+ Apple Silicon、Python 3.9+；创建 Ubuntu 24.04/26.04 开发机      |
 
 bootstrap 在 `--apply` 时准备所需的软件和插件；请以普通用户运行，并按提示
 提供 `sudo` 认证。各项软件的最低版本见
@@ -90,8 +89,9 @@ cd ~/src/dotfiles
 - `desktop`：额外安装 Ghostty、IosevkaTerm Nerd Font 和 Sarasa Term SC。
   字体应安装在本地终端客户端。
 
-profile 控制软件和字体的准备范围，配置包按平台选择；`server` 也会部署
-Ghostty 配置。以下以 `server` 为例，桌面环境将两条命令中的值改为 `desktop`。
+profile 控制软件和字体的准备范围，与是否使用虚拟机无关；配置包按平台选择。
+`server` 也会部署 Ghostty 配置。以下以 `server` 为例，桌面环境将两条命令中的值
+改为 `desktop`。
 
 ```sh
 # 离线预览
@@ -109,13 +109,6 @@ bash scripts/bootstrap.sh --apply --profile server
 bash scripts/deploy.sh --dry-run   # 预览链接与冲突
 bash scripts/deploy.sh --apply     # 建立符号链接
 ```
-
-### Multipass Ubuntu 开发机
-
-在 Apple Silicon Mac 上，用 [Multipass 开发机说明](environments/multipass/README.md)
-从指定远程提交创建 Ubuntu 24.04 或 26.04 虚拟机。`scripts/multipass.sh` 默认预览，
-复用合格的 Multipass，并在客户机运行 `bootstrap.sh --profile server`；生成的 SSH
-入口与状态保存在仓库之外。`environments/` 不通过 Stow 部署。
 
 ### 部署后检查
 
@@ -162,6 +155,14 @@ atuin login && atuin sync   # 登录账户并同步
 ```
 
 `auto_sync` 默认关闭；登录后，后续同步仍需手动运行 `atuin sync`。
+
+## 可选扩展
+
+### Multipass Ubuntu 开发机
+
+Multipass 开发机用于在 Apple Silicon Mac 上创建 Ubuntu 虚拟机、配置 SSH，
+并从指定远程提交部署本仓库的终端环境。它在客户机内复用上述核心脚本。
+需要独立开发机时，按 [Multipass 开发机说明](environments/multipass/README.md)操作。
 
 ## 新增与维护配置
 
@@ -224,9 +225,10 @@ bash scripts/deploy.sh --apply
 
 ## 更多文档
 
-- [脚本使用与维护](scripts/README.md)：四个入口的完整行为、安装来源、日志、
-  失败与重试、doctor 的证据范围。
-- [测试](tests/README.md)：五套离线测试的职责、单用例运行与静态检查。
+- [脚本使用与维护](scripts/README.md)：bootstrap、deploy 和 doctor 的行为、安装来源、
+  日志、失败与重试、诊断证据范围。
+- [Multipass 开发机说明](environments/multipass/README.md)：扩展的创建、登录、重配、状态与恢复。
+- [测试](tests/README.md)：全仓库五套离线测试、单用例运行及独立真实虚拟机验收。
 - [仓库约定](AGENTS.md)：目录组织、代码风格、提交信息与验证要求。
 
 ## 许可证
