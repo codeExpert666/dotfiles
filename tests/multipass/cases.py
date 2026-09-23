@@ -378,15 +378,28 @@ class GuestEnvironment(unittest.TestCase):
             (home / ".zshenv").write_text(
                 f"export JAVA_HOME={shlex.quote(str(binary.parent))}\n"
                 f"export PATH={shlex.quote(str(binary))}:$PATH\n")
+            log_dir = home / ".local/state/dotfiles-bootstrap"
+            log_dir.mkdir(parents=True)
+            (log_dir / "run.test").write_text("result: dry run completed\n"
+                                              "result: PASS=207 WARN=0 FAIL=0 SKIP=7\n")
             with mock.patch.object(guest, "HOME", home), \
                     mock.patch.object(guest, "require_ubuntu"), \
                     mock.patch.object(guest, "git", return_value=REF), \
                     mock.patch("builtins.print") as output:
                 guest.versions()
-            tools = json.loads(output.call_args.args[0])["tools"]
+            receipt = json.loads(output.call_args.args[0])
+            tools = receipt["tools"]
+            self.assertEqual(receipt["doctor"], {"pass": 207, "warn": 0, "fail": 0, "skip": 7})
             for name in ("java", "javac", "maven"):
                 executable = "mvn" if name == "maven" else name
                 self.assertEqual(tools[name], [f"{executable}:{binary.parent}"])
+
+    def test_doctor_summary_requires_completed_result(self):
+        with tempfile.TemporaryDirectory() as root:
+            log = Path(root) / "run.test"
+            log.write_text("result: deployment completed\n")
+            with self.assertRaisesRegex(ValueError, "no doctor result"):
+                guest.doctor_summary(log)
 
 
 if __name__ == "__main__":

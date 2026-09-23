@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import pwd
+import re
 import shutil
 import subprocess
 import sys
@@ -199,6 +200,15 @@ def runtime():
              for part in ("--only", module)]], cwd=REPO, env=clean_env())
 
 
+def doctor_summary(log):
+    pattern = re.compile(r"result: PASS=(\d+) WARN=(\d+) FAIL=(\d+) SKIP=(\d+)")
+    for line in reversed(log.read_text(errors="replace").splitlines()):
+        match = pattern.fullmatch(line)
+        if match:
+            return dict(zip(("pass", "warn", "fail", "skip"), map(int, match.groups())))
+    raise ValueError(f"bootstrap log has no doctor result: {log}")
+
+
 def versions():
     require_ubuntu()
     specs = (("git", "git", "--version"), ("zsh", "zsh", "--version"),
@@ -218,9 +228,13 @@ def versions():
                 found[label].append(f"exit {result.returncode}")
         except (OSError, subprocess.TimeoutExpired) as exc:
             found[label] = [f"unavailable: {exc}"]
-    logs = sorted((HOME / ".local/state/dotfiles-bootstrap").glob("run.*"),
+    logs = sorted((path for path in (HOME / ".local/state/dotfiles-bootstrap").glob("run.*")
+                   if path.is_file()),
                   key=lambda path: path.stat().st_mtime, reverse=True)
-    print(json.dumps({"tools": found, "bootstrap_log": str(logs[0]) if logs else None,
+    if not logs:
+        raise ValueError("bootstrap log is missing; cannot record doctor result")
+    print(json.dumps({"tools": found, "bootstrap_log": str(logs[0]),
+                      "doctor": doctor_summary(logs[0]),
                       "current_ref": git("rev-parse", "HEAD", capture=True)}))
 
 
