@@ -96,7 +96,12 @@ DOTFILES_TEST_PREPARED_HOME=/path/to/prepared-home bash tests/all.sh
 - `doctor/cases.py` 与 `doctor/lazygit-fixture.py`：诊断用例、Lazygit 交互夹具，
   以及诊断执行器和共享进程设施的回归。
 - `bootstrap/cases.py` 与 `bootstrap/mock.py`：安装编排、资源和准备用例，以及命令替身。
-- `multipass/cases.py`：无网络的参数、安装策略、SSH 配置、Git 提交及预览用例。
+- `multipass/cases.py`：无网络的参数、安装策略、SSH 配置、Git 提交及编排用例。
+  服务就绪测试保留真实 Runner 的异常转换，只替换命令执行并使用虚拟时钟；覆盖安装后
+  daemon 延迟、旧 CLI 回退、超时和配置错误。临时 Git 仓库验证活跃或遗留 bootstrap 锁
+  会阻止 checkout，并在锁解除后允许继续。VM 替身验证创建记录先于 launch、失败保留、
+  同名实例缺失时不重新 launch，以及验收清理同时核对本次记录、宿主状态与客户机标记；
+  名称冲突、并发竞争和锁占用均断言既有实例与 SSH 文件保持不变。这些不代替真实 VM 验收。
 - `config-loading/lazygit.py` 与 `config-loading/nvim.lua`：原生应用会话及应用内部断言。
 - `support/harness.bash` 与 `support/harness.py`：跨套件的夹具、快照、进程清理和终端设施。
 

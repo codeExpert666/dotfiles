@@ -68,8 +68,26 @@ def verify_checkout(ref):
     return actual
 
 
-def repository(url, ref):
+def bootstrap_idle():
     require_ubuntu()
+    lock = HOME / ".local/state/dotfiles-bootstrap/lock"
+    if not lock.exists() and not lock.is_symlink():
+        return
+    pid_file = lock / "pid"
+    if lock.is_symlink() or not lock.is_dir() or pid_file.is_symlink() or not pid_file.is_file():
+        raise ValueError(f"incomplete guest bootstrap lock needs inspection: {lock}")
+    try:
+        pid = int(pid_file.read_text().strip())
+        if pid <= 0:
+            raise ValueError("invalid PID")
+        os.kill(pid, 0)
+    except (OSError, ValueError):
+        raise ValueError(f"abandoned or unverifiable guest bootstrap lock needs inspection: {lock}")
+    raise ValueError(f"guest bootstrap is still running as PID {pid}")
+
+
+def repository(url, ref):
+    bootstrap_idle()
     ensure_owned_directory(WORKSPACE, create=True)
     if REPO.is_symlink():
         raise ValueError("dotfiles repository must not be a symlink")
@@ -114,17 +132,8 @@ def repository(url, ref):
 
 
 def bootstrap(mode):
-    require_ubuntu()
+    bootstrap_idle()
     ensure_owned_directory(REPO)
-    if mode == "apply":
-        lock = HOME / ".local/state/dotfiles-bootstrap/lock/pid"
-        if lock.exists():
-            try:
-                pid = int(lock.read_text().strip())
-                os.kill(pid, 0)
-            except (OSError, ValueError):
-                raise ValueError(f"abandoned guest bootstrap lock needs inspection: {lock}")
-            raise ValueError(f"guest bootstrap is still running as PID {pid}")
     command(["bash", "scripts/bootstrap.sh", "--dry-run" if mode == "preview" else "--apply",
              "--profile", "server"], cwd=REPO, env=clean_env())
 
@@ -244,6 +253,8 @@ def main():
         probe()
     elif action == "packages-ready" and not args:
         packages_ready()
+    elif action == "bootstrap-idle" and not args:
+        bootstrap_idle()
     elif action == "repository" and len(args) == 2:
         repository(*args)
     elif action == "bootstrap" and len(args) == 1 and args[0] in ("preview", "apply"):

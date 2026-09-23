@@ -7,8 +7,9 @@ import os
 from pathlib import Path
 import re
 import shutil
-import subprocess
 import time
+
+from errors import CommandFailure
 
 
 STANDARD_CLI = Path("/Library/Application Support/com.canonical.multipass/bin/multipass")
@@ -62,7 +63,7 @@ class Host:
             data = json_command(self.run, [self.cli, "version", "--format", "json"])
             client = data.get("multipass")
             daemon = data.get("multipassd")
-        except (ValueError, subprocess.CalledProcessError):
+        except (ValueError, CommandFailure):
             # An old CLI may have no JSON mode. A broken daemon remains a hard error.
             result = self.run([self.cli, "version"])
             match = re.search(r"multipass\s+(\S+).*?multipassd\s+(\S+)",
@@ -107,11 +108,7 @@ class Host:
                 raise ValueError("Multipass pkg receipts exist but its CLI is missing; repair PATH or installation")
             self.install_pkg()
         self.cli = None
-        latest = self.probe()
-        if not latest or not latest["qualified"]:
-            raise ValueError("Multipass remains below the declared minimum after installation")
-        self.wait_service()
-        return latest
+        return self.wait_service()
 
     def install_pkg(self):
         spec = self.releases["macos_pkg"]
@@ -152,11 +149,17 @@ class Host:
         last = None
         while time.monotonic() < deadline:
             try:
+                latest = self.probe()
+                if not latest or not latest["qualified"]:
+                    raise ValueError("Multipass remains missing or below the declared minimum after installation")
                 self.verify_service()
-                return
-            except (ValueError, subprocess.CalledProcessError) as exc:
+                return latest
+            except CommandFailure as exc:
                 last = exc
-                time.sleep(3)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(3, remaining))
         raise ValueError(f"Multipass daemon did not become ready: {last}")
 
     def verify_service(self):

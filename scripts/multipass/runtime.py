@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 import uuid
 
 from host import Host, size_bytes
+from errors import CommandFailure, Failure
 from ssh_config import SSHConfig, atomic
 
 
@@ -37,20 +38,6 @@ STAGES = ("host", "launch", "cloud-init", "guest", "ssh", "repository", "bootstr
           "bootstrap", "finalize", "verified")
 SERVER_MODULES = ("environment", "deployment", "dependencies", "zsh", "git", "lazygit",
                   "nvim", "starship", "atuin", "shuck", "vim", "state")
-
-
-class Failure(Exception):
-    def __init__(self, message, code=1):
-        super().__init__(message)
-        self.code = code
-
-
-class CommandFailure(Failure):
-    def __init__(self, argv, code, output):
-        self.argv = argv
-        self.output = output
-        super().__init__(f"{' '.join(map(str, argv[:3]))} failed (exit {code}): {output[-1200:]}")
-        self.returncode = code
 
 
 class Runner:
@@ -135,6 +122,9 @@ def parser():
                 sub.add_argument("--" + option)
         if action == "check":
             sub.add_argument("--runtime", action="store_true")
+        if action == "create":
+            sub.add_argument("--creation-record", type=Path,
+                             help="write an exclusive name/UUID record before a fresh launch")
     return root
 
 
@@ -264,6 +254,16 @@ def save_json(path, data):
     atomic(path, (json.dumps(data, indent=2, sort_keys=True) + "\n").encode())
 
 
+def record_creation(path, declaration):
+    # The caller keeps this record outside instance state, including after launch failure.
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w") as output:
+        json.dump({"name": declaration["name"], "uuid": declaration["uuid"]}, output)
+        output.write("\n")
+        output.flush()
+        os.fsync(output.fileno())
+
+
 def parse_json_output(output, label):
     decoder = json.JSONDecoder()
     for index, char in enumerate(output):
@@ -306,6 +306,16 @@ class Machine:
         self.receipt = load_json(self.receipt_file) or {"schema": 1, "stages": {}}
         self.host = Host(runner, RELEASES, home / ".cache/dotfiles-multipass")
         self.helper = None
+
+    def refuse_missing_guest(self, instances):
+        recorded = (self.receipt.get("machine_id") or self.receipt.get("cloud_instance_id") or
+                    self.receipt.get("ssh_files") or self.receipt.get("last_successful_ref") or
+                    any(self.receipt["stages"].get(stage, {}).get("status") == "ok"
+                        for stage in ("launch", "cloud-init")))
+        if self.name not in instances and recorded:
+            raise Failure(f"previously created instance {self.name} is missing; its identity and SSH trust "
+                          f"are retained in {self.path}. Use a different --name for a new instance; "
+                          "automatic same-name rebuilding is not supported")
 
     @contextmanager
     def stage(self, label):
@@ -451,6 +461,7 @@ class Machine:
         try:
             with self.stage("guest"):
                 probe = self.verify_guest()
+                self.guest("bootstrap-idle")
                 self.guest("packages-ready", root=True, timeout=630)
             with self.stage("ssh"):
                 with lock(self.base / "ssh.lock"):
@@ -524,6 +535,13 @@ def create_or_provision(args, config, home, runner):
     validate_name(name)
     machine = Machine(home, name, runner)
     saved = machine.declaration
+    creation_record = getattr(args, "creation_record", None)
+    if creation_record is not None:
+        if machine.path.exists() or machine.path.is_symlink():
+            raise Failure("--creation-record requires a fresh instance name without saved state")
+        if not creation_record.is_absolute() or not creation_record.parent.is_dir() or \
+                creation_record.exists() or creation_record.is_symlink():
+            raise Failure("--creation-record must be a new absolute file in an existing directory", 2)
     if args.action == "provision" and not saved:
         raise Failure(f"no managed declaration for {name}")
     key_path = value(args, config, "ssh_public_key", saved["ssh_public_key"] if saved else None)
@@ -544,6 +562,8 @@ def create_or_provision(args, config, home, runner):
         raise Failure(f"instance {name} is {instances[name].get('state')}; use multipass start {name}")
     if args.action == "provision" and name not in instances:
         raise Failure(f"managed instance {name} is missing")
+    if args.action == "create":
+        machine.refuse_missing_guest(instances)
     if not observed:
         print("DEFER: Multipass installation, daemon, image and instance checks until --apply", file=sys.stderr)
     else:
@@ -566,12 +586,24 @@ def create_or_provision(args, config, home, runner):
         raise Failure("host disk free space is below requested guest disk plus 5 GiB")
     safe_directory(machine.base, create=True)
     safe_directory(machine.base / "instances", create=True)
-    safe_directory(machine.path, create=True)
+    if creation_record is not None:
+        try:
+            machine.path.mkdir(mode=0o700)
+        except FileExistsError:
+            raise Failure("instance state appeared during preflight; refusing to register another run")
+    else:
+        safe_directory(machine.path, create=True)
     with lock(machine.path / "lock"):
+        # A concurrent invocation may have finished between the preview checks and this lock.
+        if load_json(machine.declaration_file) != saved or \
+                (load_json(machine.receipt_file) or {"schema": 1, "stages": {}}) != machine.receipt:
+            raise Failure("instance state changed during preflight; rerun after inspecting the other run")
         machine.declaration = requested
         save_json(machine.declaration_file, requested)
         machine.receipt["target_ref"] = requested["target_ref"]
         save_json(machine.receipt_file, machine.receipt)
+        if creation_record is not None:
+            record_creation(creation_record, requested)
         with machine.stage("host"):
             with lock(machine.base / "host-install.lock"):
                 observed = machine.host.ensure(observed)
@@ -581,6 +613,7 @@ def create_or_provision(args, config, home, runner):
             save_json(machine.receipt_file, machine.receipt)
         existing = machine.host.instances()
         if args.action == "create" and name not in existing:
+            machine.refuse_missing_guest(existing)
             with machine.stage("launch"):
                 machine.host.image(requested["image"])
                 cloud = machine.path / "user-data.yaml"

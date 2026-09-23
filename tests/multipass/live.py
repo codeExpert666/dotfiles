@@ -13,7 +13,7 @@ import sys
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts/multipass"))
-from runtime import lock
+from runtime import load_json, lock, safe_directory
 from ssh_config import atomic
 
 
@@ -125,22 +125,37 @@ def _remove_ssh_locked(name, uuid, remove_include):
 
 
 def cleanup(name, report, remove_include):
-    state = STATE / name
-    if not state.is_dir():
+    registration = load_json(report / "creation.json")
+    if registration is None:
         return
-    declaration = json.loads((state / "declaration.json").read_text())
-    copy_evidence(name, report)
-    listed = json.loads(run(["multipass", "list", "--format", "json"]))
-    entry = next((entry for entry in listed.get("list", []) if entry["name"] == name), None)
-    if entry:
-        if entry.get("state") != "Running":
-            run(["multipass", "start", name], report / "cleanup.log", timeout=600)
-        marker = instance_marker(name)
-        if marker != {"uuid": declaration["uuid"], "name": name}:
-            raise RuntimeError(f"ownership marker mismatch; retained {name} for inspection")
-        run(["multipass", "delete", "--purge", name], report / "cleanup.log", timeout=120)
-    remove_ssh(name, declaration["uuid"], remove_include)
-    shutil.rmtree(state)
+    if not isinstance(registration, dict) or registration.get("name") != name or not registration.get("uuid"):
+        raise RuntimeError(f"invalid creation record; retaining {name}")
+    state = STATE / name
+    safe_directory(state)
+    if not state.exists():
+        raise RuntimeError(f"registered instance state is missing; retaining {name} for inspection")
+    with lock(state / "lock"):
+        declaration = load_json(state / "declaration.json")
+        if not declaration or registration != {"uuid": declaration["uuid"], "name": declaration["name"]}:
+            raise RuntimeError(f"creation record does not match instance state; retaining {name}")
+        copy_evidence(name, report)
+        listed = json.loads(run(["multipass", "list", "--format", "json"]))
+        entry = next((entry for entry in listed.get("list", []) if entry["name"] == name), None)
+        if entry:
+            if entry.get("state") != "Running":
+                run(["multipass", "start", name], report / "cleanup.log", timeout=600)
+            if instance_marker(name) != registration:
+                raise RuntimeError(f"ownership marker mismatch; retained {name} for inspection")
+            run(["multipass", "delete", "--purge", name], report / "cleanup.log", timeout=120)
+        remove_ssh(name, registration["uuid"], remove_include)
+        for child in state.iterdir():
+            if child.name != "lock":
+                if child.is_dir() and not child.is_symlink():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+    # Do not recursively remove anything created by another invocation after lock release.
+    state.rmdir()
     (report / "cleanup-ok.txt").write_text("owned instance and generated host entries removed\n")
 
 
@@ -148,7 +163,8 @@ def acceptance(name, image, ref, key, report):
     report.mkdir(parents=True)
     begin = time.time()
     create = ["bash", str(ENTRY), "create", "--apply", "--name", name,
-              "--image", image, "--ref", ref, "--ssh-public-key", str(key)]
+              "--image", image, "--ref", ref, "--ssh-public-key", str(key),
+              "--creation-record", str(report / "creation.json")]
     run(create, report / "create.log", timeout=14400)
     run(["multipass", "exec", name, "--", "sudo", "cloud-init", "schema", "--system"],
         report / "schema.log", timeout=120)
@@ -195,6 +211,7 @@ def main():
     key = args.ssh_public_key.expanduser().resolve(strict=True)
     stamp = time.strftime("%Y%m%d%H%M%S")
     report_root = args.report_dir or HOME / ".local/state/dotfiles-multipass/reports" / stamp
+    report_root = report_root.expanduser().absolute()
     if report_root.exists():
         raise ValueError(f"report directory already exists: {report_root}")
     report_root.mkdir(parents=True, mode=0o700)
@@ -213,6 +230,9 @@ def main():
             listed = json.loads(run(["multipass", "list", "--format", "json"]))
             if any(entry["name"] == name for entry in listed.get("list", [])):
                 raise RuntimeError(f"test instance already exists: {name}")
+            state = STATE / name
+            if state.exists() or state.is_symlink():
+                raise RuntimeError(f"test instance state already exists: {state}")
             acceptance(name, image, args.ref, key, report)
         except BaseException as exc:
             failures.append(f"{image}: {exc}")
