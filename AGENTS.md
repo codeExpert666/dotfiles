@@ -19,8 +19,8 @@
 - `scripts/` contains the core deploy, doctor, and bootstrap entrypoints plus the
   optional Multipass entrypoint. Their helpers stay in corresponding subdirectories;
   `layout.bash` centralizes core deployment paths and package lists.
-- `environments/multipass/` contains VM defaults, cloud-init, and the installer
-  manifest. It is not a Stow package; its [README](environments/multipass/README.md)
+- `multipass/` contains VM defaults, cloud-init, and the installer
+  manifest. It is not a Stow package; its [README](multipass/README.md)
   owns the extension's setup, daily use, state, and recovery guidance.
 - `tests/` contains five independent offline suites, a separate live Multipass
   acceptance entrypoint, and shared fixtures in `tests/support/`.

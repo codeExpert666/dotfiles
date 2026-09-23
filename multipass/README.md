@@ -3,9 +3,9 @@
 ## 定位与工作流程
 
 Multipass 开发机是本仓库的可选扩展。在受支持的已有 macOS 或 Ubuntu 机器上部署终端环境，
-直接使用 [bootstrap、deploy 和 doctor](../../scripts/README.md) 即可；需要独立的
+直接使用 [bootstrap、deploy 和 doctor](../scripts/README.md) 即可；需要独立的
 Ubuntu 开发机时，才在 Apple Silicon Mac 宿主机上运行 `scripts/multipass.sh`。
-`environments/` 存放虚拟机声明和 cloud-init 模板，不是 Stow 包，不部署到 HOME。
+`multipass/` 存放虚拟机声明和 cloud-init 模板，不是 Stow 包，不部署到 HOME。
 
 扩展在宿主机创建 Ubuntu arm64 客户机并建立 SSH 连接，在客户机拉取指定的远程提交，
 以普通 `ubuntu` 用户先预览、再执行 `bootstrap.sh --profile server`，复用核心的依赖准备、
@@ -95,7 +95,7 @@ bash scripts/multipass.sh provision --apply --name ubuntu-dev --ref '<新40位SH
 须同时提供。扩展在客户机 bootstrap 成功后将 `ubuntu` 的登录 Shell 设为 Zsh，并按显式
 配置将 Git 身份写入客户机个人 `~/.config/git/config`，不修改受管仓库文件。
 直接在已有机器运行核心 bootstrap 不会自动设置登录 Shell 或 Git 身份，详见
-[个人配置](../../README.md#个人配置)。
+[个人配置](../README.md#个人配置)。
 
 | 所属机器              | 路径                                                                                                                   | 内容                                               |
 | --------------------- | ---------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
@@ -116,7 +116,7 @@ ProxyCommand 在连接时查询当前 IPv4。状态目录默认 0700、记录默
 
 客户机首次系统更新只在创建阶段执行；cloud-init 要求重启时，宿主最多自动重启一次。
 bootstrap 由普通 `ubuntu` 用户运行；它先探测免密 sudo 命令权限，确需密码时才在前台
-刷新凭据。核心安装细节、日志和失败重试规则见[脚本说明](../../scripts/README.md)。
+刷新凭据。核心安装细节、日志和失败重试规则见[脚本说明](../scripts/README.md)。
 
 ## 失败处理与恢复边界
 
@@ -138,7 +138,7 @@ known_hosts。Multipass 安装或升级后的版本及服务探测会在 120 秒
 
 ## 维护与验收
 
-[Multipass 离线测试](../../tests/README.md#multipass)使用命令与 VM 替身，
+[Multipass 离线测试](../tests/README.md#multipass)使用命令与 VM 替身，
 不要求真实 Multipass。需要验证真实客户机时，先准备前述专用公钥和远程可获取的提交，
 再在**宿主机仓库根目录**显式运行双版本验收；它不会由 `tests/all.sh` 启动：
 

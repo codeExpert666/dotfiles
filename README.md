@@ -161,7 +161,7 @@ atuin login && atuin sync   # 登录账户并同步
 
 Multipass 开发机用于在 Apple Silicon Mac 上创建 Ubuntu 虚拟机、配置 SSH，
 并从指定远程提交部署本仓库的终端环境。它在客户机内复用上述核心脚本。
-需要独立开发机时，按 [Multipass 开发机说明](environments/multipass/README.md)操作。
+需要独立开发机时，按 [Multipass 开发机说明](multipass/README.md)操作。
 
 ## 新增与维护配置
 
@@ -226,7 +226,7 @@ bash scripts/deploy.sh --apply
 
 - [脚本使用与维护](scripts/README.md)：bootstrap、deploy 和 doctor 的行为、安装来源、
   日志、失败与重试、诊断证据范围。
-- [Multipass 开发机说明](environments/multipass/README.md)：扩展的创建、登录、重配、状态与恢复。
+- [Multipass 开发机说明](multipass/README.md)：扩展的创建、登录、重配、状态与恢复。
 - [测试](tests/README.md)：全仓库五套离线测试、单用例运行及独立真实虚拟机验收。
 - [仓库约定](AGENTS.md)：目录组织、代码风格、提交信息与验证要求。
 

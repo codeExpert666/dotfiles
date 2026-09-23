@@ -156,7 +156,7 @@ DOTFILES_TEST_PREPARED_HOME=/path/to/prepared-home bash tests/all.sh
 它要求受支持的 Apple Silicon Mac、已解锁加入 ssh-agent 的专用身份、远程可获取的
 完整提交 SHA 和实际网络；依次验收 Ubuntu 24.04、26.04 的创建、诊断、重配及 SSH。
 先运行 `bash tests/multipass-live.sh --help`；具体命令、实例归属核对和定向清理边界
-见[Multipass 开发机说明](../environments/multipass/README.md#维护与验收)。
+见[Multipass 开发机说明](../multipass/README.md#维护与验收)。
 验收结论只适用于运行时的提交、宿主和客户机环境。
 
 ## 失败定位与静态检查

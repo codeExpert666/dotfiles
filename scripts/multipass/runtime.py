@@ -26,10 +26,10 @@ from ssh_config import SSHConfig, atomic
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
-ENV = ROOT / "environments/multipass"
-DEFAULTS = json.loads((ENV / "defaults.json").read_text())
-RELEASES = json.loads((ENV / "host-releases.json").read_text())
-TEMPLATE = ENV / "cloud-init.yaml.tmpl"
+MULTIPASS_DIR = ROOT / "multipass"
+DEFAULTS = json.loads((MULTIPASS_DIR / "defaults.json").read_text())
+RELEASES = json.loads((MULTIPASS_DIR / "host-releases.json").read_text())
+TEMPLATE = MULTIPASS_DIR / "cloud-init.yaml.tmpl"
 REF = re.compile(r"^[0-9a-f]{40}$")
 NAME = re.compile(r"^[a-z][a-z0-9-]{0,61}[a-z0-9]$")
 SIZE = re.compile(r"^([1-9][0-9]*)([GM])$")

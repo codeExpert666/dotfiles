@@ -34,7 +34,7 @@ bash scripts/multipass.sh create --help
 ```
 
 Multipass 的提交选择、SSH 身份准备及创建命令见
-[开发机说明](../environments/multipass/README.md#宿主机要求与首次创建)。
+[开发机说明](../multipass/README.md#宿主机要求与首次创建)。
 
 ## 代码导航
 
@@ -44,7 +44,7 @@ Multipass 的提交选择、SSH 身份准备及创建命令见
 | [layout.bash](layout.bash)                                     | deploy、doctor、bootstrap 共用的包、目标目录和旧入口声明 |
 | `bootstrap/`、`doctor/`                                        | 各自私有的安装器、检查器及受控运行辅助程序               |
 | [multipass.sh](multipass.sh)、`multipass/`                     | 宿主机入口和 Python 编排实现；客户机运行核心脚本         |
-| [environments/multipass/](../environments/multipass/README.md) | VM 默认值、宿主安装声明及 cloud-init 模板；不是 Stow 包  |
+| [multipass/](../multipass/README.md)                           | VM 默认值、宿主安装声明及 cloud-init 模板；不是 Stow 包  |
 
 Bash 辅助文件负责核心流程的调度，Python 标准库处理复杂文件操作、PTY 和
 Multipass 编排，Lua/Zsh 调用对应运行时。被 source 的文件只声明函数或数据。
@@ -64,7 +64,7 @@ Multipass 编排，Lua/Zsh 调用对应运行时。被 source 的文件只声明
 该 HOME 下默认的 `.config`、`.local/share`、`.local/state`、`.cache`。
 三个当前机器入口可按实际目录身份识别已有目录的别名；multipass 的宿主 HOME 和
 `~/.ssh` 必须是真实目录，XDG 值须直接指向默认路径，完整前提见
-[宿主机要求](../environments/multipass/README.md#宿主机要求与首次创建)。
+[宿主机要求](../multipass/README.md#宿主机要求与首次创建)。
 当前机器入口不得导出 `ZDOTDIR`，仓库根 `.zshenv` 负责设置未导出的 ZDOTDIR；
 bootstrap/deploy 将 HOME 的逻辑表示传给子入口，物理目标另行计算。
 
@@ -259,10 +259,10 @@ multipass 在 Apple Silicon Mac 宿主机上编排 Ubuntu arm64 客户机；客�
 `create`/`provision` 在 `--apply` 时可能安装或升级宿主 Multipass，并写入宿主状态；
 客户机的项目目录位于自己的 `~/workspace`，不挂载宿主目录。专用 SSH 私钥由操作者
 保留在宿主机，脚本仅把公钥写入客户机。完整的
-[创建步骤](../environments/multipass/README.md#宿主机要求与首次创建)、
-[日常命令](../environments/multipass/README.md#日常使用)、
-[宿主与客户机状态路径](../environments/multipass/README.md#配置目录与状态)、
-[失败恢复边界](../environments/multipass/README.md#失败处理与恢复边界)
+[创建步骤](../multipass/README.md#宿主机要求与首次创建)、
+[日常命令](../multipass/README.md#日常使用)、
+[宿主与客户机状态路径](../multipass/README.md#配置目录与状态)、
+[失败恢复边界](../multipass/README.md#失败处理与恢复边界)
 由 Multipass 专文维护。
 
 ## 维护与验证
@@ -280,7 +280,7 @@ multipass 在 Apple Silicon Mac 宿主机上编排 Ubuntu arm64 客户机；客�
 | [macOS Brewfile](bootstrap/macos/Brewfile)、[desktop 增量](bootstrap/macos/Brewfile.desktop)                                                                                                 | 静态 tap/formula/cask 声明                                           |
 | [Ubuntu 包清单](bootstrap/ubuntu/packages.bash)、[desktop 增量](bootstrap/ubuntu/packages.desktop.bash)                                                                                      | apt 包、命令映射、上游资源及发行版差异                               |
 | [resources.py](bootstrap/resources.py)                                                                                                                                                       | 按需解析 Go/JDK/Maven 版本、校验和发布资源                           |
-| [Multipass 默认值](../environments/multipass/defaults.json)、[宿主安装声明](../environments/multipass/host-releases.json)、[cloud-init 模板](../environments/multipass/cloud-init.yaml.tmpl) | VM 资源、宿主安装版本及客户机初始化；不参与 Stow 部署                |
+| [Multipass 默认值](../multipass/defaults.json)、[宿主安装声明](../multipass/host-releases.json)、[cloud-init 模板](../multipass/cloud-init.yaml.tmpl)                                        | VM 资源、宿主安装版本及客户机初始化；不参与 Stow 部署                |
 
 维护平台清单时，注意以下现有约定：
 
@@ -309,7 +309,7 @@ doctor 的受控进程清理会回收组长退出后遗留的子进程；对已�
 可单独运行 `bash tests/multipass.sh`。五套离线测试的职责、单用例运行、缓存集成
 及测试代码静态检查见[测试说明](../tests/README.md)。真实双版本 VM 验收须显式
 运行 `bash tests/multipass-live.sh`，前提、命令和清理边界见
-[Multipass 维护与验收](../environments/multipass/README.md#维护与验收)。
+[Multipass 维护与验收](../multipass/README.md#维护与验收)。
 生产脚本的静态检查在仓库根目录执行：
 
 ```sh
