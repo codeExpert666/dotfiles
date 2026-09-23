@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
@@ -347,6 +348,31 @@ class GuestGit(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "user changes"):
             guest.repository(str(self.source), self.ref)
         self.assertEqual(sentinel.read_text(), "keep")
+
+
+class GuestEnvironment(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("zsh"), "native Zsh is not installed")
+    def test_version_receipt_uses_jdk_from_zsh_startup(self):
+        with tempfile.TemporaryDirectory() as root:
+            home = Path(root)
+            binary = home / "jdk/bin"
+            binary.mkdir(parents=True)
+            for name in ("java", "javac", "mvn"):
+                tool = binary / name
+                tool.write_text("#!/bin/sh\nprintf '%s:%s\\n' " + name + ' "$JAVA_HOME"\n')
+                tool.chmod(0o755)
+            (home / ".zshenv").write_text(
+                f"export JAVA_HOME={shlex.quote(str(binary.parent))}\n"
+                f"export PATH={shlex.quote(str(binary))}:$PATH\n")
+            with mock.patch.object(guest, "HOME", home), \
+                    mock.patch.object(guest, "require_ubuntu"), \
+                    mock.patch.object(guest, "git", return_value=REF), \
+                    mock.patch("builtins.print") as output:
+                guest.versions()
+            tools = json.loads(output.call_args.args[0])["tools"]
+            for name in ("java", "javac", "maven"):
+                executable = "mvn" if name == "maven" else name
+                self.assertEqual(tools[name], [f"{executable}:{binary.parent}"])
 
 
 if __name__ == "__main__":

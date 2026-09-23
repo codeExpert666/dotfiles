@@ -642,7 +642,8 @@ def check(args, config, home, runner):
         machine.m("exec", "--no-map-working-directory", name, "--", "env", "-i",
                   "HOME=/home/ubuntu", "USER=ubuntu", "LOGNAME=ubuntu",
                   "PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin",
-                  "bash", "/home/ubuntu/.dotfiles/scripts/doctor.sh", "--runtime",
+                  "zsh", "-c", 'exec bash "$@"', "dotfiles-multipass-check",
+                  "/home/ubuntu/.dotfiles/scripts/doctor.sh", "--runtime",
                   *[part for module in SERVER_MODULES for part in ("--only", module)],
                   timeout=1200, stream=True)
     if machine.receipt.get("last_successful_ref") != machine.declaration["target_ref"]:

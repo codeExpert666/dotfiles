@@ -209,7 +209,9 @@ def versions():
     found = {}
     for label, *argv in specs:
         try:
-            result = subprocess.run(argv, capture_output=True, text=True, timeout=15,
+            # Zsh 启动文件会把用户级 JDK 加入 PATH，并设置 JAVA_HOME。
+            result = subprocess.run(["zsh", "-c", 'exec "$@"', "dotfiles-multipass-version", *argv],
+                                    capture_output=True, text=True, timeout=15,
                                     env=clean_env(), cwd=HOME)
             found[label] = (result.stdout or result.stderr).splitlines()[:3]
             if result.returncode:
