@@ -1,286 +1,322 @@
 # 脚本使用与维护
 
-核心入口 bootstrap、deploy 和 doctor 用于在当前机器准备、部署和检查终端环境，
-可从任意工作目录调用。以下相对路径命令均在仓库根目录执行；
-完整参数以各入口的 `--help` 为准。
+本目录有四个公开脚本入口：deploy、doctor、bootstrap 直接作用于当前机器；
+multipass 在 Apple Silicon Mac 宿主机上编排可选的 Ubuntu 开发机。入口可从任意
+工作目录调用。以下相对路径命令均在仓库根目录执行；当前机器的首次使用流程见
+[根目录 README](../README.md#快速开始)，完整参数以各入口或子命令的 `--help` 为准。
 
-## 核心入口
+## 入口与执行关系
 
-| 入口                         | 用途                                                 | 默认行为                             |
-| ---------------------------- | ---------------------------------------------------- | ------------------------------------ |
-| [deploy.sh](deploy.sh)       | 用 GNU Stow 部署链接，创建个人 Git 入口和 Codex 角色副本 | 模拟部署；显式 `--apply` 才写入      |
-| [doctor.sh](doctor.sh)       | 检查环境、部署和应用配置；可选受控运行               | 离线检查，累积独立故障；不安装或修复 |
-| [bootstrap.sh](bootstrap.sh) | 准备软件、插件和桌面资源，调用 deploy，再调用 doctor | 离线预览；必须指定 profile           |
+| 入口                         | 运行位置与职责                                              | 默认行为                                            |
+| ---------------------------- | ----------------------------------------------------------- | --------------------------------------------------- |
+| [deploy.sh](deploy.sh)       | 当前机器；部署配置链接、个人 Git 入口和 Codex 角色副本      | 只预览；`--apply` 才写入                            |
+| [doctor.sh](doctor.sh)       | 当前机器；检查依赖、部署及应用配置，可选受控运行            | 离线检查；不安装或修复                              |
+| [bootstrap.sh](bootstrap.sh) | 当前机器；准备软件和插件，调用 deploy，最后调用 doctor 验收 | 离线预览；必须指定 profile                          |
+| [multipass.sh](multipass.sh) | Mac 宿主机；创建、配置、检查和接入 Ubuntu 开发机            | `create`/`provision` 预览；`check` 查询、`ssh` 连接 |
+
+在已有机器上，依赖和插件备妥时使用 deploy 部署，再用 doctor 检查；需要准备完整环境
+时使用 bootstrap，它依次准备软件、调用 deploy、准备插件和桌面资源，再调用 doctor。
+需要独立开发机时，宿主机运行 multipass，在 Ubuntu 客户机内调用
+`bootstrap.sh --profile server`，进而复用 deploy 和 doctor。
 
 ```sh
-# 已有软件，只需部署或检查配置
 bash scripts/deploy.sh --dry-run
 bash scripts/deploy.sh --apply
 bash scripts/doctor.sh
 bash scripts/doctor.sh --only zsh --only nvim --runtime
 
-# 需要准备软件的当前机器：先预览，再执行所选准备流程
-bash scripts/bootstrap.sh --profile server
+bash scripts/bootstrap.sh --dry-run --profile server
 bash scripts/bootstrap.sh --apply --profile server
-bash scripts/bootstrap.sh --apply --profile desktop
+# 桌面机器将 server 改为 desktop
 
-# doctor 报告写入 stderr
-bash scripts/doctor.sh --verbose 2>doctor.log
+# Ubuntu 开发机的完整创建步骤见 Multipass 专文
+bash scripts/multipass.sh create --help
 ```
 
-`server` 准备命令行环境与 terminfo 工具；`desktop` 追加 Ghostty、IosevkaTerm Nerd Font、
-Sarasa Term SC，以及 Linux 剪贴板工具。远程机器上的字体通常属于终端客户端；已有 Ghostty
-SSH 集成负责向远端提供终端定义。
+Multipass 的提交选择、SSH 身份准备及创建命令见
+[开发机说明](../environments/multipass/README.md#宿主机要求与首次创建)。
 
-上述三个核心入口的帮助写入 stdout，执行报告、错误与提示写入 stderr。
+## 代码导航
 
-## 可选扩展入口
+| 位置                                                           | 职责                                                     |
+| -------------------------------------------------------------- | -------------------------------------------------------- |
+| `scripts/*.sh`                                                 | 四个公开命令入口；核心入口持有运行状态、阶段和 trap      |
+| [layout.bash](layout.bash)                                     | deploy、doctor、bootstrap 共用的包、目标目录和旧入口声明 |
+| `bootstrap/`、`doctor/`                                        | 各自私有的安装器、检查器及受控运行辅助程序               |
+| [multipass.sh](multipass.sh)、`multipass/`                     | 宿主机入口和 Python 编排实现；客户机运行核心脚本         |
+| [environments/multipass/](../environments/multipass/README.md) | VM 默认值、宿主安装声明及 cloud-init 模板；不是 Stow 包  |
 
-[multipass.sh](multipass.sh) 在 Apple Silicon Mac 宿主机上创建、重新配置、检查和接入
-Ubuntu 开发机，客户机内复用核心 `bootstrap.sh --profile server`。
-`create` 和 `provision` 默认预览；宿主要求、命令、状态输出与恢复流程统一见
-[Multipass 开发机说明](../environments/multipass/README.md)。
+Bash 辅助文件负责核心流程的调度，Python 标准库处理复杂文件操作、PTY 和
+Multipass 编排，Lua/Zsh 调用对应运行时。被 source 的文件只声明函数或数据。
+平台安装、部署和诊断各有自己的判断规则；具体清单及更新职责见
+[维护与验证](#维护与验证)。
 
-## 核心入口的支持范围与目标目录
+## 平台与运行约定
 
-| 入口      | 系统与解释器                                                                 | 其他前提                                                                        |
-| --------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| deploy    | Linux/macOS，Bash 3.2+                                                       | GNU Stow 支持 `--no-folding`，Git 支持 `--fixed-value`；新建 Git 入口和 Codex 副本需要硬链接 |
-| doctor    | Linux/macOS，Bash 3.2+                                                       | 原生应用可按可用性检查；`--runtime` 需要 Python 3.7+ 标准库及已准备的插件       |
-| bootstrap | Ubuntu 24.04/26.04（x86_64、arm64）；macOS 15/26（Apple Silicon），Bash 3.2+ | 普通用户运行；安装阶段按需在前台 sudo 认证，随后准备 Python 3.9+ 等依赖         |
+| 入口      | 支持范围                                                                     | 附加前提                                                                       |
+| --------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| deploy    | Linux/macOS，Bash 3.2+                                                       | GNU Stow 支持 `--no-folding`，Git 支持 `--fixed-value`；创建普通文件需要硬链接 |
+| doctor    | Linux/macOS，Bash 3.2+                                                       | 原生检查按应用可用性执行；`--runtime` 需要 Python 3.7+ 和已准备的插件          |
+| bootstrap | Ubuntu 24.04/26.04（x86_64、arm64）；macOS 15/26（Apple Silicon），Bash 3.2+ | 普通用户运行；安装时按需 sudo 认证，随后准备 Python 3.9+ 等依赖                |
+| multipass | macOS 15+（Apple Silicon），Bash 3.2+                                        | 宿主机 Python 3.9+、Git、curl、OpenSSH、网络；创建前需准备专用 SSH 身份        |
 
-核心入口要求 HOME 是已存在的绝对目录。四个 XDG 变量须未设置、为空，或指向默认的
-`~/.config`、`~/.local/share`、`~/.local/state`、`~/.cache`；已存在的目录可按实际目录身份识别别名。
-bootstrap/deploy 将 HOME 的逻辑表示传给子入口，物理目标另行计算。不要导出
-`ZDOTDIR`；仓库根 `.zshenv` 负责设置未导出的 ZDOTDIR。bootstrap 还要求
-`NVIM_APPNAME` 未设置或为 `nvim`。
+四个入口均要求 HOME 是已存在的绝对目录，四个 XDG 变量须未设置、为空，或指向
+该 HOME 下默认的 `.config`、`.local/share`、`.local/state`、`.cache`。
+三个当前机器入口可按实际目录身份识别已有目录的别名；multipass 的宿主 HOME 和
+`~/.ssh` 必须是真实目录，XDG 值须直接指向默认路径，完整前提见
+[宿主机要求](../environments/multipass/README.md#宿主机要求与首次创建)。
+当前机器入口不得导出 `ZDOTDIR`，仓库根 `.zshenv` 负责设置未导出的 ZDOTDIR；
+bootstrap/deploy 将 HOME 的逻辑表示传给子入口，物理目标另行计算。
 
-bootstrap 在安装前拒绝继承的 Git 仓库上下文：`GIT_DIR`、`GIT_WORK_TREE`、`GIT_COMMON_DIR`、
-`GIT_INDEX_FILE`、`GIT_OBJECT_DIRECTORY`、`GIT_ALTERNATE_OBJECT_DIRECTORIES`、`GIT_SHALLOW_FILE`、
-`GIT_GRAFT_FILE`、`GIT_NAMESPACE`、`GIT_IMPLICIT_WORK_TREE`、`GIT_PREFIX`，设置为空也不接受。
-这些变量可能使 `git -C` 检查或操作其他仓库；取消对应变量后，从普通 Shell 重跑。
-Git 用户配置、鉴权及 `GIT_CONFIG_GLOBAL` 等配置选择仍予以保留。
+三个当前机器入口的 `--help` 写入 stdout，报告、错误和提示写入 stderr，例如可用
+`bash scripts/doctor.sh --verbose 2>doctor.log` 保存完整诊断。HUP/INT/TERM 分别使用
+退出码 `129`/`130`/`143`。multipass 的帮助写入 stdout；`create`/`provision` 的
+计划、进度和错误写入 stderr 及宿主日志，`check` 向 stdout 输出 JSON，`ssh` 进入
+交互会话。其余退出状态在各入口下说明。
 
-## deploy 的部署产物与失败路径
+## deploy 部署配置
 
-deploy 拒绝调用目录和 HOME 中的 `.stowrc`，以及 `~/.stow-global-ignore`。
-具体目录和旧配置入口在 [layout.bash](layout.bash) 集中声明。
+deploy 默认只预览目标与冲突；`--apply` 才部署。包及旧入口在
+[layout.bash](layout.bash) 声明。部署产物如下：
 
-多数受管入口是 Stow 创建的文件级链接，公共父目录必须保持真实目录，Stow 不折叠整个目录。
-`skills` 使用两层目录链接：`~/.agents/skills/<名称>` 与 `~/.claude/skills/<名称>` 由 Stow
-指向包内入口，包内入口再指向 `skills/src/<名称>`；包内 `src` 由
-[.stow-local-ignore](../skills/.stow-local-ignore) 排除部署，doctor 单独检查源目录、
-按 `layout_skill_clients` 声明的必需入口，以及该 `^/src$` 排除规则。不能只根据实际存在的
-入口推断客户端范围，否则遗漏入口会逃过检查；其他包的自定义忽略规则仍提示人工核对。
-`astra-sol` 只声明 `.agents` 入口；“仅用于 Codex”是使用范围约定，`.agents/skills`
-不是客户端隔离机制，其他扫描该目录的客户端仍可能发现它。
+- 多数受管入口由 GNU Stow 建立文件级链接，公共父目录保持真实目录，不折叠整个目录。
+  `skills` 采用两层目录链接：客户端的 `~/.agents/skills/<名称>` 或
+  `~/.claude/skills/<名称>` 指向包内入口，包内入口再指向 `skills/src/<名称>`。
+  [.stow-local-ignore](../skills/.stow-local-ignore) 排除包内 `src`；doctor 按
+  `layout_skill_clients` 检查源目录、必需客户端入口及排除规则，不从现存入口反推范围。
+  `astra-sol` 仅声明 `.agents` 入口；“仅用于 Codex”是使用约定，扫描该目录的其他客户端
+  仍可能发现它。
+- `~/.config/git/config` 是个人普通文件。不存在时可原子创建并包含
+  `include.path = config.shared`；已有文件必须直接包含该 include，脚本不会编辑它。
+  个人覆盖应写在共享 include 后面。
+- macOS 的 Ghostty 平台入口由 `ghostty-macos` 包部署；Linux 上该入口必须缺席。
+- Codex 角色以普通文件副本部署，因为[上游拒绝符号链接角色文件](https://github.com/openai/codex/pull/39299)。
+  [sol_worker.toml](../codex/agents/sol_worker.toml) 复制到
+  `~/.codex/agents/sol_worker.toml`：相同的普通文件保持不变；内容不同、目标为链接或目录
+  时保留原件并报错。`.codex` 及 `.codex/agents` 保持真实目录，以便个人配置、其他代理、
+  认证和运行状态共存。doctor 核对源文件、目标类型及内容；仓库改动不会自动更新副本。
 
-`~/.config/git/config` 是个人普通文件。首次部署可原子创建其 `include.path = config.shared`；
-已有文件必须直接包含该 include，脚本不自动编辑。个人设置放在共享 include 后面。
-macOS 的 Ghostty 平台入口由 `ghostty-macos` 包部署，Linux 上该入口必须缺席。
+调用目录和 HOME 中的 `.stowrc`，以及 `~/.stow-global-ignore` 必须缺席。旧
+`~/.gitconfig`、Ghostty、Neovim、Lazygit、Shuck 竞争入口须先人工迁移；脚本会报告冲突
+并保留内容。其他包的自定义 Stow 忽略规则会提示人工核对。执行中途失败不会整体回滚：
+检查报告并处理冲突后，重新预览，再运行 `--apply`。
 
-Codex 角色以仓库内容的普通副本部署：上游[拒绝符号链接形式的角色文件](https://github.com/openai/codex/pull/39299)，
-deploy 因而把 [codex/agents/sol_worker.toml](../codex/agents/sol_worker.toml) 复制为
-`~/.codex/agents/sol_worker.toml`。复制复用普通文件的暂存与发布流程，内容写完后再发布；
-已有普通文件内容相同时保持不变，内容不同或为链接时在部署前失败并保留原文件，
-`.codex` 与 `.codex/agents` 保持真实目录，以便个人 `config.toml`、其他代理、认证和运行状态共存。
-doctor 检查源文件可读、目标为普通文件且内容一致；修改仓库不会自动更新副本。
+退出码：`0` 为预览或部署成功，`1` 为执行失败，`2` 为参数错误。
 
-旧 `~/.gitconfig`、Ghostty、Neovim、Lazygit、Shuck 竞争入口须先人工迁移；脚本会报告冲突
-并保留内容。失败时已完成的其他修改保留，不做全量回滚。
+## doctor 检查与证据
 
-## bootstrap 的阶段与安装来源
+doctor 默认离线读取真实环境、受管链接和状态目录，累积独立故障；权限检查不试写，
+也不读取历史内容。`--only` 可重复指定模块，`--verbose` 提供有界的原生错误输出。
+报告中的状态含义如下：
 
-执行顺序：环境和版本预检 → 平台软件 → Go/JDK/Maven 准备 → npm、C、Java/Maven 能力探针 → deploy 预检及部署 → Zsh 插件
-→ Neovim 插件和工具 → 桌面资源 → 必需工具复查及 doctor → 清理并报告总体结果。
+| 状态 | 含义                                               |
+| ---- | -------------------------------------------------- |
+| PASS | 有该项检查的验证证据，范围以报告文字为准           |
+| WARN | 可选组件缺失、能力未准备、偏离锁文件或存在个人覆盖 |
+| FAIL | 部署、必要依赖、解析、受控运行或清理发生故障       |
+| SKIP | 不适用、未初始化、缺少前置条件或不能按当前方式验证 |
 
-预览只读取安装清单和查询现有命令，不调用包管理器或下载资源。普通版本查询有 8 秒时限，
-Java 运行时属性和 Maven 版本查询分别有 12 秒与 15 秒时限，
-使用真实 PATH 选中的二进制，但 HOME/XDG、日志、临时文件及工作目录均隔离。
-Git/Stow 不满足要求时，部署预检延后到安装完成。预览退出时也清理私有临时目录。
+`0` 表示没有 FAIL，仍可能有 WARN/SKIP；`1` 表示健康检查失败；`2` 表示参数错误或
+检查器无法完成。整体计数在必要清理之后输出，单项故障不阻止其他独立检查。
+普通查询有 8 秒时限，每个受控运行模块有 30 秒时限。
 
-每次 apt 更新/安装及启动 Homebrew 安装器前，先检查免密 sudo 命令权限；若需密码，
-则在前台用 `sudo -v` 刷新认证。
-缓存仍有效时无需再输入密码；长任务之后认证已过期时可能再次提示。认证被拒绝就停止当前阶段，
-保留已完成的安装与部署，并按普通失败路径清理；不启动后台 sudo 保活任务。
+### 默认检查
 
-| 内容                      | 声明位置                                                                                                         | 维护职责                                                                              |
-| ------------------------- | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| Stow 包、默认布局、旧入口 | [layout.bash](layout.bash)                                                                                       | deploy、doctor、bootstrap 共用的布局事实                                              |
-| 命令最低要求              | [requirements.tsv](bootstrap/requirements.tsv)                                                                   | Tab 分隔的命令、最低版本、base/desktop、适用平台；最低版本为 `0` 表示先检查可执行文件 |
-| 固定下载资源              | [releases.json](bootstrap/releases.json)                                                                         | 版本、平台资产、URL、SHA256 和安装入口                                                |
-| macOS 软件                | [Brewfile](bootstrap/macos/Brewfile)、[Brewfile.desktop](bootstrap/macos/Brewfile.desktop)                       | 基础软件及 desktop 增量，静态 tap/formula/cask 声明                                   |
-| Ubuntu 软件               | [packages.bash](bootstrap/ubuntu/packages.bash)、[packages.desktop.bash](bootstrap/ubuntu/packages.desktop.bash) | apt 包、命令映射、上游资源和发行版差异                                                |
-| Go 工具链                 | [requirements.tsv](bootstrap/requirements.tsv)、[resources.py](bootstrap/resources.py) | 共用最低要求；缺失或不兼容时从 Go 官方解析最新稳定版与 SHA256 |
-| Java 工具链               | [requirements.tsv](bootstrap/requirements.tsv)、[resources.py](bootstrap/resources.py) | JDTLS 运行下限为 Java 21；bootstrap 要求完整 JDK，不满足时解析最新 Temurin 25 GA 与 SHA256 |
-| Maven                     | [requirements.tsv](bootstrap/requirements.tsv)、[resources.py](bootstrap/resources.py) | 共用 Maven 3.9 最低要求；缺失、不稳定或 runtime 不一致时从 Maven Central 解析最新 3.9.x 与 SHA512 |
+- 依赖检查离线查询实际选中的 Java/Javac/Maven：Java 必须是版本一致的完整 JDK 21+；
+  非空 `JAVA_HOME` 必须与 PATH 和 `java.home` 一致；Maven 必须是稳定 3.9.x 且使用同一
+  runtime。查询在临时 HOME 中进行，跳过 Maven RC。
+- Git 保留环境覆盖并检查配置来源；Zsh 解析配置及工具生成的初始化脚本。Neovim
+  不普通启动，只编译 Lua、解析 JSON，并检查本地插件及工具。无法在本地取得锁定
+  LazyVim 的最低版本说明时跳过，不联网获取。
+- Starship 使用实际选中的配置；Atuin 和 Shuck 使用所选配置的副本及临时状态。
+  Ghostty 等原生应用按可用性检查。delta 的后台能力探针固定深色主题，避免颜色查询
+  操作控制终端。
 
-macOS 先检查 Command Line Tools 和 Homebrew；首次需要完成 Apple 安装窗口后重新运行。
-Brewfile 表示 Homebrew 管理的安装，即使 PATH 上已有其他来源的兼容命令，仍会补齐对应包。
-Bundle 使用 `--no-upgrade`，随后只对不满足最低要求的工具定向升级；它不固定首次安装版本，
-包管理器仍可能更新所需依赖。单独运行 Brewfile 只准备软件，不执行部署、插件准备和完整验收。
+### 受控运行与边界
 
-Shuck 的 Brewfile 条目用 `trusted: true` 显式信任 `ewhauser/tap/shuck-cli`，授权范围仅为
-该 formula；`tap "ewhauser/tap"` 本身不授予整个 tap 的信任，见
-[Homebrew 的信任声明](https://docs.brew.sh/Brew-Bundle-and-Brewfile#trusted)。
-`tree-sitter` 命令由 `tree-sitter-cli` 包提供；Homebrew 的 `tree-sitter` 包仅提供库，
-安装清单和最低版本检查的升级映射均使用 CLI 包。
+`--runtime` 在临时 HOME 中运行配置和插件副本，验证**新**会话，不自动安装或更新。
+非默认布局、本机可执行覆盖、未知配置或缺少前提时，相应检查会 SKIP。这是应用级
+受控运行，不是执行任意代码的操作系统沙箱；Zsh/Neovim 提前退出会报告失败。
 
-Neovim 启用了 Go 支持，Mason 安装 Delve、gopls、goimports 等工具时需要先有 `go`。
-两个 profile、macOS 和 Ubuntu 共用 Go 准备逻辑：以 `GOTOOLCHAIN=local go version`
-离线检查实际 PATH 中的 Go，达到 `requirements.tsv` 的最低要求（当前为 1.21.0）即复用。
-只有缺失或版本不达标时，`--apply` 才查询 [Go 官方版本列表](https://go.dev/dl/?mode=json)，
-选择最新稳定版（排除 beta/RC），下载对应系统与架构的官方归档并校验列表提供的 SHA256。
-Go 不再列入 Brewfile 或 apt 清单；安装目录为 `~/.local/share/dotfiles-bootstrap/go/`，
-`go`、`gofmt` 入口放在 `~/.local/bin/`，优先于系统旧版。已有非受管入口冲突时保留并报错。
-预览不联网查询最新版本；达标后的重跑也不查询或追逐新版本。解析、下载或校验失败会停止
-软件阶段，保留已有安装；版本号写入本次日志，校验值写入安装回执。
-Go 1.21 起支持[自动选择和下载工具链](https://go.dev/doc/toolchain)，Mason 安装的模块要求
-更新版本时可由默认的 `GOTOOLCHAIN=auto` 获取；若个人配置禁用了自动切换，须自行准备
-这些模块要求的 Go 版本。bootstrap 不改写个人 Go 配置。
+| 模块    | 受控运行核对的内容及主要限制                                                                                                                                                 |
+| ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Zsh     | Antidote 和插件缓存、非交互/登录/PTY 会话、补全、按键与钩子；有 `local.zsh` 或 `local.zprofile` 时跳过运行，仍检查默认配置语法                                               |
+| Neovim  | 锁定插件及配置、已有 LSP、格式化、Zsh 诊断和 parser；关闭自动安装与更新。额外启动代码或配置目录链接会使运行检查跳过，Stow 文件级链接可用；Taplo 的远程 schema 不纳入离线检查 |
+| Lazygit | 在临时 Git 仓库中运行真实 TUI，确认 delta 渲染并记录编辑器参数；编辑器本身由 Neovim 模块检查，自定义 YAML 或多配置层不作为仓库基线                                           |
+| Vim     | 复制受管配置，检查配置发现、行号和状态目录                                                                                                                                   |
 
-Java 选择先尊重非空 `JAVA_HOME`，否则从 PATH 的 `java` 查询实际 `java.home`；只有同一 JDK
-中的 `java`、`javac` 都可执行、报告完全相同且不低于 21 的版本时才复用。这个下限来自
-[当前核对的 JDTLS v1.60.0 Java 21 运行要求](https://github.com/eclipse-jdtls/eclipse.jdt.ls/tree/v1.60.0#requirements)。无效或过旧的
-`JAVA_HOME`、仅有 JRE、版本不一致以及 macOS 的启动器都不会被误当作完整 JDK。需要准备时，
-`--apply` 查询 [Adoptium API](https://api.adoptium.net/v3/assets/latest/25/hotspot) 的 Eclipse
-Temurin JDK 25 正式版，验证平台、架构、JDK/HotSpot 元数据和官方 SHA256，再发布稳定入口
-`~/.local/share/dotfiles-bootstrap/jdk/current`。发布前同时验证 `bin/java` 和 `bin/javac`；
-损坏的新归档或旧缓存不会替换原有 `current`。完整 JDK 的其他 `bin` 工具通过
-`$JAVA_HOME/bin` 一并可用。
+显式路径解析通过，不等于应用发现了同一配置；新会话通过，也不代表已经运行的父 Shell
+或编辑器状态正确。Atuin 环境覆盖、项目 Shuck 配置、GUI 渲染、剪贴板及 SSH 客户端字体
+有各自的检查限制，应结合真实终端复核。
 
-Maven 只复用版本号严格匹配稳定 `3.9.x`、达到 3.9 最低要求且 runtime 与所选 JDK 相同的
-命令；RC、Maven 4 或使用其他 Java 的 Maven 会触发准备。`--apply` 从
-[Maven Central 元数据](https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/maven-metadata.xml)
-筛选数值最大的稳定 3.9.x，并用同一官方仓库的 SHA512 sidecar 校验归档，入口发布为
-`~/.local/bin/mvn`。Java 和 Maven 达标后的重跑保持离线，不追逐补丁版本；预览也不解析
-远端最新版。Java 查询、Maven 查询、编译、运行及离线 Maven validate 分别设有有限时限；
-Maven 探针禁用用户 RC，显式使用临时 user/global settings、user/global toolchains 与本地仓库，
-不读取或写入个人 `~/.m2`。Java 编译、运行和 Maven validate 的时限分别为 30、15 和 60 秒。
+## bootstrap 准备完整环境
 
-受管 JDK 发布后，根 `.zshenv` 为所有新 Zsh 设置 `JAVA_HOME`，并让 `$JAVA_HOME/bin` 位于
-`~/.local/bin` 和其他 Java 之前；登录 Shell 在 `brew shellenv` 重排 PATH 后恢复同一顺序，
-因此受管 Maven 与完整 JDK 都保持可发现。启动文件只检查受管入口是否完整，不在每次启动时
-运行版本命令。仓库默认会覆盖继承的旧 `JAVA_HOME`；需要使用其他 JDK 时，可在
-`~/.config/zsh/local.zprofile` 中显式重设 `JAVA_HOME` 并同步调整 PATH，该文件在仓库默认之后加载。
+bootstrap 必须选择 profile。`server` 准备命令行环境与 terminfo 工具；`desktop`
+在此基础上增加 Ghostty、IosevkaTerm Nerd Font、Sarasa Term SC，以及 Linux 剪贴板工具。
+profile 控制软件和字体范围，配置包按平台选择；远程服务器的字体通常应装在终端客户端，
+Ghostty SSH 集成负责向远端提供终端定义。multipass 在 Ubuntu 客户机内预览并执行
+`bootstrap.sh --profile server`，继承此处的安装、部署和诊断约定。
 
-Ubuntu 复用兼容命令；需要时先安装 apt 包，再使用已声明的固定上游资源或后备资源。
-包名不等于命令名时，`apt_commands` 用 `包名|命令列表` 声明；空命令列表按 dpkg 状态判断。
-`release_commands` 描述一项资源提供的多个命令，例如 Node/npm；`apt_fallbacks` 只在 apt
-安装后仍不兼容时使用。带发行版后缀的数组描述来源差异，加载器每次重置清单，避免 profile 串扰。
-Ubuntu 24.04 的 Ghostty 使用固定的 mkasberg/ghostty-ubuntu 社区 deb，由 apt 处理依赖；
-26.04 使用发行版包，macOS 使用 Homebrew cask。
+### 预检、预览与执行阶段
 
-上游归档先按资源声明校验后在私有暂存目录准备并发布；Maven 使用官方 SHA512，其余当前
-资源使用 SHA256，已有有效缓存会复用。除按需解析的 Go、JDK 25 和 Maven 3.9 最新稳定版外，
-上游归档版本由 `releases.json` 固定。Homebrew 初始
-安装脚本的提交和校验值保留在 macOS 安装器中，因为该阶段尚不能依赖 Python。
-字体按内部族名选择文件，并保留上游许可文件；Sarasa Term SC 的 7z 归档需要 7zz。
-macOS bootstrap 与使用 Ghostty 的 doctor 检查通过 `+list-fonts --family=...` 查询目标
-字体，并精确匹配输出的族名。无参数列表只显示被识别为等宽的字体，不能据此判断字体缺失；
-已有字体能通过族名查询时，重跑会直接复用，无需重新下载或删除安装目录。
-macOS 首次发布字体后，以及复用带匹配族名记录的受管目录时，提供 30 秒发现窗口，
-等待字体服务识别新文件。只有查询成功但暂未发现目标族名时才重试；查询错误或等待超时
-仍会失败并保留已安装文件，后续重跑可继续验收。
+除共同环境约定外，`NVIM_APPNAME` 必须未设置或为 `nvim`。安装前还会拒绝继承的
+Git 仓库上下文变量，即使其值为空：`GIT_DIR`、`GIT_WORK_TREE`、`GIT_COMMON_DIR`、
+`GIT_INDEX_FILE`、`GIT_OBJECT_DIRECTORY`、`GIT_ALTERNATE_OBJECT_DIRECTORIES`、
+`GIT_SHALLOW_FILE`、`GIT_GRAFT_FILE`、`GIT_NAMESPACE`、`GIT_IMPLICIT_WORK_TREE`、
+`GIT_PREFIX`。这些变量可能使 `git -C` 操作其他仓库；取消后从普通 Shell 重跑。
+Git 用户配置、鉴权及 `GIT_CONFIG_GLOBAL` 等配置选择仍保留。
 
-Antidote 读取仓库的 Zsh 插件清单，下载缺失插件并更新必要缓存，不主动更新已有插件。
-插件准备在无控制终端的后台任务中执行，避免 Antidote 的 Zsh 子进程操作终端时触发
-SIGTTOU，停在 `RUN: Zsh plugin preparation`。任务仍保留原进程组，超时和中断会一并
-清理其子进程；输出继续实时写入终端与日志。
-Zsh 插件清单尚未锁定提交，新机器使用下载时的上游版本。Neovim 使用配置副本和
-`lazy-lock.json` 准备、恢复插件，禁止写回锁文件；Mason 根据实际配置准备工具，包版本仍由
-registry 解析。Treesitter parser 修订跟随锁定插件；补全资源也必须准备成功。
+默认预览只读取安装清单、查询现有命令，不调用包管理器或下载资源；远端最新版本仅在
+`--apply` 需要安装时解析。预览使用真实 PATH 选中的二进制，隔离 HOME/XDG、日志、
+临时文件和工作目录，退出时清理私有临时目录。Git/Stow 尚未满足要求时，部署预检
+延后到安装完成。
 
-## 日志、失败和重试
+| 阶段          | `--apply` 执行内容                                              |
+| ------------- | --------------------------------------------------------------- |
+| 1. 软件与能力 | 平台软件，按需准备 Go/JDK/Maven，并探测 npm、C、Java/Maven 能力 |
+| 2. 部署       | 先运行 deploy 预检，再部署配置                                  |
+| 3. 插件与资源 | 准备 Zsh、Neovim 插件和工具；desktop 另准备桌面软件及字体       |
+| 4. 验收       | 复查必需工具，运行适用的 doctor 及受控运行检查，清理后汇总结果  |
 
-| 内容                       | 路径                                                                              |
-| -------------------------- | --------------------------------------------------------------------------------- |
-| bootstrap 持久日志         | `~/.local/state/dotfiles-bootstrap/run.*`                                         |
-| 并发执行锁及 PID           | `~/.local/state/dotfiles-bootstrap/lock/pid`                                      |
-| 校验后的下载缓存           | `~/.cache/dotfiles-bootstrap/`                                                    |
-| 上游工具与完成标记         | `~/.local/share/dotfiles-bootstrap/<工具>/<版本>-<平台>/`                         |
-| 工具命令入口               | `~/.local/bin/`                                                                   |
-| Antidote、Zsh 插件缓存     | `~/.local/share/antidote`、`~/.cache/antidote/`                                   |
-| Neovim 插件、工具和 parser | `~/.local/share/nvim/`                                                            |
-| Linux/macOS 字体           | `~/.local/share/fonts/dotfiles-bootstrap/`、`~/Library/Fonts/dotfiles-bootstrap/` |
+macOS 先检查 Command Line Tools 和 Homebrew；首次安装可能需要完成 Apple 的安装窗口
+后重跑。每次 apt 更新或安装、以及启动 Homebrew 安装器前，先检查免密 sudo 权限；
+需要密码时在前台用 `sudo -v` 认证。长任务后认证过期可能再次提示；拒绝认证会停止
+当前阶段，保留已完成内容，不启动后台 sudo 保活任务。
 
-长任务输出持续进入终端和持久日志。命令失败、日志转发失败和必要清理失败都会阻止总体成功；
-已有主体错误或中断码优先保留，清理错误另外报告并指出保留路径。
-bootstrap 中断会回收本次任务进程组并释放锁；强制关机或 SIGKILL 后，须确认记录的进程
-已结束，再处理遗留锁。包管理器自身的中断恢复按它的错误提示进行。
+### 软件来源与复用规则
 
-失败保留已经完成的安装与部署，不做全量回滚。已有个人文件、指向其他安装位置的入口或脏
-插件 checkout 发生冲突时，先检查并保留个人内容，再重跑同一命令。重复执行会复用已完成
-且满足要求的步骤。Git 身份、登录 Shell 和 Atuin 历史导入属于个人收尾操作，见
-[个人配置](../README.md#个人配置)。
+| 范围      | 选择和发布规则                                                                                                                                                                                                                                                                                                        |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| macOS 包  | Brewfile 准备 Homebrew 管理的包，即使 PATH 上已有其他来源的兼容命令仍会补齐；Bundle 使用 `--no-upgrade`，仅对不满足最低要求的工具定向升级。首次安装版本及必要依赖仍由包管理器决定                                                                                                                                     |
+| Ubuntu 包 | 复用兼容命令；需要时先装 apt 包，再用声明的固定上游资源或后备资源。24.04 的 Ghostty 使用固定的 mkasberg/ghostty-ubuntu 社区 deb，26.04 使用发行版包；macOS 使用 Homebrew cask                                                                                                                                         |
+| Go        | 用 `GOTOOLCHAIN=local go version` 离线检查 PATH 中的 Go，达到[最低要求](bootstrap/requirements.tsv)即复用；否则从 [Go 官方版本列表](https://go.dev/dl/?mode=json)选择最新稳定版并校验 SHA256，发布到 `~/.local/share/dotfiles-bootstrap/go/`，将 `go`/`gofmt` 入口放在 `~/.local/bin/`                                |
+| JDK       | 优先检查非空 `JAVA_HOME`，否则从 PATH 的 `java` 查询 `java.home`；同一 JDK 的 `java`/`javac` 都可执行、版本一致且不低于 21 才复用。否则从 [Adoptium API](https://api.adoptium.net/v3/assets/latest/25/hotspot)取得最新 Temurin JDK 25 GA，核对元数据及 SHA256，再发布 `~/.local/share/dotfiles-bootstrap/jdk/current` |
+| Maven     | 仅复用使用所选 JDK、版本稳定且满足 3.9 要求的 3.9.x；否则从 [Maven Central 元数据](https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/maven-metadata.xml)选择最新稳定 3.9.x，校验 SHA512 sidecar，发布 `~/.local/bin/mvn`                                                                             |
 
-deploy/bootstrap 的退出码为 `0` 成功或预览成功、`1` 执行失败、`2` 参数错误；
-HUP/INT/TERM 使用 `129/130/143`。bootstrap 成功仍可能包含 doctor 的 WARN/SKIP，应阅读具体范围。
+Go、JDK、Maven 达标后重跑保持离线，不追逐新版本；它们不列入 Brewfile 或 apt 清单。
+已有非受管命令入口冲突时保留并报错。Go 1.21 起可按默认
+[`GOTOOLCHAIN=auto`](https://go.dev/doc/toolchain) 为 Mason 模块选用更新工具链；
+禁用自动切换的个人配置需自行满足模块要求，bootstrap 不改写它。
 
-## doctor 的证据范围
+JDK 完整性在发布前核对，损坏的新归档或旧缓存不会替换 `current`。受管 JDK 发布后，
+根 `.zshenv` 让所有新 Zsh 使用其 `JAVA_HOME` 和完整 `bin`，登录 Shell 在
+`brew shellenv` 后恢复 PATH 优先级；启动文件不在每次启动时运行版本查询。
+需要其他 JDK 时，可在 `~/.config/zsh/local.zprofile` 中显式重设 `JAVA_HOME`
+并同步调整 PATH。Maven 的隔离探针不读取或写入个人 `~/.m2`。
 
-| 状态 | 含义                                                 |
-| ---- | ---------------------------------------------------- |
-| PASS | 有该项检查的验证证据，范围以报告文字为准             |
-| WARN | 可选组件缺失、能力尚未准备、偏离锁文件或存在个人覆盖 |
-| FAIL | 部署、必要依赖、解析、受控运行或清理发生故障         |
-| SKIP | 不适用、尚未初始化、缺少前置条件或不能按当前方式验证 |
+固定版本的其他上游归档在 [releases.json](bootstrap/releases.json) 声明；资源先校验，
+再在私有暂存目录准备并发布，有效缓存会复用。单独运行 Brewfile 只准备软件，不完成
+部署、插件准备和整体验收。
 
-doctor 返回 `0` 表示没有 FAIL，`1` 表示健康检查失败，`2` 表示参数错误或检查器不能完成；
-中断使用相同信号码。普通查询有 8 秒时限，每个受控运行模块有 30 秒时限。
-整体计数在必要清理之后输出，单项故障不阻止其他独立检查。
+### 插件与桌面资源
 
-默认检查读取真实环境、受管链接和状态目录；权限检查不试写，也不读取历史内容。
-依赖检查会离线查询实际选择的 Java/Javac/Maven：Java 必须是完整且版本一致的 JDK 21+，
-非空 `JAVA_HOME` 必须与 PATH 和 `java.home` 一致，Maven 必须是稳定 3.9.x 且使用同一 runtime。
-这些查询在临时 HOME 中运行、跳过 Maven RC，并受普通 8 秒探针时限约束。
-Git 保留环境覆盖并检查配置来源；delta 能力探针固定深色主题，避免后台颜色查询操作控制终端。
-Zsh 解析配置及工具生成的初始化脚本；Neovim 禁止普通启动，
-只编译 Lua、解析 JSON、检查本地插件及工具。锁定 LazyVim 的最低版本说明无法在本地取得时会跳过，
-不联网获取。Starship 使用实际选中配置，Atuin/Shuck 使用所选配置的副本和临时状态。
-Atuin 任意环境覆盖、项目 Shuck 配置、GUI 渲染、剪贴板及 SSH 客户端字体有各自的检查限制。
+Antidote 读取仓库的 Zsh 插件清单，下载缺失插件并更新必要缓存，不主动更新已有插件；
+清单尚未锁定提交，新机器使用下载时的上游版本。Neovim 用配置副本和
+`lazy-lock.json` 准备、恢复插件，不写回锁文件；Mason 按实际配置准备工具，
+包版本仍由 registry 解析。Treesitter parser 跟随锁定插件，补全资源也必须成功。
 
-`--runtime` 在临时 HOME 内执行配置和插件副本，验证新会话；非默认布局、本机可执行覆盖
-或未知配置会使相应检查跳过。这是应用级受控运行，不是执行任意代码的操作系统沙箱。
-Zsh/Neovim 会话须实际完成检查；提前退出会报告失败。
+字体按内部族名选择文件并保留上游许可，Sarasa Term SC 归档需要 7zz。
+macOS bootstrap 与使用 Ghostty 的 doctor 以 `+list-fonts --family=...` 精确查询目标族名；
+无参数列表仅显示被识别为等宽的字体，不能据此判断缺失。已可查询的字体重跑直接复用。
+首次发布或复用有匹配族名记录的受管目录时，最多等待 30 秒供字体服务识别；
+查询错误或超时会报告失败、保留文件，后续可重跑验收。
 
-- Zsh：使用已准备的 Antidote 和插件缓存，检查非交互、登录及 PTY 交互会话、补全、按键与钩子；
-  存在 `local.zsh`/`local.zprofile` 时跳过运行，默认语法检查仍保留。
-- Neovim：复制锁定插件及配置，关闭 lazy/Mason/Treesitter 自动安装和更新，检查已有 LSP、
-  格式化、Zsh 诊断和 parser。Taplo 的远程 schema 初始化不属于离线检查，因此其 LSP 附着会跳过。
-  临时配置只包含已核对的受管 Lua/Vimscript 和两份 JSON；额外启动代码或配置目录链接会使
-  运行检查跳过，Stow 的文件级链接仍可使用。
-- Lazygit：临时 Git 仓库里运行真实 TUI，关闭 fetch/更新，确认真实 delta 成功完成渲染，
-  并记录传给编辑器的参数；编辑器交接后在会话时限内重试退出键，避免输入模式切换丢失按键。
-  编辑器自身由 Neovim 模块检查，自定义 YAML 或多配置层不当作仓库基线。
-- Vim：复制受管配置，检查配置发现、行号与状态目录。
+### 日志、失败与重试
 
-显式路径解析通过不等于应用发现了同一配置；受控会话通过也不代表已经运行的父 Shell 或
-编辑器状态正确。沙箱权限限制、GUI 效果和剪贴板需结合真实终端复核。
-受控进程清理仍会终止组长退出后遗留的子进程。已退出进程组若暂时报 `EPERM`，最多等待
-0.2 秒确认进程组消失；仍存在或持续拒绝访问时报告错误。
+| 内容                         | 路径                                                                                    |
+| ---------------------------- | --------------------------------------------------------------------------------------- |
+| 持久日志、并发锁及 PID       | `~/.local/state/dotfiles-bootstrap/run.*`、`~/.local/state/dotfiles-bootstrap/lock/pid` |
+| 已校验下载缓存               | `~/.cache/dotfiles-bootstrap/`                                                          |
+| 上游工具、完成标记及命令入口 | `~/.local/share/dotfiles-bootstrap/<工具>/<版本>-<平台>/`、`~/.local/bin/`              |
+| Antidote、Neovim 插件和工具  | `~/.local/share/antidote`、`~/.cache/antidote/`、`~/.local/share/nvim/`                 |
+| Linux/macOS 字体             | `~/.local/share/fonts/dotfiles-bootstrap/`、`~/Library/Fonts/dotfiles-bootstrap/`       |
 
-## 代码导航与验证
+长任务输出同时进入终端和日志。命令失败、日志转发失败或必要清理失败都会阻止总体成功；
+已有主体错误或中断码优先保留，清理错误另行报告并指出保留路径。中断会回收本次任务的
+进程组并释放锁；强制关机或 SIGKILL 后，须先确认 PID 所指进程已结束，再处理遗留锁。
+包管理器自身的中断恢复依其错误提示进行。
 
-`.sh` 是公开命令入口；[layout.bash](layout.bash) 是三个核心入口的共享布局库。
-`bootstrap/` 和 `doctor/` 内的文件是各自私有实现：Bash 负责调度，Python 标准库负责复杂
-文件操作和 PTY，Lua/Zsh 调用对应运行时的能力。source 文件只声明函数或数据，入口持有
-运行状态和 trap。平台安装器保留各自政策，不把安装要求、健康等级与部署规则合成通用清单。
-`multipass.sh` 及 `multipass/` 下的 Python 文件是可选的宿主机编排实现；
-它们使用客户机脚本，但不共享核心入口的所有环境与输出约定。
+失败保留已完成的安装与部署，不整体回滚。个人文件、其他安装位置的命令入口或脏插件
+checkout 冲突时，先核对并保留个人内容，之后重跑同一命令；达标步骤会复用。
+Git 身份、登录 Shell 和 Atuin 历史导入属于[个人收尾操作](../README.md#个人配置)。
 
-全量回归入口为 [tests/all.sh](../tests/all.sh)。五套独立离线测试的职责、单用例运行、依赖、
-缓存集成和测试代码静态检查见 [测试说明](../tests/README.md)。
+退出码：`0` 为预览或所选准备及适用检查成功，`1` 为执行失败，`2` 为参数错误。
+bootstrap 成功仍可能包含 doctor 的 WARN/SKIP，应阅读具体报告范围。
 
-```sh
-bash tests/all.sh
-# 验证特定 Bash：
-/path/to/bash tests/all.sh
-```
+## multipass 创建和管理 Ubuntu 开发机
 
+multipass 在 Apple Silicon Mac 宿主机上编排 Ubuntu arm64 客户机；客户机从指定的
+远程提交部署本仓库，再以普通 `ubuntu` 用户运行前述 bootstrap 流程。它使用客户机内的
+核心脚本，不共享所有宿主环境、状态和输出约定。四个子命令承担不同职责：
+
+| 子命令      | 职责                                                                       |
+| ----------- | -------------------------------------------------------------------------- |
+| `create`    | 创建实例、建立 SSH 连接并从固定提交配置客户机；默认只预览                  |
+| `provision` | 重新配置已有实例，可用 `--ref` 更新目标提交；默认只预览                    |
+| `check`     | 查询受管实例状态，不启动或修复；`--runtime` 还在客户机运行 doctor 受控诊断 |
+| `ssh`       | 进入已运行实例的普通 SSH 会话                                              |
+
+`create`/`provision` 在 `--apply` 时可能安装或升级宿主 Multipass，并写入宿主状态；
+客户机的项目目录位于自己的 `~/workspace`，不挂载宿主目录。专用 SSH 私钥由操作者
+保留在宿主机，脚本仅把公钥写入客户机。完整的
+[创建步骤](../environments/multipass/README.md#宿主机要求与首次创建)、
+[日常命令](../environments/multipass/README.md#日常使用)、
+[宿主与客户机状态路径](../environments/multipass/README.md#配置目录与状态)、
+[失败恢复边界](../environments/multipass/README.md#失败处理与恢复边界)
+由 Multipass 专文维护。
+
+## 维护与验证
+
+### 声明与安装来源
+
+安装要求、部署目标和健康等级有不同职责，按下表维护对应声明，避免让同一份清单
+承担三种判断规则：
+
+| 声明位置                                                                                                                                                                                     | 维护内容                                                             |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| [layout.bash](layout.bash)                                                                                                                                                                   | Stow 包、默认布局、旧入口及 Skill 客户端范围                         |
+| [requirements.tsv](bootstrap/requirements.tsv)                                                                                                                                               | 命令最低要求、base/desktop 和平台；最低版本 `0` 表示先检查可执行文件 |
+| [releases.json](bootstrap/releases.json)                                                                                                                                                     | 固定下载资源的版本、平台资产、URL、SHA256 和安装入口                 |
+| [macOS Brewfile](bootstrap/macos/Brewfile)、[desktop 增量](bootstrap/macos/Brewfile.desktop)                                                                                                 | 静态 tap/formula/cask 声明                                           |
+| [Ubuntu 包清单](bootstrap/ubuntu/packages.bash)、[desktop 增量](bootstrap/ubuntu/packages.desktop.bash)                                                                                      | apt 包、命令映射、上游资源及发行版差异                               |
+| [resources.py](bootstrap/resources.py)                                                                                                                                                       | 按需解析 Go/JDK/Maven 版本、校验和发布资源                           |
+| [Multipass 默认值](../environments/multipass/defaults.json)、[宿主安装声明](../environments/multipass/host-releases.json)、[cloud-init 模板](../environments/multipass/cloud-init.yaml.tmpl) | VM 资源、宿主安装版本及客户机初始化；不参与 Stow 部署                |
+
+维护平台清单时，注意以下现有约定：
+
+- Shuck formula 使用 `trusted: true`，仅信任该 formula，不把整个 tap 视为已授权；
+  `tree-sitter` 命令来自 `tree-sitter-cli` 包，不是只提供库的 `tree-sitter` 包。
+- Ubuntu 的 `apt_commands` 用 `包名|命令列表` 表示映射；空命令列表按 dpkg 状态判断。
+  `release_commands` 可声明一份资源提供多个命令；`apt_fallbacks` 仅在 apt 结果仍不兼容
+  时使用。发行版后缀数组区分来源，加载时重置清单以免 profile 串扰。
+- Homebrew 初始安装器的提交与校验值留在 macOS 安装器中，因为该阶段尚不能依赖 Python。
+  Maven 用官方 SHA512，其他当前固定归档用 SHA256。
+
+### 进程与探针
+
+Antidote 的插件准备在无控制终端的后台任务中运行，防止子进程操作终端时因
+SIGTTOU 停住；输出仍实时转发，超时或中断会清理其子进程。普通版本查询有
+8 秒时限；bootstrap 的 Java 运行时属性和 Maven 版本查询分别为 12、15 秒，
+Java 编译、运行及离线 Maven validate 分别为 30、15、60 秒。Maven 探针禁用
+用户 RC，并使用临时 settings、toolchains 与本地仓库。
+
+doctor 的受控进程清理会回收组长退出后遗留的子进程；对已退出进程组短暂的
+`EPERM` 最多等待 0.2 秒确认消失，仍存在或持续拒绝访问则报错。
+
+### 回归与静态检查
+
+全量回归入口为 [tests/all.sh](../tests/all.sh)，包括 Multipass 离线套件；
+可单独运行 `bash tests/multipass.sh`。五套离线测试的职责、单用例运行、缓存集成
+及测试代码静态检查见[测试说明](../tests/README.md)。真实双版本 VM 验收须显式
+运行 `bash tests/multipass-live.sh`，前提、命令和清理边界见
+[Multipass 维护与验收](../environments/multipass/README.md#维护与验收)。
 生产脚本的静态检查在仓库根目录执行：
 
 ```sh
+bash tests/all.sh
+# 指定 Bash 验证全部套件
+/path/to/bash tests/all.sh
+
 files=(scripts/*.sh scripts/*.bash scripts/bootstrap/*.bash scripts/bootstrap/*/*.bash)
 for file in "${files[@]}"; do bash -n "$file" || exit; done
 shellcheck -x "${files[@]}"
@@ -295,6 +331,7 @@ for path in Path('scripts').rglob('*.py'):
 PY
 ```
 
-更新资源时核对 URL/SHA256、最低要求和平台清单；更新插件锁时同步验收 Neovim 内部 API
-适配、实际 Zsh/Neovim 会话及不变的锁文件。模拟 uname 只证明分支选择，目标系统的原生
-Bash、包管理器、首次安装及桌面行为仍须在对应平台验收。
+更新资源时核对 URL、校验值、最低要求及平台清单；更新插件锁时同步验收 Neovim
+内部 API、实际 Zsh/Neovim 会话及不变的锁文件。模拟 uname 只证明分支选择；
+目标系统的原生 Bash、包管理器、首次安装和桌面行为仍须在对应平台验收；
+Multipass 的命令与 VM 替身也不能代替真实宿主和客户机验收。

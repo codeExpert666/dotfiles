@@ -9,9 +9,8 @@ Ubuntu 开发机时，才在 Apple Silicon Mac 宿主机上运行 `scripts/multi
 
 扩展在宿主机创建 Ubuntu arm64 客户机并建立 SSH 连接，在客户机拉取指定的远程提交，
 以普通 `ubuntu` 用户先预览、再执行 `bootstrap.sh --profile server`，复用核心的依赖准备、
-配置部署与诊断。`server` 只表示软件准备范围，与是否使用虚拟机无关。
-客户机保留 Multipass 的管理用户和通道；日常通过独立 SSH 密钥登录，项目目录位于
-客户机自己的 `~/workspace`，不挂载宿主目录。
+配置部署与诊断。客户机保留 Multipass 的管理用户和通道；日常通过独立 SSH 密钥登录，
+项目目录位于客户机自己的 `~/workspace`，不挂载宿主目录。
 
 ## 宿主机要求与首次创建
 
@@ -98,16 +97,16 @@ bash scripts/multipass.sh provision --apply --name ubuntu-dev --ref '<新40位SH
 直接在已有机器运行核心 bootstrap 不会自动设置登录 Shell 或 Git 身份，详见
 [个人配置](../../README.md#个人配置)。
 
-| 所属机器 | 路径 | 内容 |
-| --- | --- | --- |
-| 宿主机仓库 | [defaults.json](defaults.json)、[host-releases.json](host-releases.json)、[cloud-init.yaml.tmpl](cloud-init.yaml.tmpl) | 默认资源、Multipass 安装声明和客户机初始化模板 |
-| 宿主机 HOME | `~/.config/dotfiles-multipass/config.json` | 可选个人参数配置 |
-| 宿主机 HOME | `~/.local/state/dotfiles-multipass/instances/<name>/` | 创建声明、`receipt.json`、阶段日志、user-data 和锁 |
-| 宿主机 HOME | `~/.cache/dotfiles-multipass/` | 已校验的官方 pkg 缓存 |
-| 宿主机 HOME | `~/.ssh/config`、`~/.ssh/dotfiles-multipass/` | 受管 Include、实例 Host 片段和专用 known_hosts |
-| 宿主机 HOME | `~/.local/share/dotfiles-multipass/ssh-proxy.py` | 哈希管理的实例地址解析助手副本 |
-| 客户机 `/home/ubuntu` | `~/.dotfiles`、`~/workspace` | 固定提交的仓库和独立项目目录 |
-| 客户机 `/home/ubuntu` | `~/.config/git/config`、`~/.local/state/dotfiles-bootstrap/` | 个人 Git 入口和核心 bootstrap 日志、锁 |
+| 所属机器              | 路径                                                                                                                   | 内容                                               |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| 宿主机仓库            | [defaults.json](defaults.json)、[host-releases.json](host-releases.json)、[cloud-init.yaml.tmpl](cloud-init.yaml.tmpl) | 默认资源、Multipass 安装声明和客户机初始化模板     |
+| 宿主机 HOME           | `~/.config/dotfiles-multipass/config.json`                                                                             | 可选个人参数配置                                   |
+| 宿主机 HOME           | `~/.local/state/dotfiles-multipass/instances/<name>/`                                                                  | 创建声明、`receipt.json`、阶段日志、user-data 和锁 |
+| 宿主机 HOME           | `~/.cache/dotfiles-multipass/`                                                                                         | 已校验的官方 pkg 缓存                              |
+| 宿主机 HOME           | `~/.ssh/config`、`~/.ssh/dotfiles-multipass/`                                                                          | 受管 Include、实例 Host 片段和专用 known_hosts     |
+| 宿主机 HOME           | `~/.local/share/dotfiles-multipass/ssh-proxy.py`                                                                       | 哈希管理的实例地址解析助手副本                     |
+| 客户机 `/home/ubuntu` | `~/.dotfiles`、`~/workspace`                                                                                           | 固定提交的仓库和独立项目目录                       |
+| 客户机 `/home/ubuntu` | `~/.config/git/config`、`~/.local/state/dotfiles-bootstrap/`                                                           | 个人 Git 入口和核心 bootstrap 日志、锁             |
 
 宿主 SSH 配置只在 `~/.ssh/config` 顶部加入一次受管 Include；首次编辑前备份已有内容。
 实例 Host 片段固定用户 `ubuntu`、严格主机密钥校验和专用 known_hosts，
@@ -139,7 +138,7 @@ known_hosts。Multipass 安装或升级后的版本及服务探测会在 120 秒
 
 ## 维护与验收
 
-[Multipass 离线测试](../../tests/README.md#multipass-扩展测试)使用命令与 VM 替身，
+[Multipass 离线测试](../../tests/README.md#multipass)使用命令与 VM 替身，
 不要求真实 Multipass。需要验证真实客户机时，先准备前述专用公钥和远程可获取的提交，
 再在**宿主机仓库根目录**显式运行双版本验收；它不会由 `tests/all.sh` 启动：
 
@@ -155,15 +154,9 @@ SSH，并在每版结束时定向清理。报告默认保存在宿主机
 指定尚不存在的报告目录。验收只删除自己登记且创建标识匹配的实例与受管 SSH 文件，
 报告保留；个人密钥和宿主 Multipass 保留，由操作者管理。缺少本次创建记录、宿主状态
 或客户机标记不符、实例锁占用时，不删除实例。预先存在的同名实例或状态目录会被拒绝。
+验收结果仅适用于运行时的提交、宿主和客户机环境；后续提交需重新验收确认。
 
 高级自动化调用可在全新实例名上使用
 `create --creation-record <绝对路径>`：记录文件须尚不存在，父目录须已存在；
 创建命令在 launch 前独占写入名称和 UUID，预览不会写入。验收用它在后续阶段失败时
 核对本次实例归属，再决定是否清理。
-
-## 设计与历史记录
-
-[实施方案](../../docs/plan/multipass-dev-machine.md)记录设计依据及行为边界。
-[2026-09-23 实施与真实验收报告](../../docs/reports/multipass-2026-09-23.md)记录当日
-在指定提交、宿主环境与两版 Ubuntu 上的验收及清理结果；该报告不代表后续提交都已通过
-相同的真实验收。

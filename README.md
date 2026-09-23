@@ -89,9 +89,8 @@ cd ~/src/dotfiles
 - `desktop`：额外安装 Ghostty、IosevkaTerm Nerd Font 和 Sarasa Term SC。
   字体应安装在本地终端客户端。
 
-profile 控制软件和字体的准备范围，与是否使用虚拟机无关；配置包按平台选择。
-`server` 也会部署 Ghostty 配置。以下以 `server` 为例，桌面环境将两条命令中的值
-改为 `desktop`。
+profile 控制软件和字体的准备范围，配置包按平台选择。`server` 也会部署 Ghostty 配置。
+以下以 `server` 为例，桌面环境将两条命令中的值改为 `desktop`。
 
 ```sh
 # 离线预览
@@ -212,7 +211,7 @@ bash scripts/deploy.sh --apply
   `~/.codex/agents/sol_worker.toml` 的普通副本，修改仓库不会自动更新本机文件。
   首次接管或更新已有角色时，先核对差异、备份并移走旧文件，再预览和部署。
   部署后新开 Codex 会话验证角色加载与一次小任务委派；doctor 只检查部署文件。
-  部署机制见[脚本说明](scripts/README.md#deploy-的部署产物与失败路径)。
+  部署机制见[脚本说明](scripts/README.md#deploy-部署配置)。
 
 改完先预览，再执行 `--apply`，随后用 `bash scripts/doctor.sh --only deployment` 检查部署状态；
 改动较大时运行 `bash tests/all.sh` 回归。目标位置已有旧入口或个人文件时，deploy 会报告冲突并

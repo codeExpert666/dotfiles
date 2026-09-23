@@ -26,7 +26,7 @@
   acceptance entrypoint, and shared fixtures in `tests/support/`.
 - The root README owns the terminal environment quick start and links to the
   extension. `scripts/README.md` documents core script behavior; `tests/README.md`
-  navigates all suites. Historical plans and validation reports live in `docs/`.
+  navigates all suites.
 
 ## Build, Test, and Development Commands
 
