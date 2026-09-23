@@ -161,6 +161,8 @@ def acceptance(name, image, ref, key, report):
               '&& test -d "$HOME/workspace" && test -d "$HOME/.dotfiles" '
               '&& test "$(getent passwd ubuntu | cut -d: -f7)" = "$(command -v zsh)" '
               '&& test "$(timedatectl show -p Timezone --value)" = Asia/Shanghai '
+              '&& test -n "$JAVA_HOME" && test -x "$JAVA_HOME/bin/java" '
+              '&& test "$(command -v java)" = "$JAVA_HOME/bin/java" '
               '&& command -v nvim zsh git node npm go java javac mvn')
     run(["ssh", "-o", "BatchMode=yes", name, "bash -lc " + shlex.quote(verify)],
         report / "ssh.log", timeout=120)
