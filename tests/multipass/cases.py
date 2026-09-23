@@ -34,6 +34,52 @@ def args(**overrides):
     return SimpleNamespace(**values)
 
 
+class HelpTests(unittest.TestCase):
+    def help_output(self, *command):
+        result = subprocess.run(["bash", str(REPO / "scripts/multipass.sh"), *command, "--help"],
+                                cwd=REPO, env={**os.environ, "COLUMNS": "120"},
+                                capture_output=True, text=True, check=True)
+        self.assertEqual(result.stderr, "")
+        self.assertNotIn("runtime.py", result.stdout)
+        return result.stdout
+
+    def test_public_entrypoint_names_and_explains_commands_and_options(self):
+        root = self.help_output()
+        self.assertIn("usage: multipass.sh", root)
+        for action, summary in (("create", "create or resume a pinned Ubuntu instance"),
+                                ("provision", "reconfigure a managed instance"),
+                                ("check", "inspect a managed instance"),
+                                ("ssh", "connect to a running managed instance")):
+            self.assertIn(summary, root)
+            output = self.help_output(action)
+            self.assertIn(f"usage: multipass.sh {action}", output)
+            self.assertIn("--name NAME", output)
+            self.assertIn("--config FILE", output)
+
+        create = self.help_output("create")
+        for explanation in ("preview only (the default when --apply is absent)",
+                            "40 lowercase hex digits", "existing absolute public key file",
+                            "Ubuntu release: 24.04 or 26.04", "CPU count: 1-64",
+                            "RAM: integer M or G units, at least 2G",
+                            "disk: integer M or G units, at least 20G",
+                            "public HTTPS Git repository URL without credentials"):
+            self.assertIn(explanation, create)
+        self.assertRegex(create, r"--creation-record FILE +on --apply for a fresh instance")
+        self.assertRegex(create, r"new absolute file in an\s+existing directory")
+
+        provision = self.help_output("provision")
+        self.assertIn("Use --ref to select a new commit", provision)
+        self.assertNotIn("--creation-record", provision)
+        self.assertIn("run guest doctor diagnostics", self.help_output("check"))
+
+    def test_argument_errors_use_public_entrypoint_name(self):
+        result = subprocess.run(["bash", str(REPO / "scripts/multipass.sh"), "unknown"],
+                                cwd=REPO, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("usage: multipass.sh", result.stderr)
+        self.assertNotIn("runtime.py", result.stderr)
+
+
 class Inputs(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

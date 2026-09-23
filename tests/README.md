@@ -126,6 +126,7 @@ doctor 和 config-loading 在可用时运行真实应用及 PTY 会话；bootstr
 
 ### multipass
 
+- 通过公开的 `multipass.sh` 入口检查顶层及各子命令帮助、选项说明和错误用法提示。
 - 无网络、无真实 Multipass 实例；替身核对 VM 参数、宿主安装来源和复用、
   公钥与 agent 身份、SSH 信任、固定提交、脏仓库及 bootstrap 锁保护。
   服务就绪用虚拟时钟覆盖 daemon 延迟、旧 CLI 回退、超时和不可重试的配置错误。

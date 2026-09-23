@@ -106,25 +106,59 @@ class Runner:
 
 
 def parser():
-    root = argparse.ArgumentParser(description=__doc__)
+    def formatter(prog):
+        return argparse.HelpFormatter(prog, max_help_position=32)
+
+    root = argparse.ArgumentParser(
+        prog="multipass.sh", description=__doc__, formatter_class=formatter,
+        epilog="Run 'bash scripts/multipass.sh <command> --help' for command options.")
     commands = root.add_subparsers(dest="action", required=True)
-    for action in ("create", "provision", "check", "ssh"):
-        sub = commands.add_parser(action)
-        sub.add_argument("--name")
-        sub.add_argument("--config", type=Path)
+    descriptions = {
+        "create": "create or resume a pinned Ubuntu instance",
+        "provision": "reconfigure a managed instance, optionally at a new Git commit",
+        "check": "inspect a managed instance and optionally run guest diagnostics",
+        "ssh": "connect to a running managed instance over SSH",
+    }
+    declaration_notes = {
+        "create": ("For a new instance, CLI values override the local config, then defaults.json. "
+                   "On a retry, the commit, image, CPU, memory, disk and repository URL "
+                   "must match the saved declaration."),
+        "provision": ("Image, CPU, memory, disk and repository URL must match the saved declaration. "
+                      "Use --ref to select a new commit."),
+    }
+    for action, description in descriptions.items():
+        sub = commands.add_parser(
+            action, help=description, description=description, formatter_class=formatter,
+            epilog=declaration_notes.get(action))
+        sub.add_argument("--name", help=f"Multipass instance name (config or {DEFAULTS['name']} by default)")
+        sub.add_argument("--config", type=Path, metavar="FILE",
+                         help="local JSON config (default: ~/.config/dotfiles-multipass/config.json)")
         if action in ("create", "provision"):
             modes = sub.add_mutually_exclusive_group()
-            modes.add_argument("--dry-run", action="store_true")
-            modes.add_argument("--apply", action="store_true")
-            sub.add_argument("--ref")
-            sub.add_argument("--ssh-public-key", type=Path)
-            for option in ("image", "cpus", "memory", "disk", "repo-url"):
-                sub.add_argument("--" + option)
+            modes.add_argument("--dry-run", action="store_true",
+                               help="preview only (the default when --apply is absent)")
+            modes.add_argument("--apply", action="store_true",
+                               help="perform changes; may install or upgrade Multipass")
+            ref_help = ("target Git commit: 40 lowercase hex digits (required here or in config)"
+                        if action == "create" else
+                        "target Git commit: 40 lowercase hex digits (default: saved commit)")
+            sub.add_argument("--ref", metavar="SHA", help=ref_help)
+            sub.add_argument("--ssh-public-key", type=Path, metavar="FILE",
+                             help="existing absolute public key file; matching key must be in ssh-agent "
+                                  "(fingerprint fixed after creation)")
+            sub.add_argument("--image", metavar="VERSION", help="Ubuntu release: 24.04 or 26.04")
+            sub.add_argument("--cpus", metavar="COUNT", help="CPU count: 1-64")
+            sub.add_argument("--memory", metavar="SIZE", help="RAM: integer M or G units, at least 2G")
+            sub.add_argument("--disk", metavar="SIZE", help="disk: integer M or G units, at least 20G")
+            sub.add_argument("--repo-url", metavar="URL",
+                             help="public HTTPS Git repository URL without credentials")
         if action == "check":
-            sub.add_argument("--runtime", action="store_true")
+            sub.add_argument("--runtime", action="store_true",
+                             help="run guest doctor diagnostics in addition to instance checks")
         if action == "create":
-            sub.add_argument("--creation-record", type=Path,
-                             help="write an exclusive name/UUID record before a fresh launch")
+            sub.add_argument("--creation-record", type=Path, metavar="FILE",
+                             help="on --apply for a fresh instance, write name/UUID JSON before launch "
+                                  "(new absolute file in an existing directory)")
     return root
 
 
