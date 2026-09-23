@@ -152,6 +152,9 @@ def acceptance(name, image, ref, key, report):
     run(create, report / "create.log", timeout=14400)
     run(["multipass", "exec", name, "--", "sudo", "cloud-init", "schema", "--system"],
         report / "schema.log", timeout=120)
+    run(["multipass", "exec", name, "--", "sh", "-c",
+         'test "$LANG" = C.UTF-8 && test "$(locale charmap)" = UTF-8'],
+        report / "locale.log", timeout=120)
     run(["bash", str(ENTRY), "check", "--name", name, "--runtime"],
         report / "check-runtime.log", timeout=1800)
     verify = ('test "$(id -un)" = ubuntu && test "$HOME" = /home/ubuntu '
