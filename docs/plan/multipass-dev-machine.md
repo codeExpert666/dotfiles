@@ -523,11 +523,25 @@ cloud-init 不作为日常重新配置的入口，不使用 `cloud-init clean` �
 远程可获取的目标 commit，以及安装时可能需要的宿主 sudo 认证。
 这些是执行输入，不影响本方案的目录和行为设计。
 
-## 13. 当前证据范围
+## 13. 原方案制定时的证据范围
 
-本方案已核对当前仓库代码、macOS 15.8 arm64、可用的 Homebrew 路径，以及官方文档与
-Multipass 1.16.4 安装包元数据。当前 PATH 未找到 Multipass，不据此断言系统不存在任何
-安装残留；实际实施先执行完整探测。
+以下记录的是 2026-09-22 制定方案时的状态，当时已核对仓库代码、macOS 15.8
+arm64、可用的 Homebrew 路径、官方文档与 Multipass 1.16.4 安装包元数据。
+当时 PATH 未找到 Multipass，因此实际实施先执行完整探测。
 
-尚未下载或安装 Multipass，尚未创建虚拟机，尚未验证上述拟实现接口。
-方案里的命令和测试矩阵是后续实施与验收要求，不是已经通过的执行记录。
+制定时尚未下载或安装 Multipass、创建虚拟机或验证拟实现接口。上文命令和测试矩阵
+在当时是后续实施要求；完成情况记录如下。
+
+## 14. 实施记录（2026-09-23）
+
+方案已在 `codex/multipass-dev-machine` 分支实施。实际宿主编排采用 Python 标准库模块
+`runtime.py`、`host.py`、`ssh_config.py`、`ssh_proxy.py`，客户机助手为 `guest.py`；
+`scripts/multipass.sh` 仍是 Bash 3.2 兼容的公共入口。这样保留了上文接口与职责，
+同时便于解析 Multipass JSON、原子发布 SSH 文件并记录分阶段回执。
+
+验收开始时远程 `main` 为 `bd28c79ab0da6b1818243dab18f9c256bb57f674`。
+首次真实安装发现现有 bootstrap/doctor 的 Ubuntu 问题后进行了针对性修复，
+最终两版客户机均检出分支提交 `fa9b55af8bfc20488eb2178be071edc0c326033e`。
+用户允许为本次验收临时创建密钥；验收完成后已从 agent 移除并删除密钥及其临时
+解锁文件。详细的原生证据、离线测试、SKIP、已知边界和清理证明见
+[实施与真实验收报告](../reports/multipass-2026-09-23.md)。

@@ -82,7 +82,8 @@ cloud-init。要转发本地端口，可运行 `ssh -L 8080:localhost:8080 ubunt
 | `~/.ssh/dotfiles-multipass/` | 实例 Host 片段和专用 known_hosts |
 
 状态目录默认 0700，记录默认 0600。日志与回执记录目标/实际提交、镜像哈希、
-Multipass 版本和阶段结果，不记录私钥或密码短语。首次系统更新只在创建阶段执行；
+Multipass 版本、阶段结果和 doctor 的四项计数，不记录私钥或密码短语。
+首次系统更新只在创建阶段执行；
 cloud-init 要求重启时由宿主最多自动重启一次。Multipass 镜像默认允许 `ubuntu`
 免密执行管理命令；bootstrap 先验证这一权限，需密码时才在前台刷新 sudo 凭据。
 `bootstrap` 以普通 `ubuntu` 用户运行，
@@ -102,3 +103,5 @@ cloud-init 要求重启时由宿主最多自动重启一次。Multipass 镜像�
 报告保留在指定目录；个人密钥及宿主 Multipass 均保留，由操作者自行管理。
 
 设计依据和行为边界见 [实施方案](../../docs/plan/multipass-dev-machine.md)。
+本次 24.04/26.04 原生验收与清理结果见
+[实施报告](../../docs/reports/multipass-2026-09-23.md)。
