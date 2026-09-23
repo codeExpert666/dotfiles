@@ -417,8 +417,10 @@ tool_ready() {
 
 authorize_sudo() {
 	command -v sudo > /dev/null || die 'sudo is required to install system packages'
-	# 下载/插件准备期间认证可能过期；每次特权步骤前在前台刷新，有效时无需再输入密码。
+	# 已获免密命令权限时直接复用；sudo-rs 的 -v 仍可能要求密码。
+	# 其余环境在前台刷新凭据，下载/插件准备期间过期时可再次认证。
 	say 'Checking sudo authorization for system package installation.'
+	if sudo -n true 2> /dev/null; then return 0; fi
 	sudo -v || die 'sudo authentication failed'
 }
 

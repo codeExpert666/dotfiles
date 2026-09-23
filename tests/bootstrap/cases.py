@@ -469,6 +469,14 @@ class Orchestration(unittest.TestCase):
         self.assertFalse((self.home / '.local/state/dotfiles-bootstrap/lock').exists())
         self.assertEqual(list(self.scratch.iterdir()), [])
 
+    def test_passwordless_sudo_commands_do_not_require_validate(self):
+        self.env.update(BOOTSTRAP_TEST_OLD='shfmt', BOOTSTRAP_TEST_SUDO_NOPASSWD='1')
+        self.invoke('--apply', '--profile', 'server')
+        events = self.events()
+        self.assertIn(['sudo', '-n', 'true'], events)
+        self.assertNotIn(['sudo', '-v'], events)
+        self.assertTrue(any(event[:2] == ['apt-get', 'install'] for event in events))
+
     def test_sudo_reauthentication_failure_keeps_completed_steps_and_retries(self):
         self.env.update(BOOTSTRAP_TEST_OLD='shfmt', BOOTSTRAP_TEST_SUDO_EXPIRE='nvim',
                         BOOTSTRAP_TEST_FAIL='sudo-renew')

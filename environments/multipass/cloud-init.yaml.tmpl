@@ -18,11 +18,5 @@ write_files:
   - path: /var/lib/dotfiles-multipass/instance.json
     owner: root:root
     content: __INSTANCE_JSON__
-  - path: /etc/sudoers.d/99-dotfiles-multipass
-    owner: root:root
-    content: |
-      Defaults:ubuntu !authenticate
 runcmd:
   - chmod 0600 /var/lib/dotfiles-multipass/instance.json
-  - chmod 0440 /etc/sudoers.d/99-dotfiles-multipass
-  - visudo -cf /etc/sudoers.d/99-dotfiles-multipass

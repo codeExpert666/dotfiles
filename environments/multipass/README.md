@@ -83,9 +83,8 @@ cloud-init。要转发本地端口，可运行 `ssh -L 8080:localhost:8080 ubunt
 
 状态目录默认 0700，记录默认 0600。日志与回执记录目标/实际提交、镜像哈希、
 Multipass 版本和阶段结果，不记录私钥或密码短语。首次系统更新只在创建阶段执行；
-cloud-init 要求重启时由宿主最多自动重启一次。Multipass 镜像的 `ubuntu` 用户虽然可
-免密执行命令，`sudo -v` 仍可能要求密码；user-data 为该用户增加 `!authenticate`
-sudo 默认项，使已有 bootstrap 的认证刷新也能在管理通道中运行。
+cloud-init 要求重启时由宿主最多自动重启一次。Multipass 镜像默认允许 `ubuntu`
+免密执行管理命令；bootstrap 先验证这一权限，需密码时才在前台刷新 sudo 凭据。
 `bootstrap` 以普通 `ubuntu` 用户运行，
 先预览再应用；成功后才将其登录 Shell 改为 Zsh。
 

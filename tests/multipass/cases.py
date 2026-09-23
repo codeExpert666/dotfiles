@@ -51,7 +51,7 @@ class Inputs(unittest.TestCase):
             self.assertIn("  - default", cloud)
             self.assertIn("package_reboot_if_required: false", cloud)
             self.assertIn("chmod 0600 /var/lib/dotfiles-multipass/instance.json", cloud)
-            self.assertIn("Defaults:ubuntu !authenticate", cloud)
+            self.assertNotIn("/etc/sudoers.d/", cloud)
             self.assertIn(data["uuid"], cloud)
             self.assertNotIn("comment with quotes", cloud)
             self.assertNotIn("PRIVATE", cloud)

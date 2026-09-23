@@ -105,7 +105,7 @@ elif name == 'sudo':
             sys.exit(49)
         (root / 'sudo-valid').touch()
     elif args[:1] == ['-n']:
-        if not (root / 'sudo-valid').exists():
+        if not (root / 'sudo-valid').exists() and os.environ.get('BOOTSTRAP_TEST_SUDO_NOPASSWD') != '1':
             print('sudo: a password is required', file=sys.stderr)
             sys.exit(1)
         os.execvp(args[1], args[1:])
