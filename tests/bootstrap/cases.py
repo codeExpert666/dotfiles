@@ -1549,6 +1549,16 @@ class Publication(unittest.TestCase):
         resources.extract(archive_path, destination, 'archive', '')
         self.assertEqual((destination / 'bundle/bin/alias').read_bytes(), b'ok')
 
+    def test_node_entry_prefers_top_level_npm_over_nested_package_file(self):
+        unpacked = self.root / 'node-layout'
+        top = unpacked / 'node-v24/bin/npm'
+        nested = unpacked / 'node-v24/lib/node_modules/npm/bin/npm'
+        nested.parent.mkdir(parents=True)
+        nested.write_text('nested npm command')
+        top.parent.mkdir(parents=True)
+        top.symlink_to('../lib/node_modules/npm/bin/npm')
+        self.assertEqual(resources.Resources.locate(unpacked, 'bin/npm'), top)
+
     def test_requirements_and_platform_manifests_agree(self):
         rows = [line.split('\t') for line in (REPO / 'scripts/bootstrap/requirements.tsv').read_text().splitlines()
                 if line and not line.startswith('#')]

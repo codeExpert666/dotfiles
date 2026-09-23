@@ -313,6 +313,11 @@ class Resources:
     def locate(root, suffix):
         matches = [path for path in root.rglob(PurePosixPath(suffix).name)
                    if path.as_posix().endswith('/' + suffix) and within(path, root)]
+        # 官方归档可能在顶层 bin/npm 之外同时包含 npm 自身的 lib/.../bin/npm。
+        # 安装入口位于最浅的匹配路径；同一深度仍有多个候选时拒绝猜测。
+        if matches:
+            depth = min(len(path.relative_to(root).parts) for path in matches)
+            matches = [path for path in matches if len(path.relative_to(root).parts) == depth]
         if len(matches) != 1 or not matches[0].exists():
             raise RuntimeError(f"expected exactly one payload path {suffix}, found {len(matches)}")
         return matches[0]
