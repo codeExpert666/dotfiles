@@ -246,6 +246,20 @@ class HostPolicy(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertTrue(any(part.endswith("cloud-init-output.log") for part in calls[1]))
 
+    def test_reboot_retransfers_ephemeral_guest_helper_before_identity_probe(self):
+        machine = runtime.Machine(Path(self.temp.name), "test", runtime.Runner())
+        calls = []
+        machine.m = lambda *argv, **_kwargs: calls.append(argv)
+        machine.cloud_wait = lambda: calls.append(("cloud_wait",))
+        machine.transfer_helper = lambda: calls.append(("transfer_helper",))
+        machine.verify_guest = lambda: (calls.append(("verify_guest",)) or
+                                        {"boot_id": "new-boot", "reboot_required": False})
+        with mock.patch.object(runtime, "save_json"):
+            machine.reboot_if_required({"boot_id": "old-boot", "reboot_required": True})
+        self.assertEqual(calls[:4], [("restart", "--timeout",
+                                      str(runtime.DEFAULTS["timeouts"]["reboot"]), "test"),
+                                     ("cloud_wait",), ("transfer_helper",), ("verify_guest",)])
+
     def test_instance_lock_rejects_concurrent_run(self):
         path = Path(self.temp.name) / "lock"
         with runtime.lock(path):

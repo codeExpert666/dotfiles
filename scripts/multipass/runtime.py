@@ -409,6 +409,8 @@ class Machine:
         while time.monotonic() < deadline:
             try:
                 self.cloud_wait()
+                # /tmp 中的助手可能在重启时被清除；验证新 boot ID 前重新传入。
+                self.transfer_helper()
                 after = self.verify_guest()
                 if after["boot_id"] != before:
                     if after["reboot_required"]:
