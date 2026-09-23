@@ -49,7 +49,13 @@ elif [[ $1 == interactive ]]; then
 		doctor_assert $? atuin-keys 'Atuin leaves Up and ? unchanged'
 	fi
 	if (($+commands[zoxide])); then
-		(($+functions[z] && $+functions[zi] && !$+functions[cd]))
+		# zoxide 0.9 用别名暴露 z/zi；0.10 改为同名函数。两种形式都需有实际目标。
+		((!$+functions[cd])) && {
+			(($+functions[z] && $+functions[zi])) || {
+				[[ ${aliases[z]-} == __zoxide_z && ${aliases[zi]-} == __zoxide_zi ]] &&
+					(($+functions[__zoxide_z] && $+functions[__zoxide_zi]))
+			}
+		}
 		doctor_assert $? zoxide 'z/zi exist and native cd is retained'
 	fi
 	if (($+commands[starship])); then
