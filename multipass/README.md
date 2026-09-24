@@ -69,6 +69,14 @@ bash scripts/multipass.sh provision --apply --name ubuntu-dev --ref '<新40位SH
 
 `check` 向 stdout 输出 JSON 状态；`--runtime` 还在客户机运行受控诊断。
 创建或重新配置的计划、进度和错误写入 stderr，阶段输出也写入宿主日志。
+`--apply` 的 `STAGE` 表示主阶段，缩进的 `STEP` 表示脚本正在执行的具体动作；
+`RUN`、`OK`、`SKIP`、`FAIL` 分别表示开始、完成、复用和失败。长时间等待时，
+`STEP WAIT` 每 30 秒报告已等待时间与命令上限；这是宿主可观察的等待时间，
+不代表 Multipass 或 cloud-init 内部操作的进度。首次启动检查包含 cloud-init 状态、
+客户机身份，以及必要时的重启和重连；失败会指出具体子步骤。
+预检发生在创建实例状态前，只在 stderr 显示；进入 `--apply` 后的阶段才写入回执与日志。
+bootstrap 的原有输出在 `CHILD BEGIN` / `CHILD END` 之间直接转发，
+它自己的详细日志仍保存在客户机 `~/.local/state/dotfiles-bootstrap/`。
 `ssh` 进入普通 SSH 会话；可用 `ssh -L 8080:localhost:8080 ubuntu-dev` 转发本地端口。
 实例停止、启动和删除使用原生 `multipass stop/start/delete <name>`。
 
@@ -122,10 +130,18 @@ bootstrap 由普通 `ubuntu` 用户运行；它先探测免密 sudo 命令权限
 
 ## 失败处理与恢复边界
 
-失败时先查看宿主实例状态目录的 `receipt.json` 中失败阶段和对应
-`logs/<阶段>.log`，排除原因后重跑相同命令。创建失败会保留实例，不自动删除；
+失败时先查看宿主实例状态目录的 `receipt.json`：`stages` 保存各阶段最近一次结果与
+`current_step`，`attempts` 保留每次执行的阶段结果和失败位置 `failed_at`，阶段日志位于
+`logs/<尝试 ID>/<阶段>.log`。旧版 `logs/<阶段>.log` 仍保留原位。
+排除原因后重跑相同命令。创建失败会保留实例，不自动删除；
 launch 超时后先核对实际实例和 cloud-init 状态。若实例已停止，先运行
 `multipass start <name>`，再检查或重试。
+
+launch 后客户机 SSH 若短暂出现 `No route to host`、连接被拒绝或网络不可达，
+脚本最多等待 120 秒并重试 cloud-init 状态命令；cloud-init 自身失败不会按连接故障重试。
+若 `cloud-init/restart` 超时，表示 cloud-init 状态检查已经通过，但 Multipass 的重启命令
+未在上限内返回；应先查看实例状态和对应日志，再决定如何恢复。脚本不会自动重启
+Multipass daemon、停止其他实例或删除虚拟机。
 
 在修改 SSH、更新客户机仓库前，入口检查客户机 bootstrap 锁；仓库操作和 bootstrap
 本身也会复查。客户机里仍运行的 bootstrap、PID 缺失或无法核实的遗留锁须先人工核实，

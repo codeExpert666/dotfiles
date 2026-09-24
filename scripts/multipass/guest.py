@@ -92,6 +92,7 @@ def repository(url, ref):
     if REPO.is_symlink():
         raise ValueError("dotfiles repository must not be a symlink")
     if not REPO.exists():
+        print("    GUEST [repository/clone] Clone into a temporary directory", file=sys.stderr, flush=True)
         staging = Path(tempfile.mkdtemp(prefix=".dotfiles-fetch-", dir=HOME))
         try:
             checkout = staging / "repo"
@@ -108,10 +109,12 @@ def repository(url, ref):
                     raise ValueError(f"required repository entry missing: {relative}")
             if REPO.exists() or REPO.is_symlink():
                 raise ValueError("dotfiles target appeared while cloning")
+            print("    GUEST [repository/publish] Publish the verified checkout", file=sys.stderr, flush=True)
             checkout.rename(REPO)
         finally:
             shutil.rmtree(staging)
     else:
+        print("    GUEST [repository/reuse] Verify origin and clean working tree", file=sys.stderr, flush=True)
         ensure_owned_directory(REPO)
         if not (REPO / ".git").is_dir():
             raise ValueError("existing dotfiles path is not a normal Git checkout")
@@ -122,11 +125,14 @@ def repository(url, ref):
         if dirty:
             raise ValueError(f"dotfiles checkout contains user changes:\n{dirty}")
         if git("rev-parse", "HEAD", capture=True) != ref:
+            print("    GUEST [repository/fetch] Fetch the requested commit", file=sys.stderr, flush=True)
             git("fetch", "origin")
             kind = git("cat-file", "-t", ref, capture=True)
             if kind != "commit":
                 raise ValueError("requested commit is unavailable from origin")
             git("checkout", "--detach", ref)
+    print("    GUEST [repository/verify] Verify the pinned commit and required scripts",
+          file=sys.stderr, flush=True)
     actual = verify_checkout(ref)
     print(json.dumps({"current_ref": actual, "workspace": str(WORKSPACE)}))
 
@@ -142,11 +148,17 @@ def packages_ready():
     if os.geteuid() != 0:
         raise ValueError("package readiness probe requires root")
     deadline = time.monotonic() + 600
+    last_report = 0
     locks = ["/var/lib/dpkg/lock", "/var/lib/dpkg/lock-frontend", "/var/lib/apt/lists/lock"]
     while shutil.which("fuser") and time.monotonic() < deadline:
         held = subprocess.run(["fuser", *locks], capture_output=True).returncode == 0
         if not held:
             break
+        now = time.monotonic()
+        if not last_report or now - last_report >= 30:
+            print("    GUEST [packages/locks] apt/dpkg lock is held; waiting for package manager",
+                  file=sys.stderr, flush=True)
+            last_report = now
         time.sleep(5)
     else:
         if shutil.which("fuser"):

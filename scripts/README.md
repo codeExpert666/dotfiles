@@ -71,7 +71,8 @@ bootstrap/deploy 将 HOME 的逻辑表示传给子入口，物理目标另行计
 三个当前机器入口的 `--help` 写入 stdout，报告、错误和提示写入 stderr，例如可用
 `bash scripts/doctor.sh --verbose 2>doctor.log` 保存完整诊断。HUP/INT/TERM 分别使用
 退出码 `129`/`130`/`143`。multipass 的帮助写入 stdout；`create`/`provision` 的
-计划、进度和错误写入 stderr 及宿主日志，`check` 向 stdout 输出 JSON，`ssh` 进入
+预检、计划、`STAGE` / `STEP` 进度和错误写入 stderr，`--apply` 的阶段输出也进入宿主日志。
+`check` 向 stdout 输出 JSON，`ssh` 进入
 交互会话。其余退出状态在各入口下说明。
 
 ## deploy 部署配置

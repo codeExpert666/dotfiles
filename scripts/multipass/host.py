@@ -1,5 +1,6 @@
 """Read-only host probes and narrowly scoped Multipass installation."""
 
+from contextlib import nullcontext
 import hashlib
 from decimal import Decimal
 import json
@@ -45,12 +46,14 @@ def json_command(run, argv, timeout=15):
 
 
 class Host:
-    def __init__(self, run, releases, cache_dir):
+    def __init__(self, run, releases, cache_dir, progress=None, notice=None):
         self.run = run
         self.releases = releases
         self.cache_dir = cache_dir
         self.cli = None
         self.source = None
+        self.progress = progress or (lambda *_args, **_kwargs: nullcontext())
+        self.notice = notice or (lambda _message: None)
 
     def probe(self):
         on_path = shutil.which("multipass")
@@ -84,56 +87,70 @@ class Host:
 
     def ensure(self, observed):
         if observed and observed["qualified"]:
-            self.verify_service()
+            with self.progress("service", "Verify the existing Multipass daemon and driver"):
+                self.verify_service()
             return observed
         if observed:
-            if any(row.get("state") == "Running" for row in self.instances().values()):
-                raise ValueError("stop existing running Multipass instances before upgrading")
-            brew = shutil.which("brew")
-            managed = False
-            if brew:
-                found = self.run([brew, "list", "--cask", "--versions", "multipass"],
-                                 timeout=30, check=False)
-                managed = found.returncode == 0 and bool(found.stdout.strip())
+            with self.progress("upgrade-safety", "Check running instances and installation source"):
+                if any(row.get("state") == "Running" for row in self.instances().values()):
+                    raise ValueError("stop existing running Multipass instances before upgrading")
+                brew = shutil.which("brew")
+                managed = False
+                if brew:
+                    found = self.run([brew, "list", "--cask", "--versions", "multipass"],
+                                     timeout=30, check=False)
+                    managed = found.returncode == 0 and bool(found.stdout.strip())
             if managed:
-                self.run([brew, "upgrade", "--cask", "multipass"], timeout=1800, stream=True)
+                with self.progress("upgrade", "Upgrade Multipass through Homebrew", timeout=1800):
+                    self.run([brew, "upgrade", "--cask", "multipass"], timeout=1800, stream=True)
                 self.source = "homebrew-cask"
             elif observed["source"] == "official-pkg":
                 self.install_pkg()
             else:
-                raise ValueError("old Multipass installation source is unknown; inspect it manually")
+                with self.progress("source", "Identify the existing Multipass installation source"):
+                    raise ValueError("old Multipass installation source is unknown; inspect it manually")
         else:
-            receipt = self.run(["pkgutil", "--pkgs"], check=False)
-            if "com.canonical.multipass" in receipt.stdout:
-                raise ValueError("Multipass pkg receipts exist but its CLI is missing; repair PATH or installation")
+            with self.progress("receipts", "Check for an existing Multipass package receipt"):
+                receipt = self.run(["pkgutil", "--pkgs"], check=False)
+                if "com.canonical.multipass" in receipt.stdout:
+                    raise ValueError("Multipass pkg receipts exist but its CLI is missing; repair PATH or installation")
             self.install_pkg()
         self.cli = None
-        return self.wait_service()
+        with self.progress("daemon", "Wait for Multipass daemon and qemu driver", timeout=120):
+            return self.wait_service()
 
     def install_pkg(self):
-        spec = self.releases["macos_pkg"]
-        if version_tuple(spec["version"]) < version_tuple(self.releases["minimum"]):
-            raise ValueError("declared installer is below the minimum Multipass version")
-        if self.cache_dir.is_symlink():
-            raise ValueError(f"installer cache directory is a symlink: {self.cache_dir}")
-        self.cache_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        pkg = self.cache_dir / f"multipass-{spec['version']}.pkg"
-        if pkg.is_symlink():
-            raise ValueError(f"installer cache path is a symlink: {pkg}")
-        if not pkg.exists() or self.sha256(pkg) != spec["sha256"]:
+        with self.progress("package", "Validate the official installer and cache"):
+            spec = self.releases["macos_pkg"]
+            if version_tuple(spec["version"]) < version_tuple(self.releases["minimum"]):
+                raise ValueError("declared installer is below the minimum Multipass version")
+            if self.cache_dir.is_symlink():
+                raise ValueError(f"installer cache directory is a symlink: {self.cache_dir}")
+            self.cache_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            pkg = self.cache_dir / f"multipass-{spec['version']}.pkg"
+            if pkg.is_symlink():
+                raise ValueError(f"installer cache path is a symlink: {pkg}")
+            cached = pkg.exists() and self.sha256(pkg) == spec["sha256"]
+        if not cached:
             temporary = self.cache_dir / f".{pkg.name}.{os.getpid()}"
             try:
-                self.run(["curl", "--fail", "--location", "--silent", "--show-error",
-                          "--max-time", "600", "--output", str(temporary), spec["url"]],
-                         timeout=610, stream=True)
-                if self.sha256(temporary) != spec["sha256"]:
-                    raise ValueError("downloaded Multipass pkg SHA256 mismatch")
-                os.replace(temporary, pkg)
+                with self.progress("download", "Download the pinned Multipass package", timeout=610):
+                    self.run(["curl", "--fail", "--location", "--silent", "--show-error",
+                              "--max-time", "600", "--output", str(temporary), spec["url"]],
+                             timeout=610, stream=True)
+                with self.progress("checksum", "Verify package SHA256 and publish the cache"):
+                    if self.sha256(temporary) != spec["sha256"]:
+                        raise ValueError("downloaded Multipass pkg SHA256 mismatch")
+                    os.replace(temporary, pkg)
             finally:
                 temporary.unlink(missing_ok=True)
-        self.run(["sudo", "-v"], timeout=120)
-        self.run(["sudo", "installer", "-pkg", str(pkg), "-target", "/"],
-                 timeout=1800, stream=True)
+        else:
+            self.notice("  STEP SKIP [host/download] Reuse verified Multipass package cache")
+        with self.progress("sudo", "Authorize the official package installer", timeout=120):
+            self.run(["sudo", "-v"], timeout=120)
+        with self.progress("installer", "Install the official Multipass package", timeout=1800):
+            self.run(["sudo", "installer", "-pkg", str(pkg), "-target", "/"],
+                     timeout=1800, stream=True)
         self.source = "official-pkg"
 
     @staticmethod
@@ -147,6 +164,7 @@ class Host:
     def wait_service(self):
         deadline = time.monotonic() + 120
         last = None
+        next_report = time.monotonic() + 30
         while time.monotonic() < deadline:
             try:
                 latest = self.probe()
@@ -156,6 +174,9 @@ class Host:
                 return latest
             except CommandFailure as exc:
                 last = exc
+                if time.monotonic() >= next_report:
+                    self.notice("  STEP WAIT [host/daemon] Multipass daemon is still unavailable")
+                    next_report = time.monotonic() + 30
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break

@@ -36,6 +36,21 @@ SIZE = re.compile(r"^([1-9][0-9]*)([GM])$")
 KEY = re.compile(r"^(ssh-ed25519|ssh-rsa|ecdsa-sha2-[\w-]+) ([A-Za-z0-9+/]+={0,2})(?: .*)?$")
 STAGES = ("host", "launch", "cloud-init", "guest", "ssh", "repository", "bootstrap-preview",
           "bootstrap", "finalize", "verified")
+STAGE_DESCRIPTIONS = {
+    "host": "Prepare and verify host Multipass",
+    "launch": "Create and start the Ubuntu instance",
+    "cloud-init": "Verify first boot and complete any required reboot",
+    "guest": "Verify guest identity and package readiness",
+    "ssh": "Publish and verify ordinary SSH access",
+    "repository": "Prepare the pinned guest repository",
+    "bootstrap-preview": "Preview the guest server bootstrap",
+    "bootstrap": "Apply the guest server bootstrap",
+    "finalize": "Apply guest account settings",
+    "verified": "Verify the configured development machine",
+}
+PROGRESS_INTERVAL = 30
+CONNECT_RETRY_SECONDS = 120
+CONNECT_RETRY_INTERVAL = 5
 SERVER_MODULES = ("environment", "deployment", "dependencies", "zsh", "git", "lazygit",
                   "nvim", "starship", "atuin", "shuck", "vim", "state")
 
@@ -44,51 +59,74 @@ class Runner:
     def __init__(self):
         self.log = None
         self.active = None
-        self.last_command = None
-        self.last_code = None
+        self.on_wait = None
 
-    def __call__(self, argv, *, timeout=15, check=True, stream=False):
+    def __call__(self, argv, *, timeout=15, check=True, stream=False, heartbeat=None,
+                 on_wait=None, show_output=True):
         argv = [str(part) for part in argv]
-        self.last_command = argv[:3]
-        self.last_code = None
-        if stream:
+        if heartbeat is None and timeout >= 60:
+            heartbeat = PROGRESS_INTERVAL
+        on_wait = on_wait or self.on_wait
+        if stream or heartbeat:
             process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                        text=True, bufsize=1, start_new_session=True)
             self.active = process
-            output = deque(maxlen=200)
+            output = deque(maxlen=200) if stream else []
+            last_output = [time.monotonic()]
+            forwarding_errors = []
 
             def forward():
-                with (open(self.log, "a") if self.log else open(os.devnull, "w")) as log:
-                    for line in process.stdout:
-                        output.append(line)
-                        log.write(line)
-                        log.flush()
-                        print(line, end="", file=sys.stderr, flush=True)
+                try:
+                    with process.stdout, (open(self.log, "a") if self.log else open(os.devnull, "w")) as log:
+                        for line in process.stdout:
+                            output.append(line)
+                            log.write(line)
+                            log.flush()
+                            last_output[0] = time.monotonic()
+                            if stream and show_output:
+                                print(line, end="", file=sys.stderr, flush=True)
+                except Exception as exc:
+                    forwarding_errors.append(exc)
 
             worker = threading.Thread(target=forward, daemon=True)
             worker.start()
+            started = time.monotonic()
             try:
-                code = process.wait(timeout=timeout)
+                while True:
+                    remaining = timeout - (time.monotonic() - started)
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(argv, timeout)
+                    try:
+                        code = process.wait(timeout=min(remaining, heartbeat or remaining))
+                        break
+                    except subprocess.TimeoutExpired:
+                        if heartbeat and on_wait and (not stream or not show_output or
+                                                      time.monotonic() - last_output[0] >= heartbeat):
+                            on_wait(time.monotonic() - started, timeout)
             except subprocess.TimeoutExpired:
                 self.stop()
                 worker.join(timeout=5)
-                self.last_code = 124
                 raise CommandFailure(argv, 124, "command timed out")
+            except BaseException:
+                self.stop()
+                worker.join(timeout=5)
+                raise
             finally:
                 self.active = None
             worker.join(timeout=5)
+            if worker.is_alive() or forwarding_errors:
+                raise Failure(f"command output could not be saved to {self.log}: "
+                              f"{forwarding_errors[0] if forwarding_errors else 'forwarder did not finish'}")
             result = subprocess.CompletedProcess(argv, code, "".join(output), "")
         else:
             try:
                 result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
             except subprocess.TimeoutExpired:
-                self.last_code = 124
                 raise CommandFailure(argv, 124, "command timed out")
             if self.log:
                 with open(self.log, "a") as log:
                     log.write(result.stdout)
                     log.write(result.stderr)
-        self.last_code = result.returncode
         if check and result.returncode:
             raise CommandFailure(argv, result.returncode, result.stdout + result.stderr)
         return result
@@ -312,6 +350,17 @@ def parse_json_output(output, label):
     raise Failure(f"{label} did not return a complete JSON object: {output[-500:]}")
 
 
+def transient_guest_connection(exc):
+    if not isinstance(exc, CommandFailure) or exc.returncode != 2:
+        return False
+    output = exc.output.lower()
+    if "ssh connection failed" not in output and "failed to connect:" not in output:
+        return False
+    return any(reason in output for reason in ("no route to host", "connection refused",
+                                               "network is unreachable")) or \
+        "timed out" in output
+
+
 @contextmanager
 def lock(path):
     try:
@@ -328,6 +377,21 @@ def lock(path):
         path.rmdir()
 
 
+@contextmanager
+def preflight_progress(kind, label, description):
+    indent = "  " if kind == "STEP" else ""
+    print(f"{indent}{kind} RUN  [{label}] {description}", file=sys.stderr, flush=True)
+    try:
+        yield
+    except Exception as exc:
+        if not hasattr(exc, "progress_path"):
+            exc.progress_path = label
+        print(f"{indent}{kind} FAIL [{label}] {description}", file=sys.stderr, flush=True)
+        raise
+    else:
+        print(f"{indent}{kind} OK   [{label}] {description}", file=sys.stderr, flush=True)
+
+
 class Machine:
     def __init__(self, home, name, runner):
         self.home = home
@@ -338,8 +402,12 @@ class Machine:
         self.receipt_file = self.path / "receipt.json"
         self.declaration = load_json(self.declaration_file)
         self.receipt = load_json(self.receipt_file) or {"schema": 1, "stages": {}}
-        self.host = Host(runner, RELEASES, home / ".cache/dotfiles-multipass")
+        self.host = Host(runner, RELEASES, home / ".cache/dotfiles-multipass",
+                         progress=self.step, notice=self.emit)
         self.helper = None
+        self.attempt_row = None
+        self.current_stage = None
+        self.current_step = None
 
     def refuse_missing_guest(self, instances):
         recorded = (self.receipt.get("machine_id") or self.receipt.get("cloud_instance_id") or
@@ -352,39 +420,128 @@ class Machine:
                           "automatic same-name rebuilding is not supported")
 
     @contextmanager
-    def stage(self, label):
-        self.path.joinpath("logs").mkdir(mode=0o700, exist_ok=True)
-        self.runner.log = self.path / "logs" / f"{label}.log"
-        self.receipt["stages"][label] = {"started": time.time(), "status": "running",
-                                           "log": str(self.runner.log)}
+    def attempt(self, action):
+        row = {"id": f"{time.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:12]}",
+               "action": action, "started": time.time(), "status": "running", "stages": []}
+        self.receipt.setdefault("attempts", []).append(row)
+        self.attempt_row = row
         save_json(self.receipt_file, self.receipt)
-        print(f"RUN: {label}", file=sys.stderr)
         try:
             yield
         except Exception as exc:
-            row = self.receipt["stages"][label]
-            row.update(status="failed", ended=time.time(), error=str(exc),
-                       command=self.runner.last_command, exit_code=self.runner.last_code)
+            row.update(status="failed", ended=time.time(), error=str(exc))
+            if getattr(exc, "progress_path", None):
+                row["failed_at"] = exc.progress_path
             save_json(self.receipt_file, self.receipt)
             raise
         else:
-            self.receipt["stages"][label].update(status="ok", ended=time.time())
-            self.receipt["last_successful_stage"] = label
+            row.update(status="ok", ended=time.time())
             save_json(self.receipt_file, self.receipt)
-            print(f"READY: {label}", file=sys.stderr)
         finally:
+            self.attempt_row = None
+
+    def emit(self, line):
+        print(line, file=sys.stderr, flush=True)
+        if self.runner.log:
+            with open(self.runner.log, "a") as log:
+                log.write(line + "\n")
+
+    @contextmanager
+    def stage(self, label):
+        if self.attempt_row is None:
+            raise Failure("internal error: stage started outside an attempt")
+        logs = self.path / "logs"
+        safe_directory(logs, create=True)
+        log_dir = logs / self.attempt_row["id"]
+        safe_directory(log_dir, create=True)
+        self.runner.log = log_dir / f"{label}.log"
+        row = {"id": label, "started": time.time(), "status": "running",
+               "log": str(self.runner.log), "steps": []}
+        self.receipt["stages"][label] = row
+        self.attempt_row["stages"].append(row)
+        self.current_stage = label
+        previous_wait_callback = self.runner.on_wait
+        self.runner.on_wait = self.wait_update
+        started = time.monotonic()
+        self.emit(f"STAGE RUN  [{label}] {STAGE_DESCRIPTIONS[label]}; log={self.runner.log}")
+        save_json(self.receipt_file, self.receipt)
+        try:
+            yield
+        except Exception as exc:
+            if not hasattr(exc, "progress_path"):
+                exc.progress_path = label
+            command = exc.argv[:3] if isinstance(exc, CommandFailure) else None
+            exit_code = exc.returncode if isinstance(exc, CommandFailure) else None
+            row.update(status="failed", ended=time.time(), elapsed_seconds=round(time.monotonic() - started, 1),
+                       error=str(exc), command=command, exit_code=exit_code)
+            self.emit(f"STAGE FAIL [{label}] step={row.get('current_step', 'none')}; "
+                      f"elapsed={row['elapsed_seconds']}s; log={self.runner.log}")
+            save_json(self.receipt_file, self.receipt)
+            raise
+        else:
+            row.update(status="ok", ended=time.time(), elapsed_seconds=round(time.monotonic() - started, 1))
+            self.receipt["last_successful_stage"] = label
+            self.emit(f"STAGE OK   [{label}] {STAGE_DESCRIPTIONS[label]}; elapsed={row['elapsed_seconds']}s")
+            save_json(self.receipt_file, self.receipt)
+        finally:
+            self.current_stage = None
+            self.current_step = None
+            self.runner.on_wait = previous_wait_callback
             self.runner.log = None
 
-    def m(self, *args, timeout=15, stream=False, check=True):
-        return self.runner([self.host.cli, *args], timeout=timeout, stream=stream, check=check)
+    @contextmanager
+    def step(self, label, description, timeout=None):
+        stage = self.current_stage
+        name = f"{stage}/{label}" if stage else label
+        row = {"id": label, "description": description, "started": time.time(), "status": "running"}
+        if timeout is not None:
+            row["timeout_seconds"] = timeout
+        if stage:
+            self.receipt["stages"][stage]["steps"].append(row)
+            self.receipt["stages"][stage]["current_step"] = label
+            save_json(self.receipt_file, self.receipt)
+        self.current_step = label
+        started = time.monotonic()
+        self.emit(f"  STEP RUN  [{name}] {description}" +
+                  (f"; timeout={timeout}s" if timeout is not None else ""))
+        try:
+            yield
+        except Exception as exc:
+            if not hasattr(exc, "progress_path"):
+                exc.progress_path = name
+            command = exc.argv[:3] if isinstance(exc, CommandFailure) else None
+            exit_code = exc.returncode if isinstance(exc, CommandFailure) else None
+            row.update(status="failed", ended=time.time(), elapsed_seconds=round(time.monotonic() - started, 1),
+                       error=str(exc), command=command, exit_code=exit_code)
+            self.emit(f"  STEP FAIL [{name}] {description}; elapsed={row['elapsed_seconds']}s")
+            if stage:
+                save_json(self.receipt_file, self.receipt)
+            raise
+        else:
+            row.update(status="ok", ended=time.time(), elapsed_seconds=round(time.monotonic() - started, 1))
+            self.emit(f"  STEP OK   [{name}] {description}; elapsed={row['elapsed_seconds']}s")
+            if stage:
+                save_json(self.receipt_file, self.receipt)
+        finally:
+            self.current_step = None
 
-    def guest(self, action, *args, root=False, timeout=15, stream=False):
+    def wait_update(self, elapsed, timeout):
+        name = (f"{self.current_stage}/{self.current_step}" if self.current_step and self.current_stage
+                else self.current_stage or self.current_step or "command")
+        self.emit(f"  STEP WAIT [{name}] command still running; elapsed={int(elapsed)}s; timeout={timeout}s")
+
+    def m(self, *args, timeout=15, stream=False, check=True, heartbeat=None, show_output=True):
+        return self.runner([self.host.cli, *args], timeout=timeout, stream=stream, check=check,
+                           heartbeat=heartbeat, on_wait=self.wait_update, show_output=show_output)
+
+    def guest(self, action, *args, root=False, timeout=15, stream=False, heartbeat=None):
         if not self.helper:
             raise Failure("guest helper was not transferred")
         prefix = ["sudo", "-n"] if root else ["env", "-i", "HOME=/home/ubuntu",
                                              "USER=ubuntu", "LOGNAME=ubuntu", "PATH=/usr/local/bin:/usr/bin:/bin"]
         return self.m("exec", "--no-map-working-directory", self.name, "--", *prefix,
-                      "python3", self.helper, action, *args, timeout=timeout, stream=stream)
+                      "python3", self.helper, action, *args, timeout=timeout, stream=stream,
+                      heartbeat=heartbeat)
 
     def transfer_helper(self):
         self.helper = f"/tmp/dotfiles-multipass-{self.declaration['uuid']}.py"
@@ -395,6 +552,21 @@ class Machine:
             self.m("exec", "--no-map-working-directory", self.name, "--", "rm", "-f",
                    self.helper, check=False)
             self.helper = None
+
+    def cleanup_helper_on_exit(self):
+        if not self.helper:
+            return
+        primary_error = sys.exc_info()[0] is not None
+        label = self.current_stage or "guest-helper"
+        self.emit(f"CLEANUP RUN  [{label}] Remove temporary guest helper")
+        try:
+            self.cleanup_helper()
+        except Exception as exc:
+            self.emit(f"CLEANUP FAIL [{label}] {exc}")
+            if not primary_error:
+                raise
+        else:
+            self.emit(f"CLEANUP OK   [{label}] Temporary guest helper removed")
 
     def verify_guest(self):
         probe = json.loads(self.guest("probe", root=True).stdout)
@@ -425,15 +597,39 @@ class Machine:
         save_json(self.receipt_file, self.receipt)
         return probe
 
-    def cloud_wait(self):
-        try:
-            result = self.m("exec", "--no-map-working-directory", self.name, "--", "cloud-init",
-                            "status", "--wait", "--format", "json",
-                            timeout=DEFAULTS["timeouts"]["cloud_init"])
-        except CommandFailure:
-            self.m("exec", "--no-map-working-directory", self.name, "--", "sudo", "-n",
-                   "tail", "-n", "120", "/var/log/cloud-init-output.log", check=False)
-            raise
+    def cloud_wait(self, timeout=None):
+        timeout = timeout or DEFAULTS["timeouts"]["cloud_init"]
+        connect_deadline = time.monotonic() + min(CONNECT_RETRY_SECONDS, timeout)
+        retries = 0
+        while True:
+            try:
+                result = self.m("exec", "--no-map-working-directory", self.name, "--", "cloud-init",
+                                "status", "--wait", "--format", "json", timeout=timeout,
+                                heartbeat=PROGRESS_INTERVAL)
+                break
+            except CommandFailure as exc:
+                remaining = connect_deadline - time.monotonic()
+                if transient_guest_connection(exc):
+                    if remaining > 0:
+                        retries += 1
+                        self.emit(f"  STEP RETRY [{self.current_stage or 'cloud-init'}/"
+                                  f"{self.current_step or 'status'}] guest connection unavailable "
+                                  f"({exc.output.strip()[-160:]}); attempt={retries}; "
+                                  f"retrying in {min(CONNECT_RETRY_INTERVAL, remaining):.0f}s")
+                        time.sleep(min(CONNECT_RETRY_INTERVAL, remaining))
+                        continue
+                    self.emit(f"  STEP WAIT [{self.current_stage or 'cloud-init'}/"
+                              f"{self.current_step or 'status'}] guest connection did not recover "
+                              f"within {min(CONNECT_RETRY_SECONDS, timeout)}s")
+                else:
+                    self.emit(f"  STEP DIAG [{self.current_stage or 'cloud-init'}/"
+                              f"{self.current_step or 'status'}] collect guest cloud-init output if reachable")
+                    try:
+                        self.m("exec", "--no-map-working-directory", self.name, "--", "sudo", "-n",
+                               "tail", "-n", "120", "/var/log/cloud-init-output.log", check=False)
+                    except (CommandFailure, OSError):
+                        pass  # Preserve the original cloud-init failure when diagnostics are unavailable.
+                raise
         status = parse_json_output(result.stdout, "cloud-init status")
         extended = status.get("extended_status", status.get("status"))
         if extended != "done" or status.get("errors"):
@@ -441,91 +637,164 @@ class Machine:
         self.receipt["cloud_init"] = status
         save_json(self.receipt_file, self.receipt)
 
+    def management_snapshot(self):
+        name = f"{self.current_stage or 'cloud-init'}/{self.current_step or 'restart'}"
+        self.emit(f"  STEP DIAG [{name}] collect read-only Multipass state; each query has a 15s limit")
+        for command in ("list", "info"):
+            argv = (command, "--format", "json") if command == "list" else \
+                (command, self.name, "--format", "json")
+            try:
+                result = self.m(*argv, timeout=15, check=False)
+            except (Failure, OSError, ValueError) as exc:
+                self.emit(f"  STEP DIAG [{name}] multipass {command} unavailable: {exc}")
+                continue
+            if result.returncode:
+                self.emit(f"  STEP DIAG [{name}] multipass {command} exit {result.returncode}; see stage log")
+                continue
+            try:
+                data = parse_json_output(result.stdout, f"multipass {command}")
+                entry = (next((item for item in data.get("list", []) if item.get("name") == self.name), None)
+                         if command == "list" else data.get("info", {}).get(self.name))
+                if isinstance(entry, list):
+                    entry = entry[0] if len(entry) == 1 else None
+                if isinstance(entry, dict):
+                    self.emit(f"  STEP DIAG [{name}] multipass {command}: "
+                              f"state={entry.get('state', 'unknown')}, ipv4={entry.get('ipv4', [])}")
+                else:
+                    self.emit(f"  STEP DIAG [{name}] multipass {command}: instance absent; see stage log")
+            except Exception:
+                self.emit(f"  STEP DIAG [{name}] multipass {command} output saved in stage log")
+
     def reboot_if_required(self, probe):
         if not probe["reboot_required"]:
+            self.emit(f"  STEP SKIP [{self.current_stage or 'cloud-init'}/restart] "
+                      "guest does not require a reboot")
             return probe
         before = probe["boot_id"]
         self.receipt["reboot_from"] = before
         save_json(self.receipt_file, self.receipt)
-        self.m("restart", "--timeout", str(DEFAULTS["timeouts"]["reboot"]), self.name,
-               timeout=DEFAULTS["timeouts"]["reboot"] + 30, stream=True)
-        deadline = time.monotonic() + DEFAULTS["timeouts"]["reboot"]
-        while time.monotonic() < deadline:
+        limit = DEFAULTS["timeouts"]["reboot"]
+        with self.step("restart", "Wait for Multipass restart to return", timeout=limit + 30):
             try:
-                self.cloud_wait()
-                # /tmp 中的助手可能在重启时被清除；验证新 boot ID 前重新传入。
-                self.transfer_helper()
-                after = self.verify_guest()
-                if after["boot_id"] != before:
-                    if after["reboot_required"]:
-                        raise Failure("guest still requires reboot after one automatic restart")
-                    return after
-            except (CommandFailure, subprocess.SubprocessError):
-                time.sleep(5)
-        raise Failure("guest boot ID did not change or management channel did not recover")
+                self.m("restart", "--timeout", str(limit), self.name, timeout=limit + 30,
+                       stream=True, heartbeat=PROGRESS_INTERVAL, show_output=False)
+            except CommandFailure:
+                self.management_snapshot()
+                raise
+        with self.step("reconnect", "Verify guest boot ID and management connection", timeout=limit):
+            deadline = time.monotonic() + limit
+            last_report = time.monotonic()
+            while time.monotonic() < deadline:
+                try:
+                    remaining = max(1, int(deadline - time.monotonic()))
+                    self.cloud_wait(timeout=remaining)
+                    # /tmp 中的助手可能在重启时被清除；验证新 boot ID 前重新传入。
+                    self.transfer_helper()
+                    after = self.verify_guest()
+                    if after["boot_id"] != before:
+                        if after["reboot_required"]:
+                            raise Failure("guest still requires reboot after one automatic restart")
+                        return after
+                except CommandFailure as exc:
+                    if not transient_guest_connection(exc):
+                        raise
+                now = time.monotonic()
+                if now - last_report >= PROGRESS_INTERVAL:
+                    self.wait_update(limit - (deadline - now), limit)
+                    last_report = now
+                time.sleep(min(CONNECT_RETRY_INTERVAL, max(0, deadline - now)))
+            raise Failure("guest boot ID did not change or management channel did not recover")
 
     def ssh_config(self, host_info):
         declaration = self.declaration
         setting = SSHConfig(self.home, self.name, declaration["uuid"],
                             Path(declaration["ssh_public_key"]), HERE / "ssh_proxy.py",
                             self.host.cli)
-        host_key_output = self.m("exec", "--no-map-working-directory", self.name, "--", "cat",
-                                 "/etc/ssh/ssh_host_ed25519_key.pub").stdout.strip()
-        if not KEY.fullmatch(host_key_output):
-            raise Failure("guest Ed25519 host public key is invalid")
-        host_key = " ".join(host_key_output.split()[:2])
-        previous = self.receipt.get("ssh_files", {})
-        hashes = setting.publish(host_key, previous)
-        self.receipt["ssh_files"] = hashes
-        self.receipt["host_key_sha256"] = hashlib.sha256(host_key.encode()).hexdigest()
-        fingerprint = self.runner(["ssh-keygen", "-lf", str(setting.known), "-E", "sha256"]).stdout
-        self.receipt["host_key_fingerprint"] = next(
-            (part for part in fingerprint.split() if part.startswith("SHA256:")), None)
-        save_json(self.receipt_file, self.receipt)
-        result = self.runner(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", self.name,
-                              "sh", "-c", "'test \"$(id -un)\" = ubuntu && test \"$HOME\" = /home/ubuntu'"],
-                             timeout=45)
-        if result.returncode:
-            raise Failure("ordinary SSH did not authenticate as ubuntu")
+        with self.step("host-key", "Read and validate the guest SSH host key"):
+            host_key_output = self.m("exec", "--no-map-working-directory", self.name, "--", "cat",
+                                     "/etc/ssh/ssh_host_ed25519_key.pub").stdout.strip()
+            if not KEY.fullmatch(host_key_output):
+                raise Failure("guest Ed25519 host public key is invalid")
+            host_key = " ".join(host_key_output.split()[:2])
+        with self.step("publish", "Publish managed SSH config and pinned host key"):
+            previous = self.receipt.get("ssh_files", {})
+            hashes = setting.publish(host_key, previous)
+            self.receipt["ssh_files"] = hashes
+            self.receipt["host_key_sha256"] = hashlib.sha256(host_key.encode()).hexdigest()
+            fingerprint = self.runner(["ssh-keygen", "-lf", str(setting.known), "-E", "sha256"]).stdout
+            self.receipt["host_key_fingerprint"] = next(
+                (part for part in fingerprint.split() if part.startswith("SHA256:")), None)
+            save_json(self.receipt_file, self.receipt)
+        with self.step("login", "Test ordinary SSH login as ubuntu", timeout=45):
+            result = self.runner(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", self.name,
+                                  "sh", "-c", "'test \"$(id -un)\" = ubuntu && test \"$HOME\" = /home/ubuntu'"],
+                                 timeout=45)
+            if result.returncode:
+                raise Failure("ordinary SSH did not authenticate as ubuntu")
         self.receipt["image_hash"] = host_info.get("image_hash")
         save_json(self.receipt_file, self.receipt)
 
     def provision(self, ref, git_identity):
-        self.transfer_helper()
         try:
             with self.stage("guest"):
-                probe = self.verify_guest()
-                self.guest("bootstrap-idle")
-                self.guest("packages-ready", root=True, timeout=630)
+                with self.step("helper", "Transfer the temporary guest helper", timeout=120):
+                    self.transfer_helper()
+                with self.step("identity", "Verify guest marker, OS and VM resources"):
+                    self.verify_guest()
+                with self.step("bootstrap-lock", "Check that guest bootstrap is idle"):
+                    self.guest("bootstrap-idle")
+                with self.step("packages", "Wait for apt/dpkg locks and audit packages", timeout=630):
+                    self.guest("packages-ready", root=True, timeout=630, stream=True,
+                               heartbeat=PROGRESS_INTERVAL)
             with self.stage("ssh"):
                 with lock(self.base / "ssh.lock"):
-                    info = self.host.info(self.name)
+                    with self.step("info", "Read current Multipass instance address and image"):
+                        info = self.host.info(self.name)
                     self.ssh_config(info)
             with self.stage("repository"):
-                self.guest("repository", self.declaration["repo_url"], ref,
-                           timeout=1200, stream=True)
-                self.receipt["current_ref"] = ref
-                save_json(self.receipt_file, self.receipt)
+                with self.step("checkout", "Clone or verify the requested Git commit", timeout=1200):
+                    self.guest("repository", self.declaration["repo_url"], ref,
+                               timeout=1200, stream=True, heartbeat=PROGRESS_INTERVAL)
+                    self.receipt["current_ref"] = ref
+                    save_json(self.receipt_file, self.receipt)
             with self.stage("bootstrap-preview"):
-                self.guest("bootstrap", "preview", timeout=1200, stream=True)
+                with self.step("child", "Run guest bootstrap --dry-run --profile server", timeout=1200):
+                    self.emit("    CHILD BEGIN [bootstrap-preview] Guest bootstrap output follows unchanged")
+                    try:
+                        self.guest("bootstrap", "preview", timeout=1200, stream=True,
+                                   heartbeat=PROGRESS_INTERVAL)
+                    finally:
+                        self.emit("    CHILD END   [bootstrap-preview] See guest bootstrap log for details")
             with self.stage("bootstrap"):
-                self.guest("bootstrap", "apply", timeout=DEFAULTS["timeouts"]["bootstrap"],
-                           stream=True)
+                limit = DEFAULTS["timeouts"]["bootstrap"]
+                with self.step("child", "Run guest bootstrap --apply --profile server", timeout=limit):
+                    self.emit("    CHILD BEGIN [bootstrap] Guest bootstrap output follows unchanged")
+                    try:
+                        self.guest("bootstrap", "apply", timeout=limit, stream=True,
+                                   heartbeat=PROGRESS_INTERVAL)
+                    finally:
+                        self.emit("    CHILD END   [bootstrap] See guest bootstrap log for details")
             with self.stage("finalize"):
-                self.guest("finalize", git_identity.get("name", ""), git_identity.get("email", ""),
-                           root=True, timeout=120)
+                with self.step("account", "Set guest login shell and optional Git identity", timeout=120):
+                    self.guest("finalize", git_identity.get("name", ""), git_identity.get("email", ""),
+                               root=True, timeout=120)
             with self.stage("verified"):
-                final = self.verify_guest()
-                if not final["ubuntu_shell"].endswith("/zsh"):
-                    raise Failure("ubuntu login shell was not changed to Zsh")
+                with self.step("identity", "Recheck guest identity and Zsh login shell"):
+                    final = self.verify_guest()
+                    if not final["ubuntu_shell"].endswith("/zsh"):
+                        raise Failure("ubuntu login shell was not changed to Zsh")
+                with self.step("versions", "Collect installed tool and doctor results", timeout=180):
+                    self.receipt["development"] = parse_json_output(
+                        self.guest("versions", timeout=180, heartbeat=PROGRESS_INTERVAL).stdout,
+                        "guest tool versions")
                 self.receipt["last_successful_ref"] = ref
                 self.receipt["git_identity_configured"] = bool(git_identity)
                 self.receipt["guest"] = final
-                self.receipt["development"] = parse_json_output(
-                    self.guest("versions", timeout=180).stdout, "guest tool versions")
                 save_json(self.receipt_file, self.receipt)
+                with self.step("helper-cleanup", "Remove the temporary guest helper"):
+                    self.cleanup_helper()
         finally:
-            self.cleanup_helper()
+            self.cleanup_helper_on_exit()
 
 
 def render_cloud(declaration, canonical):
@@ -564,49 +833,60 @@ def declaration_from(args, config, saved, canonical, fingerprint):
 
 
 def create_or_provision(args, config, home, runner):
-    host_preflight()
-    name = value(args, config, "name", DEFAULTS["name"])
-    validate_name(name)
-    machine = Machine(home, name, runner)
-    saved = machine.declaration
-    creation_record = getattr(args, "creation_record", None)
-    if creation_record is not None:
-        if machine.path.exists() or machine.path.is_symlink():
-            raise Failure("--creation-record requires a fresh instance name without saved state")
-        if not creation_record.is_absolute() or not creation_record.parent.is_dir() or \
-                creation_record.exists() or creation_record.is_symlink():
-            raise Failure("--creation-record must be a new absolute file in an existing directory", 2)
-    if args.action == "provision" and not saved:
-        raise Failure(f"no managed declaration for {name}")
-    key_path = value(args, config, "ssh_public_key", saved["ssh_public_key"] if saved else None)
-    canonical, fingerprint = public_key(Path(key_path) if key_path else None, runner)
-    requested = declaration_from(args, config, saved, canonical, fingerprint)
-    if args.action == "provision" and args.ref:
-        requested["target_ref"] = args.ref
-        validate_declaration(requested)
-    require_agent(canonical, runner)
-    setting = SSHConfig(home, name, requested["uuid"], Path(requested["ssh_public_key"]),
-                        HERE / "ssh_proxy.py", shutil.which("multipass") or "/usr/local/bin/multipass")
-    setting.preflight(machine.receipt.get("ssh_files"))
-    observed = machine.host.probe()
-    instances = machine.host.instances() if observed else {}
-    if name in instances and not saved:
-        raise Failure(f"same-name instance {name} is not managed by this entrypoint")
-    if name in instances and instances[name].get("state") != "Running":
-        raise Failure(f"instance {name} is {instances[name].get('state')}; use multipass start {name}")
-    if args.action == "provision" and name not in instances:
-        raise Failure(f"managed instance {name} is missing")
-    if args.action == "create":
-        machine.refuse_missing_guest(instances)
+    with preflight_progress("STAGE", "preflight", "Check host, SSH identity and saved instance state"):
+        with preflight_progress("STEP", "preflight/host", "Validate macOS host and instance name"):
+            host_preflight()
+            name = value(args, config, "name", DEFAULTS["name"])
+            validate_name(name)
+            machine = Machine(home, name, runner)
+            saved = machine.declaration
+            creation_record = getattr(args, "creation_record", None)
+            if creation_record is not None:
+                if machine.path.exists() or machine.path.is_symlink():
+                    raise Failure("--creation-record requires a fresh instance name without saved state")
+                if not creation_record.is_absolute() or not creation_record.parent.is_dir() or \
+                        creation_record.exists() or creation_record.is_symlink():
+                    raise Failure("--creation-record must be a new absolute file in an existing directory", 2)
+            if args.action == "provision" and not saved:
+                raise Failure(f"no managed declaration for {name}")
+        with preflight_progress("STEP", "preflight/key", "Validate public key, agent and requested VM"):
+            key_path = value(args, config, "ssh_public_key", saved["ssh_public_key"] if saved else None)
+            canonical, fingerprint = public_key(Path(key_path) if key_path else None, runner)
+            requested = declaration_from(args, config, saved, canonical, fingerprint)
+            if args.action == "provision" and args.ref:
+                requested["target_ref"] = args.ref
+                validate_declaration(requested)
+            require_agent(canonical, runner)
+        with preflight_progress("STEP", "preflight/instance", "Check SSH files and Multipass ownership"):
+            setting = SSHConfig(home, name, requested["uuid"], Path(requested["ssh_public_key"]),
+                                HERE / "ssh_proxy.py", shutil.which("multipass") or "/usr/local/bin/multipass")
+            setting.preflight(machine.receipt.get("ssh_files"))
+            observed = machine.host.probe()
+            instances = machine.host.instances() if observed else {}
+            if name in instances and not saved:
+                raise Failure(f"same-name instance {name} is not managed by this entrypoint")
+            if name in instances and instances[name].get("state") != "Running":
+                raise Failure(f"instance {name} is {instances[name].get('state')}; use multipass start {name}")
+            if args.action == "provision" and name not in instances:
+                raise Failure(f"managed instance {name} is missing")
+            if args.action == "create":
+                machine.refuse_missing_guest(instances)
+            if observed and observed["qualified"]:
+                machine.host.verify_service()
+        if args.apply:
+            with preflight_progress("STEP", "preflight/disk", "Check free space for the requested VM disk"):
+                free = shutil.disk_usage(home).free
+                minimum = int(SIZE.fullmatch(requested["disk"]).group(1)) * \
+                    (1024 ** 3 if requested["disk"].endswith("G") else 1024 ** 2)
+                if free < minimum + 5 * 1024 ** 3:
+                    raise Failure("host disk free space is below requested guest disk plus 5 GiB")
     if not observed:
         print("DEFER: Multipass installation, daemon, image and instance checks until --apply", file=sys.stderr)
+    elif not observed["qualified"]:
+        print(f"PLAN: upgrade Multipass {observed['client']} to at least {RELEASES['minimum']}",
+              file=sys.stderr)
     else:
-        if not observed["qualified"]:
-            print(f"PLAN: upgrade Multipass {observed['client']} to at least {RELEASES['minimum']}",
-                  file=sys.stderr)
-        else:
-            machine.host.verify_service()
-            print(f"REUSE: Multipass {observed['client']}", file=sys.stderr)
+        print(f"REUSE: Multipass {observed['client']}", file=sys.stderr)
     print(f"PLAN: {args.action} {name}, Ubuntu {requested['image']}, {requested['cpus']} CPU, "
           f"{requested['memory']} RAM, {requested['disk']} disk, ref {requested['target_ref']}",
           file=sys.stderr)
@@ -614,10 +894,6 @@ def create_or_provision(args, config, home, runner):
         print("Preview complete; no files or instances changed. DEFER: image availability and guest checks.",
               file=sys.stderr)
         return
-    free = shutil.disk_usage(home).free
-    minimum = int(SIZE.fullmatch(requested["disk"]).group(1)) * (1024 ** 3 if requested["disk"].endswith("G") else 1024 ** 2)
-    if free < minimum + 5 * 1024 ** 3:
-        raise Failure("host disk free space is below requested guest disk plus 5 GiB")
     safe_directory(machine.base, create=True)
     safe_directory(machine.base / "instances", create=True)
     if creation_record is not None:
@@ -638,42 +914,56 @@ def create_or_provision(args, config, home, runner):
         save_json(machine.receipt_file, machine.receipt)
         if creation_record is not None:
             record_creation(creation_record, requested)
-        with machine.stage("host"):
-            with lock(machine.base / "host-install.lock"):
-                observed = machine.host.ensure(observed)
-            machine.receipt["host"] = {"macos": platform.mac_ver()[0],
-                                       "multipass": observed, "source": machine.host.source,
-                                       "runtime_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
-            save_json(machine.receipt_file, machine.receipt)
-        existing = machine.host.instances()
-        if args.action == "create" and name not in existing:
-            machine.refuse_missing_guest(existing)
-            with machine.stage("launch"):
-                machine.host.image(requested["image"])
-                cloud = machine.path / "user-data.yaml"
-                atomic(cloud, render_cloud(requested, canonical).encode())
-                machine.receipt["instances_before_launch"] = sorted(existing)
+        with machine.attempt(args.action):
+            with machine.stage("host"):
+                with lock(machine.base / "host-install.lock"):
+                    observed = machine.host.ensure(observed)
+                with machine.step("instances", "Read current Multipass instances"):
+                    existing = machine.host.instances()
+                machine.receipt["host"] = {"macos": platform.mac_ver()[0],
+                                           "multipass": observed, "source": machine.host.source,
+                                           "runtime_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
                 save_json(machine.receipt_file, machine.receipt)
-                machine.m("launch", requested["image"], "--name", name,
-                          "--cpus", str(requested["cpus"]), "--memory", requested["memory"],
-                          "--disk", requested["disk"], "--cloud-init", str(cloud),
-                          "--timeout", str(DEFAULTS["timeouts"]["cloud_init"]),
-                          timeout=DEFAULTS["timeouts"]["cloud_init"] + 60, stream=True)
-        if args.action == "create" and machine.receipt["stages"].get("cloud-init", {}).get("status") != "ok":
-            with machine.stage("cloud-init"):
-                machine.cloud_wait()
-                machine.transfer_helper()
-                try:
-                    probe = machine.verify_guest()
-                    machine.reboot_if_required(probe)
-                finally:
-                    machine.cleanup_helper()
-        machine.transfer_helper()
-        try:
-            machine.verify_guest()
-        finally:
-            machine.cleanup_helper()
-        machine.provision(requested["target_ref"], config.get("git_identity", {}))
+            if args.action == "create":
+                if name not in existing:
+                    with machine.stage("launch"):
+                        with machine.step("image", f"Confirm Ubuntu {requested['image']} image availability"):
+                            machine.refuse_missing_guest(existing)
+                            machine.host.image(requested["image"])
+                        with machine.step("user-data", "Write cloud-init user-data for this instance"):
+                            cloud = machine.path / "user-data.yaml"
+                            atomic(cloud, render_cloud(requested, canonical).encode())
+                            machine.receipt["instances_before_launch"] = sorted(existing)
+                            save_json(machine.receipt_file, machine.receipt)
+                        limit = DEFAULTS["timeouts"]["cloud_init"] + 60
+                        with machine.step("create", "Wait for Multipass launch and first boot", timeout=limit):
+                            machine.m("launch", requested["image"], "--name", name,
+                                      "--cpus", str(requested["cpus"]), "--memory", requested["memory"],
+                                      "--disk", requested["disk"], "--cloud-init", str(cloud),
+                                      "--timeout", str(DEFAULTS["timeouts"]["cloud_init"]),
+                                      timeout=limit, stream=True, heartbeat=PROGRESS_INTERVAL,
+                                      show_output=False)
+                else:
+                    machine.emit(f"STAGE SKIP [launch] Reuse existing managed instance {name}")
+                if machine.receipt["stages"].get("cloud-init", {}).get("status") != "ok":
+                    with machine.stage("cloud-init"):
+                        with machine.step("status", "Wait for cloud-init to complete cleanly",
+                                          timeout=DEFAULTS["timeouts"]["cloud_init"]):
+                            machine.cloud_wait()
+                        with machine.step("helper", "Transfer the temporary guest helper", timeout=120):
+                            machine.transfer_helper()
+                        try:
+                            with machine.step("identity", "Verify guest marker, OS and VM resources"):
+                                probe = machine.verify_guest()
+                            machine.reboot_if_required(probe)
+                            with machine.step("helper-cleanup", "Remove the temporary guest helper"):
+                                machine.cleanup_helper()
+                        finally:
+                            machine.cleanup_helper_on_exit()
+                else:
+                    machine.emit("STAGE SKIP [cloud-init] First-boot checks already succeeded; "
+                                 "guest identity will be rechecked")
+            machine.provision(requested["target_ref"], config.get("git_identity", {}))
     print(f"READY: {name}; SSH alias: ssh {name}", file=sys.stderr)
 
 
@@ -757,12 +1047,17 @@ def main():
         ssh(args, config, home, runner)
 
 
+def failure_line(exc):
+    location = getattr(exc, "progress_path", None)
+    return f"FAIL [{location}]: {exc}" if location else f"FAIL: {exc}"
+
+
 if __name__ == "__main__":
     try:
         main()
     except Failure as exc:
-        print(f"FAIL: {exc}", file=sys.stderr)
+        print(failure_line(exc), file=sys.stderr)
         raise SystemExit(exc.code)
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
-        print(f"FAIL: {exc}", file=sys.stderr)
+        print(failure_line(exc), file=sys.stderr)
         raise SystemExit(1)

@@ -1,5 +1,7 @@
 """Offline behavior tests for the Multipass orchestrator and guest helper."""
 
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
+import io
 import json
 import os
 from pathlib import Path
@@ -246,6 +248,12 @@ class HostPolicy(unittest.TestCase):
 
     def test_pkg_hash_failure_stops_before_sudo(self):
         calls = []
+        steps = []
+
+        @contextmanager
+        def progress(label, _description, **_kwargs):
+            steps.append(label)
+            yield
 
         def run(argv, **_kwargs):
             calls.append(argv)
@@ -253,9 +261,10 @@ class HostPolicy(unittest.TestCase):
                 Path(argv[argv.index("--output") + 1]).write_bytes(b"corrupt pkg")
             return SimpleNamespace(stdout="", returncode=0)
 
-        machine = host.Host(run, runtime.RELEASES, Path(self.temp.name))
+        machine = host.Host(run, runtime.RELEASES, Path(self.temp.name), progress=progress)
         with self.assertRaisesRegex(ValueError, "SHA256 mismatch"):
             machine.install_pkg()
+        self.assertEqual(steps, ["package", "download", "checksum"])
         self.assertFalse(any(argv[0] in ("sudo", "installer") for argv in calls))
 
     def test_size_parser_and_proxy_address_change(self):
@@ -292,11 +301,73 @@ class HostPolicy(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertTrue(any(part.endswith("cloud-init-output.log") for part in calls[1]))
 
+    def test_cloud_init_retries_only_a_transient_guest_connection_failure(self):
+        machine = runtime.Machine(Path(self.temp.name), "test", runtime.Runner())
+        machine.path.mkdir(parents=True)
+        calls = []
+
+        def call(*argv, **_kwargs):
+            calls.append(argv)
+            if len(calls) == 1:
+                raise runtime.CommandFailure(["multipass", "exec"], 2,
+                                             "ssh connection failed: No route to host")
+            return SimpleNamespace(stdout=json.dumps({"status": "done", "extended_status": "done",
+                                                      "errors": []}))
+
+        machine.m = call
+        with mock.patch.object(runtime.time, "sleep") as sleep:
+            machine.cloud_wait()
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all("status" in argv for argv in calls))
+        sleep.assert_called_once()
+        self.assertEqual(machine.receipt["cloud_init"]["extended_status"], "done")
+
+    def test_cloud_init_connection_retry_has_a_deadline(self):
+        machine = runtime.Machine(Path(self.temp.name), "test", runtime.Runner())
+        clock = [0]
+        calls = []
+
+        def fail(*argv, **_kwargs):
+            calls.append(argv)
+            raise runtime.CommandFailure(["multipass", "exec"], 2,
+                                         "ssh connection failed: No route to host")
+
+        def advance(seconds):
+            clock[0] += seconds
+
+        machine.m = fail
+        with mock.patch.object(runtime, "CONNECT_RETRY_SECONDS", 11), \
+                mock.patch.object(runtime.time, "monotonic", side_effect=lambda: clock[0]), \
+                mock.patch.object(runtime.time, "sleep", side_effect=advance), \
+                self.assertRaises(runtime.CommandFailure):
+            machine.cloud_wait()
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(clock[0], 11)
+
+    def test_cloud_init_guest_error_text_is_not_a_transport_retry(self):
+        machine = runtime.Machine(Path(self.temp.name), "test", runtime.Runner())
+        calls = []
+
+        def call(*argv, **_kwargs):
+            calls.append(argv)
+            if "status" in argv:
+                raise runtime.CommandFailure(["multipass", "exec"], 2,
+                                             "cloud-init task failed: No route to host")
+            return SimpleNamespace(stdout="guest cloud-init output")
+
+        machine.m = call
+        with mock.patch.object(runtime.time, "sleep") as sleep, \
+                self.assertRaises(runtime.CommandFailure):
+            machine.cloud_wait()
+        sleep.assert_not_called()
+        self.assertEqual(len(calls), 2)
+        self.assertIn("tail", calls[1])
+
     def test_reboot_retransfers_ephemeral_guest_helper_before_identity_probe(self):
         machine = runtime.Machine(Path(self.temp.name), "test", runtime.Runner())
         calls = []
         machine.m = lambda *argv, **_kwargs: calls.append(argv)
-        machine.cloud_wait = lambda: calls.append(("cloud_wait",))
+        machine.cloud_wait = lambda **_kwargs: calls.append(("cloud_wait",))
         machine.transfer_helper = lambda: calls.append(("transfer_helper",))
         machine.verify_guest = lambda: (calls.append(("verify_guest",)) or
                                         {"boot_id": "new-boot", "reboot_required": False})
@@ -305,6 +376,56 @@ class HostPolicy(unittest.TestCase):
         self.assertEqual(calls[:4], [("restart", "--timeout",
                                       str(runtime.DEFAULTS["timeouts"]["reboot"]), "test"),
                                      ("cloud_wait",), ("transfer_helper",), ("verify_guest",)])
+
+    def test_restart_timeout_is_recorded_as_restart_step_after_cloud_init_done(self):
+        machine = runtime.Machine(Path(self.temp.name), "test", runtime.Runner())
+        machine.path.mkdir(parents=True)
+        machine.receipt["cloud_init"] = {"status": "done", "extended_status": "done", "errors": []}
+        machine.m = mock.Mock(side_effect=runtime.CommandFailure(["multipass", "restart"], 124,
+                                                         "command timed out"))
+        with self.assertRaises(runtime.CommandFailure) as failure:
+            with machine.attempt("create"):
+                with machine.stage("cloud-init"):
+                    machine.reboot_if_required({"boot_id": "first", "reboot_required": True})
+        self.assertEqual(failure.exception.progress_path, "cloud-init/restart")
+        self.assertIn("FAIL [cloud-init/restart]", runtime.failure_line(failure.exception))
+        receipt = json.loads(machine.receipt_file.read_text())
+        self.assertEqual(receipt["cloud_init"]["status"], "done")
+        self.assertEqual(receipt["stages"]["cloud-init"]["current_step"], "restart")
+        self.assertEqual(receipt["stages"]["cloud-init"]["steps"][0]["status"], "failed")
+        self.assertEqual(receipt["attempts"][-1]["status"], "failed")
+        self.assertEqual(receipt["attempts"][-1]["failed_at"], "cloud-init/restart")
+
+    def test_restart_diagnostic_reports_only_target_instance_state(self):
+        machine = runtime.Machine(Path(self.temp.name), "test", runtime.Runner())
+
+        def call(*argv, **_kwargs):
+            if argv[0] == "list":
+                return SimpleNamespace(returncode=0, stdout=json.dumps({"list": [
+                    {"name": "other", "state": "Running", "ipv4": ["10.0.0.2"]},
+                    {"name": "test", "state": "Restarting", "ipv4": []}]}))
+            return SimpleNamespace(returncode=0, stdout=json.dumps({"info": {
+                "test": {"state": "Restarting", "ipv4": []}}}))
+
+        machine.m = call
+        output = io.StringIO()
+        with redirect_stderr(output):
+            machine.management_snapshot()
+        self.assertIn("state=Restarting", output.getvalue())
+        self.assertNotIn("10.0.0.2", output.getvalue())
+
+    def test_cleanup_failure_does_not_replace_the_original_stage_error(self):
+        machine = runtime.Machine(Path(self.temp.name), "test", runtime.Runner())
+        machine.helper = "/tmp/dotfiles-multipass-test.py"
+        machine.cleanup_helper = mock.Mock(side_effect=runtime.CommandFailure(
+            ["multipass", "exec"], 124, "cleanup timed out"))
+        output = io.StringIO()
+        with redirect_stderr(output), self.assertRaisesRegex(runtime.Failure, "primary failure"):
+            try:
+                raise runtime.Failure("primary failure")
+            finally:
+                machine.cleanup_helper_on_exit()
+        self.assertIn("CLEANUP FAIL", output.getvalue())
 
     def test_instance_lock_rejects_concurrent_run(self):
         path = Path(self.temp.name) / "lock"
@@ -388,6 +509,36 @@ class HostReadiness(unittest.TestCase):
         self.assertEqual(self.clock, 120)
 
 
+class RunnerProgress(unittest.TestCase):
+    def test_silent_command_reports_wait_and_keeps_output_in_log(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runner = runtime.Runner()
+            runner.log = Path(directory) / "command.log"
+            waits = []
+            terminal = io.StringIO()
+            with redirect_stderr(terminal):
+                result = runner([sys.executable, "-c", "import time; time.sleep(0.2); print('ready')"],
+                                timeout=2, stream=True, show_output=False, heartbeat=0.05,
+                                on_wait=lambda elapsed, _limit: waits.append(elapsed))
+            self.assertEqual(result.returncode, 0)
+            self.assertGreaterEqual(len(waits), 2)
+            self.assertNotIn("ready", terminal.getvalue())
+            self.assertIn("ready", runner.log.read_text())
+
+    def test_stage_heartbeat_identifies_the_active_substep(self):
+        with tempfile.TemporaryDirectory() as directory:
+            machine = runtime.Machine(Path(directory), "test", runtime.Runner())
+            machine.path.mkdir(parents=True)
+            terminal = io.StringIO()
+            with redirect_stderr(terminal), machine.attempt("create"), machine.stage("cloud-init"):
+                with machine.step("status", "Wait for cloud-init", timeout=2):
+                    machine.runner([sys.executable, "-c", "import time; time.sleep(0.2); print('done')"],
+                                   timeout=2, heartbeat=0.05)
+            self.assertIn("STEP WAIT [cloud-init/status]", terminal.getvalue())
+            receipt = json.loads(machine.receipt_file.read_text())
+            self.assertEqual(receipt["stages"]["cloud-init"]["steps"][0]["status"], "ok")
+
+
 class Orchestration(unittest.TestCase):
     """Exercise apply and its state writes with VM operations confined to a fixture."""
 
@@ -411,6 +562,10 @@ class Orchestration(unittest.TestCase):
         def probe(machine):
             machine.cli = "/review/multipass"
             return {"qualified": True, "client": "1.16.4"}
+
+        def ensure(machine, _observed):
+            with machine.progress("service", "Verify the existing Multipass daemon and driver"):
+                return probe(machine)
 
         def multipass(machine, *argv, **_kwargs):
             case.events.append(argv)
@@ -447,7 +602,7 @@ class Orchestration(unittest.TestCase):
                     mock.patch.object(runtime, "require_agent"),
                     mock.patch.object(runtime.shutil, "disk_usage", return_value=SimpleNamespace(free=10**13)),
                     mock.patch.object(host.Host, "probe", probe),
-                    mock.patch.object(host.Host, "ensure", lambda machine, _observed: probe(machine)),
+                    mock.patch.object(host.Host, "ensure", ensure),
                     mock.patch.object(host.Host, "verify_service"),
                     mock.patch.object(host.Host, "instances", side_effect=lambda: dict(self.instances)),
                     mock.patch.object(host.Host, "image", return_value={}),
@@ -467,8 +622,9 @@ class Orchestration(unittest.TestCase):
 
     def test_creation_record_precedes_launch_and_survives_launch_timeout(self):
         self.fail_launch = True
-        with self.assertRaisesRegex(runtime.CommandFailure, "launch timed out"):
+        with self.assertRaisesRegex(runtime.CommandFailure, "launch timed out") as failure:
             self.apply(creation_record=self.record)
+        self.assertEqual(failure.exception.progress_path, "launch/create")
         declaration = json.loads((self.state / "declaration.json").read_text())
         self.assertEqual(json.loads(self.record.read_text()),
                          {"name": "ubuntu-dev", "uuid": declaration["uuid"]})
@@ -519,11 +675,51 @@ class Orchestration(unittest.TestCase):
         self.fail_launch = True
         with self.assertRaises(runtime.CommandFailure):
             self.apply()
+        first = json.loads((self.state / "receipt.json").read_text())
+        failed_log = Path(first["stages"]["launch"]["log"])
+        self.assertTrue(failed_log.is_file())
+        self.assertEqual(first["attempts"][-1]["status"], "failed")
         self.instances.clear()
         self.fail_launch = False
         self.apply()
-        self.assertEqual(json.loads((self.state / "receipt.json").read_text())["last_successful_ref"], REF)
+        second = json.loads((self.state / "receipt.json").read_text())
+        self.assertEqual(second["last_successful_ref"], REF)
+        self.assertEqual([attempt["status"] for attempt in second["attempts"]], ["failed", "ok"])
+        self.assertNotEqual(failed_log, Path(second["stages"]["launch"]["log"]))
+        self.assertTrue(failed_log.is_file())
         self.assertEqual(self.events.count(("cloud-wait",)), 1)
+
+    def test_progress_distinguishes_stage_step_and_guest_bootstrap_output(self):
+        output = io.StringIO()
+        with redirect_stderr(output):
+            self.apply()
+        lines = output.getvalue()
+        self.assertIn("  STEP RUN  [host/service] Verify the existing Multipass daemon", lines)
+        self.assertIn("STAGE RUN  [cloud-init] Verify first boot", lines)
+        self.assertIn("  STEP RUN  [cloud-init/status] Wait for cloud-init", lines)
+        self.assertIn("  STEP SKIP [cloud-init/restart] guest does not require a reboot", lines)
+        self.assertIn("    CHILD BEGIN [bootstrap] Guest bootstrap output follows unchanged", lines)
+        self.assertIn("    CHILD END   [bootstrap] See guest bootstrap log", lines)
+        self.assertIn("STAGE OK   [verified]", lines)
+
+    def test_check_keeps_json_stdout_separate_from_progress(self):
+        with redirect_stderr(io.StringIO()):
+            self.apply()
+        declaration = json.loads((self.state / "declaration.json").read_text())
+
+        def command(_machine, *argv, **_kwargs):
+            if "instance.json" in " ".join(argv):
+                return SimpleNamespace(stdout=json.dumps({"uuid": declaration["uuid"]}))
+            return SimpleNamespace(stdout=REF + "\n")
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch.object(runtime.Machine, "m", command), redirect_stdout(stdout), \
+                redirect_stderr(stderr):
+            runtime.check(SimpleNamespace(action="check", name="ubuntu-dev", runtime=False),
+                          {}, self.home, runtime.Runner())
+        self.assertEqual(json.loads(stdout.getvalue())["current_ref"], REF)
+        self.assertEqual(stderr.getvalue(), "")
 
     def test_running_guest_bootstrap_stops_before_ssh_or_repository(self):
         self.apply()
