@@ -12,8 +12,13 @@ def address(payload, name):
     entry = payload.get("info", {}).get(name)
     if isinstance(entry, list):
         entry = entry[0] if len(entry) == 1 else None
-    if not isinstance(entry, dict) or entry.get("state") != "Running":
-        raise ValueError(f"{name} is not running; use multipass start {name}")
+    if not isinstance(entry, dict):
+        raise ValueError(f"{name} is missing; inspect the saved instance identity before recovery")
+    if entry.get("state") != "Running":
+        state = entry.get("state", "unknown")
+        hint = (f"use multipass start {name}" if state in ("Stopped", "Suspended") else
+                "inspect Multipass state and daemon logs; restore the management connection first")
+        raise ValueError(f"{name} is not running (state={state}); {hint}")
     candidates = entry.get("ipv4", [])
     if isinstance(candidates, str):
         candidates = [candidates]

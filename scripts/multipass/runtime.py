@@ -371,6 +371,19 @@ def transient_guest_connection(exc):
         "timed out" in output
 
 
+def require_running(name, state):
+    if state == "Running":
+        return
+    if state in ("Stopped", "Suspended"):
+        hint = f"use multipass start {name}"
+    elif state == "Deleted":
+        hint = f"use multipass recover {name} before inspecting the managed instance"
+    else:
+        hint = ("inspect multipass list/info and daemon logs; restore the management connection "
+                "before retrying; automatic start or restart is not attempted")
+    raise Failure(f"instance {name} is {state or 'missing'}; {hint}")
+
+
 class HeldLock:
     def __init__(self, path):
         self.path = path
@@ -568,9 +581,21 @@ class Machine:
 
     def cleanup_helper(self):
         if self.helper:
-            self.m("exec", "--no-map-working-directory", self.name, "--", "rm", "-f",
-                   self.helper, check=False)
+            try:
+                # exec 会隐式启动非 Running 实例；故障退出时只查询状态，不借清理触发生命周期操作。
+                entry = self.host.instances().get(self.name, {})
+                require_running(self.name, entry.get("state"))
+                self.m("exec", "--no-map-working-directory", self.name, "--", "rm", "-f", self.helper)
+            except (Failure, ValueError, OSError) as exc:
+                self.receipt["pending_helper_cleanup"] = {"path": self.helper, "reason": str(exc)}
+                save_json(self.receipt_file, self.receipt)
+                self.helper = None
+                self.emit(f"CLEANUP DEFER [{self.current_stage or 'guest-helper'}] "
+                          "Temporary guest helper retained; retry after management recovery")
+                raise Failure(f"temporary guest helper cleanup deferred: {exc}") from exc
             self.helper = None
+            self.receipt.pop("pending_helper_cleanup", None)
+            save_json(self.receipt_file, self.receipt)
 
     def cleanup_helper_on_exit(self):
         if not self.helper:
@@ -581,7 +606,8 @@ class Machine:
         try:
             self.cleanup_helper()
         except Exception as exc:
-            self.emit(f"CLEANUP FAIL [{label}] {exc}")
+            if not self.receipt.get("pending_helper_cleanup"):
+                self.emit(f"CLEANUP FAIL [{label}] {exc}")
             if not primary_error:
                 raise
         else:
@@ -686,7 +712,23 @@ class Machine:
             except Exception:
                 self.emit(f"  STEP DIAG [{name}] multipass {command} output saved in stage log")
 
+    def verify_reboot(self, probe, before):
+        if not probe.get("boot_id") or probe["boot_id"] == before:
+            raise Failure("previously requested reboot has not been verified: boot ID did not change; "
+                          "inspect guest and management state; automatic reboot will not be repeated")
+        if probe["reboot_required"]:
+            raise Failure("guest still requires reboot after one automatic restart; "
+                          "inspect the guest before retrying")
+        self.receipt["reboot_to"] = probe["boot_id"]
+        save_json(self.receipt_file, self.receipt)
+        return probe
+
     def reboot_if_required(self, probe):
+        before = self.receipt.get("reboot_from")
+        if before:
+            # 超时不等于来宾没有重启；重跑 create 时验收已有请求，不覆盖原 boot ID 或再次重启。
+            with self.step("reconnect", "Verify the previously requested reboot after management recovery"):
+                return self.verify_reboot(probe, before)
         if not probe["reboot_required"]:
             self.emit(f"  STEP SKIP [{self.current_stage or 'cloud-init'}/restart] "
                       "guest does not require a reboot")
@@ -713,9 +755,7 @@ class Machine:
                     self.transfer_helper()
                     after = self.verify_guest()
                     if after["boot_id"] != before:
-                        if after["reboot_required"]:
-                            raise Failure("guest still requires reboot after one automatic restart")
-                        return after
+                        return self.verify_reboot(after, before)
                 except CommandFailure as exc:
                     if not transient_guest_connection(exc):
                         raise
@@ -808,12 +848,12 @@ class Machine:
                     self.receipt["development"] = parse_json_output(
                         self.guest("versions", timeout=180, heartbeat=PROGRESS_INTERVAL).stdout,
                         "guest tool versions")
+                with self.step("helper-cleanup", "Remove the temporary guest helper"):
+                    self.cleanup_helper()
                 self.receipt["last_successful_ref"] = ref
                 self.receipt["git_identity_configured"] = bool(git_identity)
                 self.receipt["guest"] = final
                 save_json(self.receipt_file, self.receipt)
-                with self.step("helper-cleanup", "Remove the temporary guest helper"):
-                    self.cleanup_helper()
         finally:
             self.cleanup_helper_on_exit()
 
@@ -890,10 +930,13 @@ def create_or_provision(args, config, home, runner):
             instances = machine.host.instances() if observed else {}
             if name in instances and not saved:
                 raise Failure(f"same-name instance {name} is not managed by this entrypoint")
-            if name in instances and instances[name].get("state") != "Running":
-                raise Failure(f"instance {name} is {instances[name].get('state')}; use multipass start {name}")
+            if name in instances:
+                require_running(name, instances[name].get("state"))
             if args.action == "provision" and name not in instances:
                 raise Failure(f"managed instance {name} is missing")
+            if args.action == "provision" and machine.receipt["stages"].get("cloud-init", {}).get("status") != "ok":
+                raise Failure("first-boot checks are incomplete; resume with create using the saved "
+                              "target commit before provision")
             if args.action == "create":
                 machine.refuse_missing_guest(instances)
             if observed and observed["qualified"]:
@@ -1115,8 +1158,7 @@ def check(args, config, home, runner):
                       "current_ref": machine.receipt.get("current_ref"),
                       "last_successful_ref": machine.receipt.get("last_successful_ref"),
                       "last_stage": machine.receipt.get("last_successful_stage")}, indent=2))
-    if instances[name].get("state") != "Running":
-        raise Failure(f"instance is stopped; use multipass start {name}")
+    require_running(name, instances[name].get("state"))
     marker = machine.m("exec", "--no-map-working-directory", name, "--", "sudo", "-n", "cat",
                        "/var/lib/dotfiles-multipass/instance.json").stdout
     if json.loads(marker).get("uuid") != machine.declaration["uuid"]:
@@ -1147,8 +1189,7 @@ def ssh(args, config, home, runner):
     if not observed:
         raise Failure("Multipass is missing")
     instances = machine.host.instances()
-    if name not in instances or instances[name].get("state") != "Running":
-        raise Failure(f"instance is not running; use multipass start {name}")
+    require_running(name, instances.get(name, {}).get("state"))
     os.execvp("ssh", ["ssh", name])
 
 

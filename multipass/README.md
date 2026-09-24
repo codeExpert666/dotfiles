@@ -136,7 +136,9 @@ ProxyCommand 在连接时查询当前 IPv4。状态目录默认 0700、记录默
 日志与回执记录目标及实际提交、镜像哈希、Multipass 版本、阶段结果和 doctor 计数，
 不记录私钥或密码短语。
 
-客户机首次系统更新只在创建阶段执行；cloud-init 要求重启时，宿主最多自动重启一次。
+客户机首次系统更新只在创建阶段执行；cloud-init 要求重启时，宿主最多自动请求重启一次，
+这个限制跨 `create` 重试保留。回执的 `reboot_from` 保存请求前的 boot ID，
+`reboot_to` 只在管理连接恢复、实例身份一致、boot ID 已变化且无待重启标志时写入。
 bootstrap 由普通 `ubuntu` 用户运行；它先探测免密 sudo 命令权限，确需密码时才在前台
 刷新凭据。核心安装细节、日志和失败重试规则见[脚本说明](../scripts/README.md)。
 
@@ -145,16 +147,33 @@ bootstrap 由普通 `ubuntu` 用户运行；它先探测免密 sudo 命令权限
 失败时先查看宿主实例状态目录的 `receipt.json`：`stages` 保存各阶段最近一次结果与
 `current_step`，`attempts` 保留每次执行的阶段结果和失败位置 `failed_at`，阶段日志位于
 `logs/<尝试 ID>/<阶段>.log`。旧版 `logs/<阶段>.log` 仍保留原位。
-排除原因后重跑相同命令。创建失败会保留实例，不自动删除；
-launch 超时后先核对实际实例和 cloud-init 状态。若实例已停止，先运行
-`multipass start <name>`，再检查或重试。
+创建失败会保留实例，不自动删除。先用 `multipass list`、`multipass info <name>`
+和 daemon 日志核对实际状态；launch 超时后还需核对来宾的 cloud-init 状态。
+`Stopped` 或 `Suspended` 可使用 `multipass start <name>`；`Starting`、`Restarting`
+或 `Unknown` 须先排查管理连接，不能将它们当成停止状态。`multipass exec`、`shell`
+可能隐式请求 start，因此在异常状态下不应把它们当作纯查询。
+
+恢复到 `Running` 后，创建未完成的实例重跑原参数 `create`，保留原声明、完整提交 SHA
+和公钥；不要再次指定仅供全新实例使用的 `--creation-record`。入口复用现有实例，
+重新验收未完成的首次启动阶段，再继续配置。首次启动阶段尚未成功时，`provision`
+会拒绝执行；首次启动已完成后，重新配置或更新提交才使用 `provision`。
 
 launch 后客户机 SSH 若短暂出现 `No route to host`、连接被拒绝或网络不可达，
 脚本最多等待 120 秒并重试 cloud-init 状态命令；cloud-init 自身失败不会按连接故障重试。
 若 `cloud-init/restart` 超时，表示 cloud-init 状态检查已经通过，但 Multipass 的重启命令
-未在上限内返回；应先查看实例状态和对应日志，再决定如何恢复。脚本不会自动重启
-Multipass daemon 或停止其他实例；只有显式执行 `destroy --apply` 才会永久删除
-核对过身份的受管虚拟机。
+未在上限内返回，并不证明来宾没有重启。重跑 `create` 会核验原重启请求；如果 boot ID
+未变化或仍要求重启，会保留原记录并停止，不自动发出第二次重启。管理不可用时，
+helper 清理只查询状态，不调用可能隐式启动实例的 `exec`；待清理路径和原因记录在
+`pending_helper_cleanup`。恢复后重跑会传入同一实例的 helper，成功删除后清除此待办，
+原失败 attempt 和日志保留。清理失败不会覆盖原始故障，也不会被当成完整成功。
+
+如来宾经已核验的 SSH 连接可达而管理状态持续异常，应先保存声明、回执和日志，核对
+创建 UUID、machine-id、cloud instance-id，并确认 apt/dpkg 和 bootstrap 空闲。
+普通 stop/start 适合正常 `Running` 实例；Multipass 1.16.4 的普通关机路径会拒绝
+`Restarting`。确认可中断来宾工作后，可通过可信直连 SSH 正常关机，等 QEMU 退出且
+Multipass 显示 `Stopped` 后再 start，并重新验收身份和管理连接。若状态仍不一致，
+须进一步人工排查；脚本不会强制关机或自动重启 Multipass daemon，也不会停止其他实例。
+只有显式执行 `destroy --apply` 才会永久删除核对过身份的受管虚拟机。
 
 在修改 SSH、更新客户机仓库前，入口检查客户机 bootstrap 锁；仓库操作和 bootstrap
 本身也会复查。客户机里仍运行的 bootstrap、PID 缺失或无法核实的遗留锁须先人工核实，

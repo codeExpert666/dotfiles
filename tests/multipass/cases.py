@@ -282,6 +282,11 @@ class HostPolicy(unittest.TestCase):
                                                    "ipv4": ["10.0.0.2", "10.0.0.3"]}}}, "test")
         with self.assertRaisesRegex(ValueError, "not running"):
             ssh_proxy.address({"info": {"test": {"state": "Stopped"}}}, "test")
+        for state in ("Restarting", "Starting", "Unknown", "Deleted"):
+            with self.subTest(state=state), self.assertRaises(ValueError) as failure:
+                ssh_proxy.address({"info": {"test": {"state": state}}}, "test")
+            self.assertIn(f"state={state}", str(failure.exception))
+            self.assertNotIn("use multipass start", str(failure.exception))
 
     def test_cloud_init_degraded_is_not_accepted_as_done(self):
         machine = runtime.Machine(Path(self.temp.name), "test", runtime.Runner())
@@ -432,6 +437,52 @@ class HostPolicy(unittest.TestCase):
                 machine.cleanup_helper_on_exit()
         self.assertIn("CLEANUP FAIL", output.getvalue())
 
+    def test_pending_reboot_requires_new_boot_id_and_no_reboot_flag(self):
+        for boot_id, required, message in (("first", False, "boot ID did not change"),
+                                           ("second", True, "still requires reboot")):
+            with self.subTest(boot_id=boot_id, required=required):
+                machine = runtime.Machine(Path(self.temp.name), "test", runtime.Runner())
+                machine.path.mkdir(parents=True, exist_ok=True)
+                machine.receipt["reboot_from"] = "first"
+                machine.m = mock.Mock(side_effect=AssertionError("must not issue another reboot"))
+                with self.assertRaisesRegex(runtime.Failure, message):
+                    machine.reboot_if_required({"boot_id": boot_id, "reboot_required": required})
+                machine.m.assert_not_called()
+                self.assertEqual(machine.receipt["reboot_from"], "first")
+                self.assertNotIn("reboot_to", machine.receipt)
+
+    def test_cleanup_does_not_exec_when_management_state_cannot_be_read(self):
+        machine = runtime.Machine(Path(self.temp.name), "test", runtime.Runner())
+        machine.path.mkdir(parents=True)
+        machine.helper = "/tmp/dotfiles-multipass-test.py"
+        machine.host.instances = mock.Mock(side_effect=runtime.CommandFailure(
+            ["multipass", "list"], 124, "state query timed out"))
+        machine.m = mock.Mock(side_effect=AssertionError("exec could implicitly start the VM"))
+        with self.assertRaisesRegex(runtime.Failure, "original error"):
+            try:
+                raise runtime.Failure("original error")
+            finally:
+                machine.cleanup_helper_on_exit()
+        machine.m.assert_not_called()
+        receipt = json.loads(machine.receipt_file.read_text())
+        self.assertEqual(receipt["pending_helper_cleanup"]["path"], "/tmp/dotfiles-multipass-test.py")
+        self.assertIsNone(machine.helper)
+
+    def test_cleanup_nonzero_exit_is_retained_and_blocks_success(self):
+        def run(argv, **kwargs):
+            if kwargs["check"]:
+                raise runtime.CommandFailure(argv, 1, "rm: permission denied")
+            return SimpleNamespace(returncode=1, stdout="", stderr="rm: permission denied")
+
+        machine = runtime.Machine(Path(self.temp.name), "test", mock.Mock(side_effect=run, log=None))
+        machine.path.mkdir(parents=True)
+        machine.host.cli = "/fixture/multipass"
+        machine.host.instances = mock.Mock(return_value={"test": {"state": "Running"}})
+        machine.helper = "/tmp/dotfiles-multipass-test.py"
+        with self.assertRaisesRegex(runtime.Failure, "cleanup deferred.*permission denied"):
+            machine.cleanup_helper()
+        self.assertIn("pending_helper_cleanup", json.loads(machine.receipt_file.read_text()))
+
     def test_instance_lock_rejects_concurrent_run(self):
         path = Path(self.temp.name) / "lock"
         with runtime.lock(path):
@@ -562,6 +613,8 @@ class Orchestration(unittest.TestCase):
         self.fail_launch = False
         self.generation = 0
         self.shell = "/bin/bash"
+        self.boot_id = "fixture-boot"
+        self.reboot_required = False
         case = self
 
         def probe(machine):
@@ -594,7 +647,7 @@ class Orchestration(unittest.TestCase):
                           "ubuntu_home": "/home/ubuntu", "ubuntu_shell": case.shell,
                           "machine_id": f"fixture-machine-{case.generation}",
                           "cloud_instance_id": f"fixture-cloud-{case.generation}",
-                          "boot_id": "fixture-boot", "reboot_required": False}
+                          "boot_id": case.boot_id, "reboot_required": case.reboot_required}
             elif action == "versions":
                 output = {"tools": {}, "doctor": {"pass": 1, "warn": 0, "fail": 0, "skip": 0}}
             else:
@@ -658,6 +711,114 @@ class Orchestration(unittest.TestCase):
         self.assertEqual(sum(event[0] == "launch" for event in self.events), 1)
         self.assertEqual(self.events.count(("cloud-wait",)), 1)
         self.assertEqual(json.loads((self.state / "receipt.json").read_text())["machine_id"], first["machine_id"])
+
+    def fail_during_restart(self):
+        self.reboot_required = True
+        self.boot_id = "first-boot"
+        original = runtime.Machine.m
+
+        def command(machine, *argv, **kwargs):
+            if argv[0] == "restart":
+                self.events.append(argv)
+                self.instances[machine.name]["state"] = "Restarting"
+                self.boot_id = "second-boot"
+                self.reboot_required = False
+                raise runtime.CommandFailure(["multipass", *argv], 5, "Timed out waiting for instance to restart")
+            return original(machine, *argv, **kwargs)
+
+        with mock.patch.object(runtime.Machine, "m", command), \
+                self.assertRaises(runtime.CommandFailure) as failure:
+            self.apply(creation_record=self.record)
+        self.assertEqual(failure.exception.returncode, 5)
+        self.assertEqual(failure.exception.progress_path, "cloud-init/restart")
+        return json.loads((self.state / "receipt.json").read_text())
+
+    def test_restart_timeout_resumes_create_without_launch_or_another_restart(self):
+        first = self.fail_during_restart()
+        self.assertFalse(any(event[0] == "exec" and "rm" in event for event in self.events))
+        declaration = (self.state / "declaration.json").read_bytes()
+        creation = self.record.read_bytes()
+        old_log = Path(first["stages"]["cloud-init"]["log"])
+        old_contents = old_log.read_bytes()
+        self.assertEqual(first["reboot_from"], "first-boot")
+        self.assertIn("pending_helper_cleanup", first)
+        self.instances["ubuntu-dev"]["state"] = "Running"
+        self.events.clear()
+        self.apply()
+        second = json.loads((self.state / "receipt.json").read_text())
+        self.assertEqual([row["status"] for row in second["attempts"]], ["failed", "ok"])
+        self.assertEqual(second["attempts"][0], first["attempts"][0])
+        self.assertEqual(second["reboot_from"], "first-boot")
+        self.assertEqual(second["reboot_to"], "second-boot")
+        self.assertEqual(second["machine_id"], first["machine_id"])
+        self.assertEqual(second["cloud_instance_id"], first["cloud_instance_id"])
+        self.assertNotIn("pending_helper_cleanup", second)
+        self.assertEqual(second["last_successful_ref"], REF)
+        self.assertEqual((self.state / "declaration.json").read_bytes(), declaration)
+        self.assertEqual(self.record.read_bytes(), creation)
+        self.assertEqual(old_log.read_bytes(), old_contents)
+        self.assertFalse(any(event[0] in ("launch", "restart", "start", "stop") for event in self.events))
+        self.assertTrue(any(event[0] == "exec" and "rm" in event for event in self.events))
+
+    def test_restart_resume_rejects_replacement_identity_before_ssh_or_repository(self):
+        first = self.fail_during_restart()
+        self.instances["ubuntu-dev"]["state"] = "Running"
+        self.generation += 1
+        self.events.clear()
+        with self.assertRaisesRegex(runtime.Failure, "machine-id changed"):
+            self.apply()
+        self.assertFalse(any(event[0] in ("ssh", "repository", "restart", "bootstrap") for event in self.events))
+        receipt = json.loads((self.state / "receipt.json").read_text())
+        self.assertEqual(receipt["machine_id"], first["machine_id"])
+        self.assertEqual(receipt["reboot_from"], "first-boot")
+        self.assertNotIn("reboot_to", receipt)
+
+    def test_provision_cannot_skip_incomplete_first_boot_or_change_saved_ref(self):
+        self.fail_during_restart()
+        self.instances["ubuntu-dev"]["state"] = "Running"
+        before = {str(path): path.read_bytes() for path in self.state.rglob("*") if path.is_file()}
+        self.events.clear()
+        with self.assertRaisesRegex(runtime.Failure, "first-boot checks are incomplete.*create"):
+            self.apply(action="provision", ref="b" * 40)
+        self.assertEqual(self.events, [])
+        self.assertEqual({str(path): path.read_bytes() for path in self.state.rglob("*") if path.is_file()}, before)
+
+    def test_final_cleanup_failure_does_not_publish_successful_ref(self):
+        original = runtime.Machine.m
+
+        def command(machine, *argv, **kwargs):
+            if machine.current_stage == "verified" and argv[0] == "exec" and "rm" in argv:
+                raise runtime.CommandFailure(["multipass", *argv], 1, "rm failed")
+            return original(machine, *argv, **kwargs)
+
+        with mock.patch.object(runtime.Machine, "m", command), self.assertRaises(runtime.Failure) as failure:
+            self.apply()
+        receipt = json.loads((self.state / "receipt.json").read_text())
+        self.assertNotIn("last_successful_ref", receipt)
+        self.assertEqual(receipt["stages"]["verified"]["status"], "failed")
+        self.assertEqual(receipt["attempts"][-1]["failed_at"], "verified/helper-cleanup")
+        self.assertIn("pending_helper_cleanup", receipt)
+        self.assertIn("cleanup deferred", str(failure.exception))
+        self.apply()
+        receipt = json.loads((self.state / "receipt.json").read_text())
+        self.assertEqual(receipt["last_successful_ref"], REF)
+        self.assertNotIn("pending_helper_cleanup", receipt)
+
+    def test_restarting_state_is_reported_without_start_hint_or_guest_commands(self):
+        self.fail_during_restart()
+        before = {str(path): path.read_bytes() for path in self.state.rglob("*") if path.is_file()}
+        self.events.clear()
+        for action in ("create", "provision", "check", "ssh"):
+            with self.subTest(action=action), self.assertRaises(runtime.Failure) as failure:
+                if action in ("create", "provision"):
+                    self.apply(action=action)
+                else:
+                    getattr(runtime, action)(args(action=action, runtime=False), {}, self.home, runtime.Runner())
+            self.assertIn("Restarting", str(failure.exception))
+            self.assertNotIn("use multipass start", str(failure.exception))
+            self.assertNotIn("is stopped", str(failure.exception))
+        self.assertEqual(self.events, [])
+        self.assertEqual({str(path): path.read_bytes() for path in self.state.rglob("*") if path.is_file()}, before)
 
     def test_deleted_instance_is_rejected_without_launch_or_state_changes(self):
         self.apply()
