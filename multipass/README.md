@@ -9,8 +9,10 @@ Ubuntu 开发机时，才在 Apple Silicon Mac 宿主机上运行 `scripts/multi
 
 扩展在宿主机创建 Ubuntu arm64 客户机并建立 SSH 连接，在客户机拉取指定的远程提交，
 以普通 `ubuntu` 用户先预览、再执行 `bootstrap.sh --profile server`，复用核心的依赖准备、
-配置部署与诊断。客户机保留 Multipass 的管理用户和通道；日常通过独立 SSH 密钥登录，
-项目目录位于客户机自己的 `~/workspace`，不挂载宿主目录。
+配置部署与诊断。客户机保留 Multipass 的管理用户和通道；日常通过独立 SSH 密钥登录。
+客户机 `ubuntu` 用户的 HOME 固定为 `/home/ubuntu`，项目目录固定为
+`/home/ubuntu/workspace`，不挂载宿主目录。这两个路径不支持通过命令行、宿主个人配置
+或 `defaults.json` 自定义。
 
 ## 宿主机要求与首次创建
 

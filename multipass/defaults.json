@@ -5,8 +5,6 @@
   "memory": "8G",
   "disk": "40G",
   "repo_url": "https://github.com/codeExpert666/dotfiles.git",
-  "guest_home": "/home/ubuntu",
-  "workspace": "/home/ubuntu/workspace",
   "timeouts": {
     "query": 15,
     "download": 600,
