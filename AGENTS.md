@@ -36,6 +36,8 @@ There is no build step. Run these commands from the repository root:
 - `bash scripts/bootstrap.sh --dry-run --profile server`: preview environment
   preparation; use `desktop` for GUI tools and fonts.
 - `bash scripts/doctor.sh`: check dependencies, deployment, and configuration.
+- `bash scripts/multipass.sh destroy --dry-run --name <name>`: preview retirement
+  of a managed VM and its host state before `--apply`.
 - `bash tests/all.sh`: run the five offline suites, including Multipass.
 - `bash tests/multipass-live.sh --help`: review explicit two-image VM acceptance.
 - `bash tests/config-loading.sh`: verify application configuration independently.

@@ -151,6 +151,105 @@ class SSHConfig:
                     raise ValueError(f"managed SSH file was changed outside this entrypoint: {path}")
         return existing
 
+    @staticmethod
+    def _aggregate_content(host_files):
+        return ("".join(f"Include {quote(path)}\n" for path in host_files) + "Host *\n").encode()
+
+    def removal_plan(self, receipt=None):
+        """Check ownership before removing this instance's SSH files."""
+        receipt = receipt or {}
+        host_files = sorted((self.base / "hosts").glob("*.conf"))
+        for path in host_files:
+            read_regular(path)
+        others = [path for path in host_files if path != self.host]
+        host = read_regular(self.host)
+        known = read_regular(self.known)
+        aggregate = read_regular(self.aggregate)
+        root = read_regular(self.root)
+        proxy = read_regular(self.proxy)
+
+        for path, current, marker in ((self.host, host, f"# dotfiles-multipass instance {self.uuid}\n"),
+                                      (self.known, known, f"{self.alias} ")):
+            if current is None:
+                continue
+            if not current.startswith(marker.encode()):
+                raise ValueError(f"managed SSH file belongs to another instance: {path}")
+            expected = receipt.get(str(path))
+            if not expected or sha256(current) != expected:
+                raise ValueError(f"managed SSH file has no matching receipt hash: {path}")
+
+        if aggregate is not None:
+            valid = {self._aggregate_content(host_files)}
+            if host is None:
+                valid.add(self._aggregate_content(sorted(host_files + [self.host])))
+            if aggregate not in valid:
+                raise ValueError("managed SSH aggregate was changed outside this entrypoint")
+        elif others:
+            raise ValueError("managed SSH aggregate is missing while other managed hosts remain")
+
+        root_after = root
+        root_without_include = root
+        if root is not None:
+            lines = root.decode().splitlines(keepends=True)
+            matches = [index for index, line in enumerate(lines) if line == SENTINEL]
+            include = f"Include {quote(self.aggregate)}\n"
+            if len(matches) > 1 or (matches and
+                                    (matches[0] + 1 >= len(lines) or lines[matches[0] + 1] != include)):
+                raise ValueError("managed SSH Include marker was edited")
+            if not matches:
+                for line in lines:
+                    parts = shlex.split(line, comments=True)
+                    if parts and parts[0].lower() == "include" and str(self.aggregate) in parts[1:]:
+                        raise ValueError("managed SSH Include is missing its ownership marker")
+            if matches:
+                index = matches[0]
+                root_without_include = "".join(lines[:index] + lines[index + 2:]).encode()
+                if not others:
+                    root_after = root_without_include
+
+        if not others and proxy is not None:
+            recorded = receipt.get(str(self.proxy))
+            if sha256(proxy) not in (recorded, sha256(self.proxy_source.read_bytes())):
+                raise ValueError(f"managed SSH proxy was changed outside this entrypoint: {self.proxy}")
+
+        backup = self.root.with_name(f"config.dotfiles-multipass.{self.uuid}.bak")
+        backup_bytes = read_regular(backup)
+        remove_backup = backup_bytes is not None and backup_bytes == root_without_include
+        return {"host": host, "known": known, "aggregate": aggregate, "root": root,
+                "root_after": root_after, "proxy": proxy, "backup": backup_bytes,
+                "backup_path": backup, "remove_backup": remove_backup, "others": others}
+
+    def removal_changes(self, plan):
+        """Describe the exact managed SSH writes after an ownership check."""
+        changes = []
+        if plan["root_after"] != plan["root"]:
+            changes.append((self.root, plan["root"], plan["root_after"]))
+        if plan["host"] is not None:
+            changes.append((self.host, plan["host"], None))
+        if plan["known"] is not None:
+            changes.append((self.known, plan["known"], None))
+        if plan["aggregate"] is not None:
+            after = self._aggregate_content(plan["others"]) if plan["others"] else None
+            if after != plan["aggregate"]:
+                changes.append((self.aggregate, plan["aggregate"], after))
+        if not plan["others"] and plan["proxy"] is not None:
+            changes.append((self.proxy, plan["proxy"], None))
+        if plan["remove_backup"]:
+            changes.append((plan["backup_path"], plan["backup"], None))
+        return changes
+
+    def remove(self, receipt=None):
+        """Remove only recorded instance files and unused shared SSH files."""
+        changes = self.removal_changes(self.removal_plan(receipt))
+        for path, before, after in changes:
+            if read_regular(path) != before:
+                raise ValueError(f"managed SSH file changed during removal: {path}")
+            if after is None:
+                path.unlink()
+            else:
+                atomic(path, after)
+        return [path for path, _, _ in changes]
+
     def publish(self, host_key, receipt=None):
         existing = self.preflight(receipt)
         root_hash = sha256(existing) if existing is not None else None

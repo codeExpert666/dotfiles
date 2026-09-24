@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""创建、重新配置、检查并连接按指定 Git 提交构建的 Multipass 开发机。"""
+"""创建、重新配置、销毁、检查并连接按指定 Git 提交构建的 Multipass 开发机。"""
 
 import argparse
 from collections import deque
@@ -151,13 +151,14 @@ def parser():
 
     root = argparse.ArgumentParser(
         prog="multipass.sh",
-        description="Create, reprovision, inspect and connect to a pinned Multipass dev machine.",
+        description="Create, reprovision, retire, inspect and connect to a pinned Multipass dev machine.",
         formatter_class=formatter,
         epilog="Run 'bash scripts/multipass.sh <command> --help' for command options.")
     commands = root.add_subparsers(dest="action", required=True)
     descriptions = {
         "create": "create or resume a pinned Ubuntu instance",
         "provision": "reconfigure a managed instance, optionally at a new Git commit",
+        "destroy": "permanently remove a managed instance and retire its host state",
         "check": "inspect a managed instance and optionally run guest diagnostics",
         "ssh": "connect to a running managed instance over SSH",
     }
@@ -175,12 +176,15 @@ def parser():
         sub.add_argument("--name", help=f"Multipass instance name (config or {DEFAULTS['name']} by default)")
         sub.add_argument("--config", type=Path, metavar="FILE",
                          help="local JSON config (default: ~/.config/dotfiles-multipass/config.json)")
-        if action in ("create", "provision"):
+        if action in ("create", "provision", "destroy"):
             modes = sub.add_mutually_exclusive_group()
             modes.add_argument("--dry-run", action="store_true",
                                help="preview only (the default when --apply is absent)")
             modes.add_argument("--apply", action="store_true",
-                               help="perform changes; may install or upgrade Multipass")
+                               help=("permanently remove the managed VM and retire its host state"
+                                     if action == "destroy" else
+                                     "perform changes; may install or upgrade Multipass"))
+        if action in ("create", "provision"):
             ref_help = ("target Git commit: 40 lowercase hex digits (required here or in config)"
                         if action == "create" else
                         "target Git commit: 40 lowercase hex digits (default: saved commit)")
@@ -367,6 +371,11 @@ def transient_guest_connection(exc):
         "timed out" in output
 
 
+class HeldLock:
+    def __init__(self, path):
+        self.path = path
+
+
 @contextmanager
 def lock(path):
     try:
@@ -375,12 +384,13 @@ def lock(path):
         owner = path / "pid"
         pid = owner.read_text().strip() if owner.is_file() else "unknown"
         raise Failure(f"another run or abandoned lock exists: {path} (PID {pid})")
+    held = HeldLock(path)
     try:
         (path / "pid").write_text(f"{os.getpid()}\n")
-        yield
+        yield held
     finally:
-        (path / "pid").unlink(missing_ok=True)
-        path.rmdir()
+        (held.path / "pid").unlink(missing_ok=True)
+        held.path.rmdir()
 
 
 @contextmanager
@@ -423,7 +433,8 @@ class Machine:
                         for stage in ("launch", "cloud-init")))
         if self.name not in instances and recorded:
             raise Failure(f"previously created instance {self.name} is missing; its identity and SSH trust "
-                          f"are retained in {self.path}. Use a different --name for a new instance; "
+                          f"are retained in {self.path}. Run destroy to retire it before reusing the name, "
+                          "or use a different --name for a new instance; "
                           "automatic same-name rebuilding is not supported")
 
     @contextmanager
@@ -850,6 +861,10 @@ def create_or_provision(args, config, home, runner):
             validate_name(name)
             machine = Machine(home, name, runner)
             saved = machine.declaration
+            if args.action == "create" and saved:
+                # Report a vanished VM before comparing a retry's Git ref or SSH key.
+                existing_host = machine.host.probe()
+                machine.refuse_missing_guest(machine.host.instances() if existing_host else {})
             creation_record = getattr(args, "creation_record", None)
             if creation_record is not None:
                 if machine.path.exists() or machine.path.is_symlink():
@@ -978,6 +993,108 @@ def create_or_provision(args, config, home, runner):
     print(f"READY: {name}; SSH alias: ssh {name}", file=sys.stderr)
 
 
+def destroy(args, config, home, runner):
+    with preflight_progress("STAGE", "preflight", "Check managed state, Multipass and SSH ownership"):
+        with preflight_progress("STEP", "preflight/state", "Validate host and saved instance identity"):
+            host_preflight()
+            name = value(args, config, "name", DEFAULTS["name"])
+            validate_name(name)
+            machine = Machine(home, name, runner)
+            safe_directory(machine.base)
+            safe_directory(machine.path)
+            saved = machine.declaration
+            if not isinstance(saved, dict):
+                raise Failure(f"no managed declaration for {name}")
+            if not isinstance(machine.receipt, dict):
+                raise Failure("saved instance receipt is invalid")
+            try:
+                identity = str(uuid.UUID(saved["uuid"]))
+            except (KeyError, TypeError, ValueError) as exc:
+                raise Failure("saved instance UUID is invalid") from exc
+            if saved.get("schema") != 1 or saved.get("name") != name or identity != saved["uuid"]:
+                raise Failure("saved instance declaration does not match the requested name")
+            if not isinstance(saved.get("ssh_public_key"), str) or not saved["ssh_public_key"]:
+                raise Failure("saved SSH public key path is invalid")
+            archive_dir = machine.base / "retired"
+            safe_directory(archive_dir)
+            archive = archive_dir / f"{name}-{identity}"
+            if archive.exists() or archive.is_symlink():
+                raise Failure(f"retired state destination already exists: {archive}")
+        with preflight_progress("STEP", "preflight/instance", "Read the Multipass service and instance state"):
+            observed = machine.host.probe()
+            if not observed or not observed["qualified"]:
+                raise Failure("Multipass is missing or below the required version; cannot confirm instance absence")
+            machine.host.verify_service()
+            instances = machine.host.instances()
+            entry = instances.get(name)
+            if entry and entry.get("state") == "Deleted":
+                raise Failure(f"instance {name} is recoverable; run multipass recover {name} first")
+        with preflight_progress("STEP", "preflight/ssh", "Check managed SSH files before removal"):
+            setting = SSHConfig(home, name, identity, Path(saved["ssh_public_key"]),
+                                HERE / "ssh_proxy.py", machine.host.cli)
+            ssh_plan = setting.removal_plan(machine.receipt.get("ssh_files"))
+
+    state = entry.get("state") if entry else "absent"
+    print(f"PLAN: destroy {name}; VM state {state}; permanently purge only this managed VM if present; "
+          f"retire host state to {archive}", file=sys.stderr)
+    ssh_changes = setting.removal_changes(ssh_plan)
+    print("PLAN: managed SSH changes: " +
+          (", ".join(str(path) for path, _, _ in ssh_changes) if ssh_changes else "none"),
+          file=sys.stderr)
+    if not args.apply:
+        print("Preview complete; no files or instances changed. "
+              "DEFER: guest identity check until --apply if the VM exists.", file=sys.stderr)
+        return
+
+    with lock(machine.path / "lock") as held:
+        if load_json(machine.declaration_file) != saved or \
+                (load_json(machine.receipt_file) or {"schema": 1, "stages": {}}) != machine.receipt:
+            raise Failure("instance state changed during preflight; rerun after inspecting the other run")
+        with preflight_progress("STAGE", "destroy", "Verify ownership and retire the managed instance"):
+            with preflight_progress("STEP", "destroy/instance", "Verify and permanently remove the VM if present"):
+                machine.host.verify_service()
+                current = machine.host.instances().get(name)
+                if current:
+                    state = current.get("state")
+                    if state == "Deleted":
+                        raise Failure(f"instance {name} is recoverable; run multipass recover {name} first")
+                    if state != "Running":
+                        if state not in ("Stopped", "Suspended"):
+                            raise Failure(f"cannot verify instance {name} in state {state!r}")
+                        machine.m("start", name, timeout=600)
+                    prefix = ("exec", "--no-map-working-directory", name, "--")
+                    try:
+                        marker = json.loads(machine.m(*prefix, "sudo", "-n", "cat",
+                                                      "/var/lib/dotfiles-multipass/instance.json").stdout)
+                    except ValueError as exc:
+                        raise Failure("guest creation marker is unreadable; preserving instance") from exc
+                    if marker != {"name": name, "uuid": identity}:
+                        raise Failure("guest creation marker does not match this instance declaration")
+                    for field, command in (("machine_id", ("cat", "/etc/machine-id")),
+                                           ("cloud_instance_id", ("cloud-init", "query", "instance_id"))):
+                        recorded = machine.receipt.get(field)
+                        if recorded and machine.m(*prefix, *command).stdout.strip() != recorded:
+                            raise Failure(f"guest {field} changed; refusing to delete a replacement instance")
+                    machine.m("delete", "--purge", name, timeout=120)
+                    if name in machine.host.instances():
+                        raise Failure(f"Multipass still lists {name} after delete --purge")
+                else:
+                    state = "absent"
+            with preflight_progress("STEP", "destroy/ssh", "Remove only this instance's managed SSH files"):
+                with lock(machine.base / "ssh.lock"):
+                    setting.remove(machine.receipt.get("ssh_files"))
+            with preflight_progress("STEP", "destroy/archive", "Archive the old declaration and receipt"):
+                safe_directory(archive_dir, create=True)
+                if archive.exists() or archive.is_symlink():
+                    raise Failure(f"retired state destination appeared during destroy: {archive}")
+                save_json(machine.path / "retirement.json", {"schema": 1, "name": name, "uuid": identity,
+                                                               "retired_at": time.time(),
+                                                               "vm_state_before_apply": state})
+                os.rename(machine.path, archive)
+                held.path = archive / "lock"
+    print(f"RETIRED: {name}; archived state: {archive}", file=sys.stderr)
+
+
 def check(args, config, home, runner):
     name = value(args, config, "name", DEFAULTS["name"])
     validate_name(name)
@@ -1052,6 +1169,8 @@ def main():
         signal.signal(signum, interrupted)
     if args.action in ("create", "provision"):
         create_or_provision(args, config, home, runner)
+    elif args.action == "destroy":
+        destroy(args, config, home, runner)
     elif args.action == "check":
         check(args, config, home, runner)
     else:

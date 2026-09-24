@@ -12,7 +12,7 @@ multipass 在 Apple Silicon Mac 宿主机上编排可选的 Ubuntu 开发机。�
 | [deploy.sh](deploy.sh)       | 当前机器；部署配置链接、个人 Git 入口和 Codex 角色副本      | 只预览；`--apply` 才写入                            |
 | [doctor.sh](doctor.sh)       | 当前机器；检查依赖、部署及应用配置，可选受控运行            | 离线检查；不安装或修复                              |
 | [bootstrap.sh](bootstrap.sh) | 当前机器；准备软件和插件，调用 deploy，最后调用 doctor 验收 | 离线预览；必须指定 profile                          |
-| [multipass.sh](multipass.sh) | Mac 宿主机；创建、配置、检查和接入 Ubuntu 开发机            | `create`/`provision` 预览；`check` 查询、`ssh` 连接 |
+| [multipass.sh](multipass.sh) | Mac 宿主机；创建、配置、结束、检查和接入 Ubuntu 开发机       | `create`/`provision`/`destroy` 预览；`check` 查询、`ssh` 连接 |
 
 在已有机器上，依赖和插件备妥时使用 deploy 部署，再用 doctor 检查；需要准备完整环境
 时使用 bootstrap，它依次准备软件、调用 deploy、准备插件和桌面资源，再调用 doctor。
@@ -70,7 +70,7 @@ bootstrap/deploy 将 HOME 的逻辑表示传给子入口，物理目标另行计
 
 三个当前机器入口的 `--help` 写入 stdout，报告、错误和提示写入 stderr，例如可用
 `bash scripts/doctor.sh --verbose 2>doctor.log` 保存完整诊断。HUP/INT/TERM 分别使用
-退出码 `129`/`130`/`143`。multipass 的帮助写入 stdout；`create`/`provision` 的
+退出码 `129`/`130`/`143`。multipass 的帮助写入 stdout；`create`/`provision`/`destroy` 的
 预检、计划、`STAGE` / `STEP` 进度和错误写入 stderr，`--apply` 的阶段输出也进入宿主日志。
 `check` 向 stdout 输出 JSON，`ssh` 进入
 交互会话。其余退出状态在各入口下说明。
@@ -248,16 +248,19 @@ bootstrap 成功仍可能包含 doctor 的 WARN/SKIP，应阅读具体报告范�
 
 multipass 在 Apple Silicon Mac 宿主机上编排 Ubuntu arm64 客户机；客户机从指定的
 远程提交部署本仓库，再以普通 `ubuntu` 用户运行前述 bootstrap 流程。它使用客户机内的
-核心脚本，不共享所有宿主环境、状态和输出约定。四个子命令承担不同职责：
+核心脚本，不共享所有宿主环境、状态和输出约定。五个子命令承担不同职责：
 
 | 子命令      | 职责                                                                       |
 | ----------- | -------------------------------------------------------------------------- |
 | `create`    | 创建实例、建立 SSH 连接并从固定提交配置客户机；默认只预览                  |
 | `provision` | 重新配置已有实例，可用 `--ref` 更新目标提交；默认只预览                    |
+| `destroy`   | 核对身份后永久删除受管实例、清理 SSH 并归档宿主状态；默认只预览              |
 | `check`     | 查询受管实例状态，不启动或修复；`--runtime` 还在客户机运行 doctor 受控诊断 |
 | `ssh`       | 进入已运行实例的普通 SSH 会话                                              |
 
 `create`/`provision` 在 `--apply` 时可能安装或升级宿主 Multipass，并写入宿主状态；
+`destroy --apply` 只处理指定的受管实例，不安装或升级 Multipass；若 VM 已被手动
+永久删除，则只收尾宿主文件。它不封装其他 Multipass 日常命令。
 客户机的项目目录位于自己的 `~/workspace`，不挂载宿主目录。专用 SSH 私钥由操作者
 保留在宿主机，脚本仅把公钥写入客户机。完整的
 [创建步骤](../multipass/README.md#宿主机要求与首次创建)、

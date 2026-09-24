@@ -50,6 +50,7 @@ class HelpTests(unittest.TestCase):
         self.assertIn("usage: multipass.sh", root)
         for action, summary in (("create", "create or resume a pinned Ubuntu instance"),
                                 ("provision", "reconfigure a managed instance"),
+                                ("destroy", "permanently remove a managed instance"),
                                 ("check", "inspect a managed instance"),
                                 ("ssh", "connect to a running managed instance")):
             self.assertIn(summary, root)
@@ -71,6 +72,10 @@ class HelpTests(unittest.TestCase):
 
         provision = self.help_output("provision")
         self.assertIn("Use --ref to select a new commit", provision)
+        destroy = self.help_output("destroy")
+        self.assertIn("--dry-run", destroy)
+        self.assertIn("--apply", destroy)
+        self.assertNotIn("--ref", destroy)
         self.assertNotIn("--creation-record", provision)
         self.assertIn("run guest doctor diagnostics", self.help_output("check"))
 
@@ -664,6 +669,113 @@ class Orchestration(unittest.TestCase):
         self.assertEqual(self.events, [])
         self.assertEqual({str(path): path.read_bytes() for path in self.state.rglob("*") if path.is_file()}, before)
 
+    def test_missing_instance_is_reported_before_changed_create_ref(self):
+        self.apply()
+        self.instances.clear()
+        with self.assertRaisesRegex(runtime.Failure, "Run destroy to retire"):
+            self.apply(ref="b" * 40)
+
+    def destroy(self, apply=False):
+        runtime.destroy(args(action="destroy", name="ubuntu-dev", apply=apply, dry_run=not apply),
+                        {}, self.home, runtime.Runner())
+
+    def test_destroy_preview_and_manually_purged_instance_can_reuse_name(self):
+        self.apply()
+        old = json.loads((self.state / "declaration.json").read_text())
+        self.instances.clear()
+        before = {str(path): path.read_bytes() for path in self.state.rglob("*") if path.is_file()}
+        self.destroy()
+        self.assertEqual({str(path): path.read_bytes() for path in self.state.rglob("*") if path.is_file()},
+                         before)
+        self.assertFalse((self.state.parent.parent / "retired").exists())
+        self.destroy(apply=True)
+        archive = self.state.parent.parent / "retired" / f"ubuntu-dev-{old['uuid']}"
+        self.assertFalse(self.state.exists())
+        self.assertEqual(json.loads((archive / "declaration.json").read_text()), old)
+        self.assertEqual(json.loads((archive / "retirement.json").read_text())["vm_state_before_apply"],
+                         "absent")
+        self.apply(ref="b" * 40)
+        new = json.loads((self.state / "declaration.json").read_text())
+        self.assertNotEqual(new["uuid"], old["uuid"])
+        self.assertEqual(new["target_ref"], "b" * 40)
+
+    def test_destroy_live_instance_checks_identity_and_only_purges_its_name(self):
+        self.apply()
+        old = json.loads((self.state / "declaration.json").read_text())
+        self.instances["ubuntu-dev"]["state"] = "Stopped"
+        self.instances["another-vm"] = {"state": "Running"}
+
+        def command(machine, *argv, **_kwargs):
+            self.events.append(argv)
+            if argv[0] == "exec" and argv[-1] == "/var/lib/dotfiles-multipass/instance.json":
+                return SimpleNamespace(stdout=json.dumps({"name": machine.name, "uuid": old["uuid"]}))
+            if argv[0] == "exec" and argv[-1] == "/etc/machine-id":
+                return SimpleNamespace(stdout="fixture-machine-1\n")
+            if argv[0] == "exec" and argv[-1] == "instance_id":
+                return SimpleNamespace(stdout="fixture-cloud-1\n")
+            if argv[0] == "start":
+                self.instances[machine.name]["state"] = "Running"
+            if argv[:2] == ("delete", "--purge"):
+                self.instances.pop(machine.name)
+            return SimpleNamespace(stdout="")
+
+        with mock.patch.object(runtime.Machine, "m", command):
+            self.destroy(apply=True)
+        self.assertIn(("start", "ubuntu-dev"), self.events)
+        self.assertIn(("delete", "--purge", "ubuntu-dev"), self.events)
+        self.assertEqual(self.instances, {"another-vm": {"state": "Running"}})
+        self.assertFalse(self.state.exists())
+
+    def test_destroy_identity_mismatch_preserves_vm_and_state(self):
+        self.apply()
+        old = json.loads((self.state / "declaration.json").read_text())
+        before = {str(path): path.read_bytes() for path in self.state.rglob("*") if path.is_file()}
+
+        def wrong_marker(_machine, *argv, **_kwargs):
+            self.events.append(argv)
+            return SimpleNamespace(stdout=json.dumps({"name": "ubuntu-dev", "uuid": "replacement"}))
+
+        self.events.clear()
+        with mock.patch.object(runtime.Machine, "m", wrong_marker), \
+                self.assertRaisesRegex(runtime.Failure, "marker does not match"):
+            self.destroy(apply=True)
+        self.assertNotIn(("delete", "--purge", "ubuntu-dev"), self.events)
+        self.assertIn("ubuntu-dev", self.instances)
+        self.assertEqual(json.loads((self.state / "declaration.json").read_text()), old)
+        self.assertEqual({str(path): path.read_bytes() for path in self.state.rglob("*") if path.is_file()},
+                         before)
+
+    def test_destroy_refuses_unrecorded_ssh_file_before_vm_delete(self):
+        self.apply()
+        host_file = self.home / ".ssh/dotfiles-multipass/hosts/ubuntu-dev.conf"
+        host_file.parent.mkdir(parents=True)
+        identity = json.loads((self.state / "declaration.json").read_text())["uuid"]
+        host_file.write_text(f"# dotfiles-multipass instance {identity}\nHost ubuntu-dev\n")
+        self.events.clear()
+        with self.assertRaisesRegex(ValueError, "no matching receipt hash"):
+            self.destroy(apply=True)
+        self.assertIn("ubuntu-dev", self.instances)
+        self.assertNotIn(("delete", "--purge", "ubuntu-dev"), self.events)
+        self.assertTrue(host_file.is_file())
+
+    def test_destroy_retries_host_cleanup_after_the_vm_was_purged(self):
+        self.apply()
+        self.instances.clear()
+        with mock.patch.object(ssh_config.SSHConfig, "remove", side_effect=ValueError("disk error")), \
+                self.assertRaisesRegex(ValueError, "disk error"):
+            self.destroy(apply=True)
+        self.assertTrue((self.state / "declaration.json").is_file())
+        self.assertFalse((self.state / "lock").exists())
+        self.destroy(apply=True)
+        self.assertFalse(self.state.exists())
+
+    def test_destroy_rejects_recoverable_deleted_instance(self):
+        self.apply()
+        self.instances["ubuntu-dev"]["state"] = "Deleted"
+        with self.assertRaisesRegex(runtime.Failure, "multipass recover"):
+            self.destroy(apply=True)
+        self.assertTrue((self.state / "declaration.json").is_file())
+
     def test_disappearance_after_preflight_cannot_launch_using_old_receipt(self):
         self.apply()
         self.events.clear()
@@ -815,6 +927,53 @@ class SSHConfigTests(unittest.TestCase):
         other.publish(PUB)
         self.setting.publish(PUB, first)
         self.assertEqual((self.home / ".ssh/config").read_text().count(ssh_config.SENTINEL), 1)
+
+    def test_removal_restores_root_and_preserves_other_managed_host(self):
+        original = (self.home / ".ssh/config").read_bytes()
+        first = self.setting.publish(PUB)
+        other = ssh_config.SSHConfig(self.home, "ubuntu-dev-2", "other-uuid", self.pub,
+                                     REPO / "scripts/multipass/ssh_proxy.py",
+                                     "/usr/local/bin/multipass")
+        second = other.publish(PUB)
+        self.setting.remove(first)
+        self.assertFalse(self.setting.host.exists())
+        self.assertFalse(self.setting.known.exists())
+        self.assertTrue(other.host.exists())
+        self.assertIn(str(other.host), self.setting.aggregate.read_text())
+        self.assertEqual((self.home / ".ssh/config").read_text().count(ssh_config.SENTINEL), 1)
+        self.assertFalse((self.home / ".ssh/config.dotfiles-multipass.test-uuid.bak").exists())
+        other.remove(second)
+        self.assertEqual((self.home / ".ssh/config").read_bytes(), original)
+        self.assertFalse(other.aggregate.exists())
+        self.assertFalse(other.proxy.exists())
+
+    def test_removal_accepts_manually_absent_files_and_preserves_user_config(self):
+        hashes = self.setting.publish(PUB)
+        self.setting.host.unlink()
+        self.setting.known.unlink()
+        self.setting.aggregate.unlink()
+        self.setting.proxy.unlink()
+        (self.home / ".ssh/config").write_text("Host github.com\n    User git\nHost personal\n")
+        self.setting.removal_plan(hashes)
+        self.setting.remove(hashes)
+        self.assertEqual((self.home / ".ssh/config").read_text(),
+                         "Host github.com\n    User git\nHost personal\n")
+
+    def test_removal_rejects_changed_trust_without_touching_files(self):
+        hashes = self.setting.publish(PUB)
+        self.setting.known.write_text(self.setting.known.read_text() + "# modified\n")
+        before = {str(path): path.read_bytes() for path in (self.setting.host, self.setting.known,
+                                                           self.setting.aggregate, self.setting.root)}
+        with self.assertRaisesRegex(ValueError, "matching receipt hash"):
+            self.setting.remove(hashes)
+        self.assertEqual({path: Path(path).read_bytes() for path in before}, before)
+
+    def test_removal_retry_repairs_aggregate_after_host_unlink(self):
+        hashes = self.setting.publish(PUB)
+        self.setting.host.unlink()
+        self.setting.remove(hashes)
+        self.assertFalse(self.setting.aggregate.exists())
+        self.assertFalse(self.setting.known.exists())
 
 
 class LiveCleanup(unittest.TestCase):

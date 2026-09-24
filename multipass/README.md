@@ -65,6 +65,10 @@ ssh ubuntu-dev
 bash scripts/multipass.sh provision --dry-run --name ubuntu-dev
 bash scripts/multipass.sh provision --apply --name ubuntu-dev
 bash scripts/multipass.sh provision --apply --name ubuntu-dev --ref '<新40位SHA>'
+
+# 永久结束一台受管开发机；即使已手动 purge，也可清理残留的宿主状态
+bash scripts/multipass.sh destroy --dry-run --name ubuntu-dev
+bash scripts/multipass.sh destroy --apply --name ubuntu-dev
 ```
 
 `check` 向 stdout 输出 JSON 状态；`--runtime` 还在客户机运行受控诊断。
@@ -78,7 +82,14 @@ bash scripts/multipass.sh provision --apply --name ubuntu-dev --ref '<新40位SH
 bootstrap 的原有输出在 `CHILD BEGIN` / `CHILD END` 之间直接转发，
 它自己的详细日志仍保存在客户机 `~/.local/state/dotfiles-bootstrap/`。
 `ssh` 进入普通 SSH 会话；可用 `ssh -L 8080:localhost:8080 ubuntu-dev` 转发本地端口。
-实例停止、启动和删除使用原生 `multipass stop/start/delete <name>`。
+实例停止、启动使用原生 `multipass stop/start <name>`。结束受管实例使用
+`destroy`：它会核对实例标记后仅永久删除指定虚拟机，清理对应的受管 SSH 文件，
+将原创建声明、回执和日志移到宿主 `retired/` 目录。若实例已被手动
+`multipass delete --purge <name>`，同一命令只清理残留的宿主状态。预览不修改
+实例或文件；应用模式会永久删除客户机数据，先自行保存需要的内容。若实例处于停止状态，
+应用模式会先启动它核对客户机身份。脚本不会调用
+无实例名的 `multipass purge`，也不会删除用户的 SSH 公钥或私钥。已被普通
+`multipass delete` 标记为可恢复的实例，须先 `multipass recover <name>` 再运行 `destroy`。
 
 `create` 重跑须保留原创建声明；更新 Git 提交用 `provision --ref`。重新配置前会检查
 客户机仓库 origin、已跟踪和未跟踪改动；发现用户修改时保留内容并停止。`check`
@@ -111,7 +122,8 @@ bootstrap 的原有输出在 `CHILD BEGIN` / `CHILD END` 之间直接转发，
 | --------------------- | ---------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
 | 宿主机仓库            | [defaults.json](defaults.json)、[host-releases.json](host-releases.json)、[cloud-init.yaml.tmpl](cloud-init.yaml.tmpl) | 默认资源、Multipass 安装声明和客户机初始化模板     |
 | 宿主机 HOME           | `~/.config/dotfiles-multipass/config.json`                                                                             | 可选个人参数配置                                   |
-| 宿主机 HOME           | `~/.local/state/dotfiles-multipass/instances/<name>/`                                                                  | 创建声明、`receipt.json`、阶段日志、user-data 和锁 |
+| 宿主机 HOME           | `~/.local/state/dotfiles-multipass/instances/<name>/`                                                                  | 当前实例的创建声明、`receipt.json`、阶段日志、user-data 和锁 |
+| 宿主机 HOME           | `~/.local/state/dotfiles-multipass/retired/<name>-<uuid>/`                                                              | `destroy` 后保留的原实例声明、回执、日志及退休记录 |
 | 宿主机 HOME           | `~/.cache/dotfiles-multipass/`                                                                                         | 已校验的官方 pkg 缓存                              |
 | 宿主机 HOME           | `~/.ssh/config`、`~/.ssh/dotfiles-multipass/`                                                                          | 受管 Include、实例 Host 片段和专用 known_hosts     |
 | 宿主机 HOME           | `~/.local/share/dotfiles-multipass/ssh-proxy.py`                                                                       | 哈希管理的实例地址解析助手副本                     |
@@ -141,7 +153,8 @@ launch 后客户机 SSH 若短暂出现 `No route to host`、连接被拒绝或�
 脚本最多等待 120 秒并重试 cloud-init 状态命令；cloud-init 自身失败不会按连接故障重试。
 若 `cloud-init/restart` 超时，表示 cloud-init 状态检查已经通过，但 Multipass 的重启命令
 未在上限内返回；应先查看实例状态和对应日志，再决定如何恢复。脚本不会自动重启
-Multipass daemon、停止其他实例或删除虚拟机。
+Multipass daemon 或停止其他实例；只有显式执行 `destroy --apply` 才会永久删除
+核对过身份的受管虚拟机。
 
 在修改 SSH、更新客户机仓库前，入口检查客户机 bootstrap 锁；仓库操作和 bootstrap
 本身也会复查。客户机里仍运行的 bootstrap、PID 缺失或无法核实的遗留锁须先人工核实，
@@ -150,9 +163,12 @@ Multipass daemon、停止其他实例或删除虚拟机。
 known_hosts。Multipass 安装或升级后的版本及服务探测会在 120 秒窗口内重试命令失败；
 版本不达标或驱动等配置错误会立即停止。
 
-**已创建的实例被删除后，同名自动重建暂不支持。** 宿主回执和 SSH 信任仍保留，
-同名 `create` 会在 launch 前报告冲突及状态路径。使用新的 `--name` 创建下一台开发机，
-不要通过复用旧回执或清空 known_hosts 绕过实例身份检查。
+**已创建的实例被删除后，不会自动同名重建。** 宿主声明和回执仍保留，
+同名 `create` 会先报告实例缺失。运行 `destroy --dry-run --name <name>` 检查清理计划，
+再用 `destroy --apply --name <name>` 显式结束旧的受管身份；之后可以用原名称创建
+新实例。也可以直接使用新的 `--name`。不要通过复用旧回执或清空 known_hosts
+绕过实例身份检查。若 SSH 受管文件被修改，`destroy` 会保留冲突文件及状态以供排查；
+若 Multipass 已删除实例但宿主清理失败，排除原因后重跑 `destroy` 即可继续。
 
 ## 维护与验收
 
