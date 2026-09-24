@@ -1,4 +1,4 @@
-"""Offline behavior tests for the Multipass orchestrator and guest helper."""
+"""Multipass 编排器与来宾机辅助程序的离线行为测试。"""
 
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import io
@@ -436,7 +436,7 @@ class HostPolicy(unittest.TestCase):
 
 
 class HostReadiness(unittest.TestCase):
-    """Keep Runner's real failure conversion while replacing only command execution."""
+    """仅替换底层命令执行，保留 Runner 真实的错误转换逻辑。"""
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -540,7 +540,7 @@ class RunnerProgress(unittest.TestCase):
 
 
 class Orchestration(unittest.TestCase):
-    """Exercise apply and its state writes with VM operations confined to a fixture."""
+    """用夹具模拟虚拟机操作，验证 apply 流程及状态写入。"""
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -598,6 +598,7 @@ class Orchestration(unittest.TestCase):
                     case.shell = "/usr/bin/zsh"
             return SimpleNamespace(stdout=json.dumps(output), returncode=0)
 
+        # 只替换宿主与虚拟机边界，保留实际阶段编排和收据写入供断言。
         patchers = [mock.patch.object(runtime, "host_preflight"),
                     mock.patch.object(runtime, "require_agent"),
                     mock.patch.object(runtime.shutil, "disk_usage", return_value=SimpleNamespace(free=10**13)),
@@ -802,7 +803,7 @@ class SSHConfigTests(unittest.TestCase):
 
     def test_modified_managed_host_is_not_overwritten(self):
         hashes = self.setting.publish(PUB)
-        self.setting.host.write_text(self.setting.host.read_text() + "# user change\n")
+        self.setting.host.write_text(self.setting.host.read_text() + "# 用户修改\n")
         with self.assertRaisesRegex(ValueError, "changed outside"):
             self.setting.publish(PUB, hashes)
 
@@ -817,6 +818,8 @@ class SSHConfigTests(unittest.TestCase):
 
 
 class LiveCleanup(unittest.TestCase):
+    """模拟在线验收的归属冲突与清理路径，不启动真实虚拟机。"""
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

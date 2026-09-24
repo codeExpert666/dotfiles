@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Temporary guest-side helper, transferred and invoked through Multipass exec."""
+"""经 Multipass exec 传入并运行的临时来宾机辅助程序。"""
 
 import json
 import os
@@ -70,6 +70,7 @@ def verify_checkout(ref):
 
 def bootstrap_idle():
     require_ubuntu()
+    # 只接受完全不存在的锁；运行中、残留或无法验证的锁都留待人工检查。
     lock = HOME / ".local/state/dotfiles-bootstrap/lock"
     if not lock.exists() and not lock.is_symlink():
         return
@@ -93,6 +94,7 @@ def repository(url, ref):
         raise ValueError("dotfiles repository must not be a symlink")
     if not REPO.exists():
         print("    GUEST [repository/clone] Clone into a temporary directory", file=sys.stderr, flush=True)
+        # 新仓库先在临时目录验证提交和必需入口，再整体发布到固定路径。
         staging = Path(tempfile.mkdtemp(prefix=".dotfiles-fetch-", dir=HOME))
         try:
             checkout = staging / "repo"
@@ -115,6 +117,7 @@ def repository(url, ref):
             shutil.rmtree(staging)
     else:
         print("    GUEST [repository/reuse] Verify origin and clean working tree", file=sys.stderr, flush=True)
+        # 复用仓库前检查来源和工作区，避免覆盖来宾机上的用户修改。
         ensure_owned_directory(REPO)
         if not (REPO / ".git").is_dir():
             raise ValueError("existing dotfiles path is not a normal Git checkout")
@@ -150,6 +153,7 @@ def packages_ready():
     deadline = time.monotonic() + 600
     last_report = 0
     locks = ["/var/lib/dpkg/lock", "/var/lib/dpkg/lock-frontend", "/var/lib/apt/lists/lock"]
+    # 有 fuser 时等待包管理器释放锁；无此工具时仍执行后续的 dpkg 审计。
     while shutil.which("fuser") and time.monotonic() < deadline:
         held = subprocess.run(["fuser", *locks], capture_output=True).returncode == 0
         if not held:

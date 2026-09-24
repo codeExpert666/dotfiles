@@ -1,4 +1,4 @@
-"""Preserve user SSH configuration while publishing instance-scoped entries."""
+"""发布实例专用 SSH 配置，同时保留用户已有配置。"""
 
 import fnmatch
 import glob
@@ -12,6 +12,7 @@ import sys
 import tempfile
 
 
+# 此标记已写入现有用户配置，发布与清理程序依赖其原值识别受管内容。
 SENTINEL = "# dotfiles-multipass managed Include\n"
 
 
@@ -82,6 +83,7 @@ class SSHConfig:
     def _host_content(self, proxy_path=None, known_path=None):
         proxy = shlex.join([sys.executable, str(proxy_path or self.proxy),
                             self.name, self.multipass_path])
+        # 实例标记供后续归属核验使用，原值也写入了既有受管配置。
         return (f"# dotfiles-multipass instance {self.uuid}\n"
                 f"Host {self.name}\n"
                 f"    HostName {self.name}\n"
@@ -95,6 +97,7 @@ class SSHConfig:
                 f"    ProxyCommand {proxy}\n")
 
     def _other_host_conflicts(self, source, seen=None):
+        # 递归检查用户已有的 Include，避免新别名与其他配置中的 Host 冲突。
         if seen is None:
             seen = set()
         for line in source.splitlines():
@@ -167,6 +170,7 @@ class SSHConfig:
             raise ValueError("managed SSH proxy was modified")
         temp_dir = Path(tempfile.mkdtemp(prefix=".ssh-check-", dir=self.base))
         try:
+            # 先用临时配置验证受管主机，再比较已有主机的有效配置是否变化。
             candidate_host = temp_dir / "host.conf"
             candidate_aggregate = temp_dir / "aggregate.conf"
             candidate_root = temp_dir / "root.conf"
@@ -192,7 +196,7 @@ class SSHConfig:
                             raise ValueError(f"managed Include would change SSH {field} for {other}")
         finally:
             shutil.rmtree(temp_dir)
-        # Recheck immediately before writing; another writer must not be silently overwritten.
+        # 写入前重查原配置；若其他进程已修改，则中止以免覆盖用户改动。
         now = read_regular(self.root)
         if (sha256(now) if now is not None else None) != root_hash:
             raise ValueError("SSH config changed concurrently")

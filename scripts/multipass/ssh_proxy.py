@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resolve a managed Multipass instance address for one SSH connection."""
+"""为单次 SSH 连接查询受管 Multipass 实例的地址。"""
 
 import ipaddress
 import json
@@ -22,6 +22,7 @@ def address(payload, name):
         ip = ipaddress.ip_address(candidate)
         if ip.version == 4 and not ip.is_loopback and not ip.is_link_local:
             valid.append(str(ip))
+    # 地址缺失或有多个候选时停止连接，避免将 SSH 流量导向错误的实例。
     if len(valid) != 1:
         raise ValueError(f"{name} must have exactly one usable default-network IPv4 address")
     return valid[0]

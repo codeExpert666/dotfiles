@@ -1,4 +1,4 @@
-"""Failure types shared by the command runner and host orchestration."""
+"""命令执行器和宿主机编排共用的异常类型。"""
 
 
 class Failure(Exception):

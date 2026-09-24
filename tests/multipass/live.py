@@ -1,4 +1,4 @@
-"""Sequential native VM acceptance with ownership-checked cleanup."""
+"""依次对真实虚拟机验收，并在确认归属后清理。"""
 
 import argparse
 import hashlib
@@ -26,7 +26,8 @@ INCLUDE_MARKER = "# dotfiles-multipass managed Include\n"
 
 
 def arguments():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description="Sequential native VM acceptance with ownership-checked cleanup.")
     parser.add_argument("--ref", required=True, help="remote full commit SHA")
     parser.add_argument("--ssh-public-key", type=Path, required=True)
     parser.add_argument("--report-dir", type=Path)
@@ -86,6 +87,7 @@ def remove_ssh(name, uuid, remove_include):
 def _remove_ssh_locked(name, uuid, remove_include):
     host = SSH_BASE / "hosts" / f"{name}.conf"
     known = SSH_BASE / "known_hosts" / name
+    # 现存的 SSH 信任文件须匹配本次实例身份，才能移除受管入口。
     if host.exists():
         if not host.is_file() or host.is_symlink() or not host.read_text().startswith(
                 f"# dotfiles-multipass instance {uuid}\n"):
@@ -125,6 +127,7 @@ def _remove_ssh_locked(name, uuid, remove_include):
 
 
 def cleanup(name, report, remove_include):
+    # 创建记录位于报告目录；没有它就不能把同名实例认作本次验收的资源。
     registration = load_json(report / "creation.json")
     if registration is None:
         return
@@ -138,6 +141,7 @@ def cleanup(name, report, remove_include):
         declaration = load_json(state / "declaration.json")
         if not declaration or registration != {"uuid": declaration["uuid"], "name": declaration["name"]}:
             raise RuntimeError(f"creation record does not match instance state; retaining {name}")
+        # 删除前留存状态和诊断，并用来宾机标记再次确认虚拟机归属。
         copy_evidence(name, report)
         listed = json.loads(run(["multipass", "list", "--format", "json"]))
         entry = next((entry for entry in listed.get("list", []) if entry["name"] == name), None)
@@ -154,7 +158,7 @@ def cleanup(name, report, remove_include):
                     shutil.rmtree(child)
                 else:
                     child.unlink()
-    # Do not recursively remove anything created by another invocation after lock release.
+    # 释放锁后仅删除空目录，不递归清理可能由其他调用新建的内容。
     state.rmdir()
     (report / "cleanup-ok.txt").write_text("owned instance and generated host entries removed\n")
 
@@ -222,6 +226,7 @@ def main():
     for signum in (signal.SIGHUP, signal.SIGTERM):
         signal.signal(signum, interrupted)
     failures = []
+    # 两个镜像顺序验收；每轮都尝试按归属清理，失败后停止后续镜像。
     for image, label in (("24.04", "2404"), ("26.04", "2604")):
         name = f"dotfiles-test-{label}-{stamp}"
         report = report_root / label

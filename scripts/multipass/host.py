@@ -1,4 +1,4 @@
-"""Read-only host probes and narrowly scoped Multipass installation."""
+"""宿主机只读探测及限定范围的 Multipass 安装。"""
 
 from contextlib import nullcontext
 import hashlib
@@ -67,7 +67,7 @@ class Host:
             client = data.get("multipass")
             daemon = data.get("multipassd")
         except (ValueError, CommandFailure):
-            # An old CLI may have no JSON mode. A broken daemon remains a hard error.
+            # 旧版 CLI 可能不支持 JSON 格式；守护进程故障仍须作为错误上报。
             result = self.run([self.cli, "version"])
             match = re.search(r"multipass\s+(\S+).*?multipassd\s+(\S+)",
                               result.stdout, flags=re.DOTALL)
@@ -101,6 +101,7 @@ class Host:
                                      timeout=30, check=False)
                     managed = found.returncode == 0 and bool(found.stdout.strip())
             if managed:
+                # 只升级明确由 Homebrew 管理的安装，避免覆盖来源不明的版本。
                 with self.progress("upgrade", "Upgrade Multipass through Homebrew", timeout=1800):
                     self.run([brew, "upgrade", "--cask", "multipass"], timeout=1800, stream=True)
                 self.source = "homebrew-cask"
@@ -132,6 +133,7 @@ class Host:
                 raise ValueError(f"installer cache path is a symlink: {pkg}")
             cached = pkg.exists() and self.sha256(pkg) == spec["sha256"]
         if not cached:
+            # 下载先落到临时文件，校验固定摘要后才替换缓存文件。
             temporary = self.cache_dir / f".{pkg.name}.{os.getpid()}"
             try:
                 with self.progress("download", "Download the pinned Multipass package", timeout=610):

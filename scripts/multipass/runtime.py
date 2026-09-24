@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create, reprovision, inspect and connect to a pinned Multipass dev machine."""
+"""创建、重新配置、检查并连接按指定 Git 提交构建的 Multipass 开发机。"""
 
 import argparse
 from collections import deque
@@ -68,6 +68,7 @@ class Runner:
             heartbeat = PROGRESS_INTERVAL
         on_wait = on_wait or self.on_wait
         if stream or heartbeat:
+            # 长命令由读取线程持续写日志，主线程负责超时、进度提示和信号处理。
             process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                        text=True, bufsize=1, start_new_session=True)
             self.active = process
@@ -133,6 +134,7 @@ class Runner:
 
     def stop(self):
         if self.active and self.active.poll() is None:
+            # 长命令单独建立会话；停止整个进程组，避免留下安装器等子进程。
             try:
                 os.killpg(self.active.pid, signal.SIGTERM)
                 self.active.wait(timeout=5)
@@ -148,7 +150,9 @@ def parser():
         return argparse.HelpFormatter(prog, max_help_position=32)
 
     root = argparse.ArgumentParser(
-        prog="multipass.sh", description=__doc__, formatter_class=formatter,
+        prog="multipass.sh",
+        description="Create, reprovision, inspect and connect to a pinned Multipass dev machine.",
+        formatter_class=formatter,
         epilog="Run 'bash scripts/multipass.sh <command> --help' for command options.")
     commands = root.add_subparsers(dest="action", required=True)
     descriptions = {
@@ -327,7 +331,7 @@ def save_json(path, data):
 
 
 def record_creation(path, declaration):
-    # The caller keeps this record outside instance state, including after launch failure.
+    # 验收程序将此记录保存在实例状态目录之外；启动失败后仍凭它核对清理归属。
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "w") as output:
         json.dump({"name": declaration["name"], "uuid": declaration["uuid"]}, output)
@@ -337,6 +341,7 @@ def record_creation(path, declaration):
 
 
 def parse_json_output(output, label):
+    # Multipass 可能在 JSON 前输出启动进度；只接受位于输出末尾的完整对象。
     decoder = json.JSONDecoder()
     for index, char in enumerate(output):
         if char != "{":
@@ -351,6 +356,7 @@ def parse_json_output(output, label):
 
 
 def transient_guest_connection(exc):
+    # 仅将传输层暂时不可达视为可重试，来宾机命令本身失败不能被掩盖。
     if not isinstance(exc, CommandFailure) or exc.returncode != 2:
         return False
     output = exc.output.lower()
@@ -410,6 +416,7 @@ class Machine:
         self.current_step = None
 
     def refuse_missing_guest(self, instances):
+        # 已留下身份或成功阶段记录的实例若消失，禁止同名重建以保留 SSH 信任边界。
         recorded = (self.receipt.get("machine_id") or self.receipt.get("cloud_instance_id") or
                     self.receipt.get("ssh_files") or self.receipt.get("last_successful_ref") or
                     any(self.receipt["stages"].get(stage, {}).get("status") == "ok"
@@ -457,6 +464,7 @@ class Machine:
         self.runner.log = log_dir / f"{label}.log"
         row = {"id": label, "started": time.time(), "status": "running",
                "log": str(self.runner.log), "steps": []}
+        # stages 保存各阶段最新结果；attempts 另行保留每次执行的完整历史。
         self.receipt["stages"][label] = row
         self.attempt_row["stages"].append(row)
         self.current_stage = label
@@ -572,6 +580,7 @@ class Machine:
         probe = json.loads(self.guest("probe", root=True).stdout)
         declaration = self.declaration
         marker = probe.get("marker") or {}
+        # 先核对云初始化标记与机器身份，再信任该实例并更新收据。
         if marker.get("uuid") != declaration["uuid"] or marker.get("name") != self.name:
             raise Failure("guest creation marker does not match this instance declaration")
         if probe["os_id"] != "ubuntu" or probe["os_version"] != declaration["image"] or \
@@ -622,13 +631,14 @@ class Machine:
                               f"{self.current_step or 'status'}] guest connection did not recover "
                               f"within {min(CONNECT_RETRY_SECONDS, timeout)}s")
                 else:
+                    # 保留原始 cloud-init 错误；只在诊断命令可用时补充日志。
                     self.emit(f"  STEP DIAG [{self.current_stage or 'cloud-init'}/"
                               f"{self.current_step or 'status'}] collect guest cloud-init output if reachable")
                     try:
                         self.m("exec", "--no-map-working-directory", self.name, "--", "sudo", "-n",
                                "tail", "-n", "120", "/var/log/cloud-init-output.log", check=False)
                     except (CommandFailure, OSError):
-                        pass  # Preserve the original cloud-init failure when diagnostics are unavailable.
+                        pass
                 raise
         status = parse_json_output(result.stdout, "cloud-init status")
         extended = status.get("extended_status", status.get("status"))
@@ -894,6 +904,7 @@ def create_or_provision(args, config, home, runner):
         print("Preview complete; no files or instances changed. DEFER: image availability and guest checks.",
               file=sys.stderr)
         return
+    # 预检只读；从此处才创建状态目录，并在实例锁内复核预检期间的并发变化。
     safe_directory(machine.base, create=True)
     safe_directory(machine.base / "instances", create=True)
     if creation_record is not None:
@@ -904,7 +915,7 @@ def create_or_provision(args, config, home, runner):
     else:
         safe_directory(machine.path, create=True)
     with lock(machine.path / "lock"):
-        # A concurrent invocation may have finished between the preview checks and this lock.
+        # 其他调用可能在预检和获取锁之间完成，不能沿用过期的状态快照。
         if load_json(machine.declaration_file) != saved or \
                 (load_json(machine.receipt_file) or {"schema": 1, "stages": {}}) != machine.receipt:
             raise Failure("instance state changed during preflight; rerun after inspecting the other run")
