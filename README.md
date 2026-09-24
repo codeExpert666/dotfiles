@@ -6,41 +6,75 @@
 在已有机器上部署，从[快速开始](#快速开始)进入；需要独立 Ubuntu 开发机，使用
 [Multipass 可选扩展](multipass/README.md)。安装与部署默认先预览，显式 `--apply` 才写入。
 
+## 受管配置
+
+顶层配置目录通常是 Stow 包，包内路径对应 HOME；`skills` 采用声明式客户端入口链接，`codex` 由部署脚本单独复制。
+
+| 配置模块                       | 部署方式   | 平台支持 | 部署入口（相对 HOME）                | 内容与特性                                                |
+| ------------------------------ | ---------- | -------- | ------------------------------------ | --------------------------------------------------------- |
+| [zsh](zsh)                     | Stow 软链  | 全平台   | `.zshenv`、`.config/zsh/`            | 补全、语法高亮、历史搜索与目录跳转                        |
+| [nvim](nvim)                   | Stow 软链  | 全平台   | `.config/nvim/`                      | LazyVim，Bash、Zsh 与 Markdown 编辑                       |
+| [git](git)                     | Stow 软链  | 全平台   | `.config/git/config.shared`          | 共享别名、快进拉取、delta 与 zdiff3                       |
+| [ghostty](ghostty)             | Stow 软链  | 全平台   | `.config/ghostty/config.ghostty`     | 字体、主题、透明度、剪贴板与 SSH 集成                     |
+| [ghostty-macos](ghostty-macos) | Stow 软链  | 仅 macOS | `.config/ghostty/platform.ghostty`   | macOS 背景模糊、光标着色器、快捷终端与 Option 键          |
+| [lazygit](lazygit)             | Stow 软链  | 全平台   | `.config/lazygit/config.yml`         | delta 差异渲染，按 `e` 调用 Neovim                        |
+| [starship](starship)           | Stow 软链  | 全平台   | `.config/starship.toml`              | Tokyo Night 提示符，SSH 下显示 user@host                  |
+| [atuin](atuin)                 | Stow 软链  | 全平台   | `.config/atuin/config.toml`          | 本地历史搜索与疑似凭据过滤                                |
+| [shuck](shuck)                 | Stow 软链  | 全平台   | `.config/shuck/shuck.toml`           | 命令行与语言服务器共用的 Zsh 格式规则                     |
+| [vim](vim)                     | Stow 软链  | 全平台   | `.vimrc`                             | 后备编辑器，状态使用 XDG state                            |
+| [skills](skills)               | 声明式软链 | 全平台   | `.agents/skills/`、`.claude/skills/` | 按客户端声明入口，共用 `skills/src/` 技能源文件           |
+| [codex](codex)                 | 独立副本   | 全平台   | `.codex/agents/`                     | Codex 执行代理 `sol_worker.toml` 的普通副本（不支持软链） |
+
 ## 快速开始
 
-完整环境准备支持 Ubuntu 24.04/26.04（x86_64、arm64）和 macOS 15/26（Apple Silicon），
+### 部署前须知与环境要求
+
+完整环境准备原生支持 Ubuntu 24.04/26.04（x86_64、arm64）和 macOS 15 及 26（Apple Silicon），
 需要 Bash 3.2+，以普通用户运行并按需提供 sudo 认证。仅部署或检查配置也可用于其他
 Linux/macOS 环境，前提见[脚本平台说明](scripts/README.md#平台与运行约定)。
-首次使用前请确认[部署前须知](#部署前须知)中的路径与冲突约定。
+首次使用前请确认以下约束：
 
-仓库可放在任意目录，以下使用 `~/src/dotfiles`；后续命令均在仓库根目录执行。
+- **路径与环境变量**：`$HOME` 必须为已存在的真实绝对路径；四个 XDG 路径使用默认布局
+  （未设置、为空或指向对应默认子目录）；**不得导出 `ZDOTDIR`**，统一由受管 `~/.zshenv` 设置。
+- **目录与冲突规则**：受管配置的公共父目录（如 `.config/`、`.agents/` 等）必须保持为真实目录。
+  旧入口（如 `~/.gitconfig`）、个人文件或 Stow 规则发生冲突时，脚本会安全保留原件并停止；
+  请按预览提示迁移后重试，完整条件见 `bash scripts/deploy.sh --help`。
+- **文件链接机制**：配置链接依赖本地仓库源文件，请保留仓库目录；切换 Git 分支前确认目标分支包含已部署的包。
+  Codex 角色使用普通文件副本，源文件变更后需重新部署。
+- **失败与幂等性**：部署无自动全局回滚机制，执行失败会保留已完成修改；排除报错原因后重新预览，再执行 `--apply`。
+
+### 获取仓库
+
+仓库可克隆到任意目录，以下使用 `~/src/dotfiles`；后续命令均在仓库根目录执行。
 
 ```sh
 git clone https://github.com/codeExpert666/dotfiles.git ~/src/dotfiles
 cd ~/src/dotfiles
 ```
 
-### 安装依赖并部署
+### 部署方案与执行
 
-bootstrap 准备软件和插件、部署配置，最后运行诊断。选择适合的 profile：
+根据当前机器状态与需求选择适合的部署方案：
 
-| Profile | 准备范围 |
-| --- | --- |
-| `server` | 命令行环境与 terminfo 工具，适合服务器 |
-| `desktop` | 额外准备 Ghostty、IosevkaTerm Nerd Font 和 Sarasa Term SC |
+#### 方案 A：完整环境准备与部署（推荐全新机器）
 
-profile 控制软件和字体，配置包按平台选择；`server` 也部署 Ghostty 配置。
-远程服务器的字体应安装在本地终端客户端。桌面机器将下面两条命令中的值改为 `desktop`。
+bootstrap 准备系统依赖与运行时工具链、部署配置，最后自动运行健康诊断。选择适合的 profile：
+
+| Profile   | 准备范围                                                       | 适用场景                                     |
+| --------- | -------------------------------------------------------------- | -------------------------------------------- |
+| `server`  | 命令行环境、terminfo 终端定义及基础配置                        | 服务器或远程环境（字体安装在本地终端客户端） |
+| `desktop` | 额外准备 Ghostty、IosevkaTerm Nerd Font 和 Sarasa Term SC 字体 | 本地桌面机器（macOS / Ubuntu Desktop）       |
+
+profile 控制软件和字体的安装范围，配置包链接则按操作系统平台选择；`server` 同样会部署 Ghostty 基础配置，以支持终端定义与 SSH 跨端集成。桌面机器将命令中的 profile 参数改为 `desktop`：
 
 ```sh
 bash scripts/bootstrap.sh --dry-run --profile server
 bash scripts/bootstrap.sh --apply --profile server
 ```
 
-### 仅部署配置
+#### 方案 B：仅部署配置（已有软件与插件时）
 
-软件和插件已准备好时，用 deploy 建立配置链接。它需要 GNU Stow（支持 `--no-folding`）
-和 Git（支持 `--fixed-value`），不安装依赖。
+软件和插件已具备时，使用 deploy 建立配置符号链接，**不安装任何系统软件与依赖**。它需要预装 GNU Stow（支持 `--no-folding`）和 Git（支持 `--fixed-value`）：
 
 ```sh
 bash scripts/deploy.sh --dry-run
@@ -49,7 +83,7 @@ bash scripts/deploy.sh --apply
 
 ### 部署后检查
 
-重新打开终端后检查环境。bootstrap 已自动运行适用的检查；仅部署配置后或日常排查时可手动执行：
+重新打开终端后检查环境。bootstrap 阶段已自动运行适用的检查；仅部署配置后或日常排查时可手动执行：
 
 ```sh
 bash scripts/doctor.sh
@@ -59,14 +93,7 @@ bash scripts/doctor.sh --only zsh --only nvim --runtime
 `FAIL` 表示失败，`WARN` 需要核实，`SKIP` 表示该项未验证；退出码 0 仍可能包含后两者。
 检查范围见[doctor 说明](scripts/README.md#doctor-检查与证据)。
 
-### 部署前须知
-
-- HOME 与四个 XDG 路径使用默认布局；不要导出 `ZDOTDIR`，由受管 `~/.zshenv` 设置。
-- 公共父目录保持真实目录。旧入口、个人文件或 Stow 环境规则发生冲突时，脚本会保留内容并停止；
-  按预览提示迁移后再试，完整条件见 `bash scripts/deploy.sh --help`。
-- 配置链接依赖仓库源文件，请保留仓库；切换分支前确认目标分支包含已部署的包。
-  Codex 角色使用普通副本，源文件改动后需重新部署。
-- 应用失败会保留已完成的修改。排除原因后重新预览，再执行 `--apply`。
+完成健康检查后，进入[个人配置](#个人配置)完成 Git 身份与环境收尾设置。
 
 ## 个人配置
 
@@ -96,7 +123,7 @@ chsh -s "$(command -v zsh)"
 本机交互设置放在 `~/.config/zsh/local.zsh`，登录环境放在 `~/.config/zsh/local.zprofile`；
 这两个文件不纳入仓库，doctor 会检查其语法。
 
-`Ctrl-R` 打开 Atuin 历史搜索，`Ctrl-T` 打开 fzf，`z`/`zi` 通过 zoxide 跳转目录。
+`Ctrl-R` 打开 Atuin 历史搜索，`Ctrl-T` 打开 fzf 路径查找，`z`/`zi` 通过 zoxide 跳转目录。
 原生 Zsh 历史保存在 `~/.local/state/zsh/history`，macOS Terminal 的额外会话保存与恢复已禁用。
 Atuin 默认关闭自动同步，bootstrap 不导入历史或登录账户；需要时手动执行：
 
@@ -107,26 +134,7 @@ atuin login && atuin sync
 
 登录后仍需手动运行 `atuin sync` 同步。
 
-## 受管配置
-
-顶层配置目录通常是 Stow 包，包内路径对应 HOME；`codex` 由部署脚本单独复制。
-
-| 包 | 部署入口（相对 HOME） | 内容 |
-| --- | --- | --- |
-| [zsh](zsh) | `.zshenv`、`.config/zsh/` | 补全、语法高亮、历史搜索与目录跳转 |
-| [nvim](nvim) | `.config/nvim/` | LazyVim，Bash、Zsh 与 Markdown 编辑 |
-| [git](git) | `.config/git/config.shared` | 共享别名、快进拉取、delta 与 zdiff3 |
-| [ghostty](ghostty) | `.config/ghostty/config.ghostty` | 字体、主题、透明度、剪贴板与 SSH 集成 |
-| [ghostty-macos](ghostty-macos) | `.config/ghostty/platform.ghostty` | macOS 背景模糊、光标着色器、快捷终端与 Option 键 |
-| [lazygit](lazygit) | `.config/lazygit/config.yml` | delta 差异渲染，按 `e` 调用 Neovim |
-| [starship](starship) | `.config/starship.toml` | Tokyo Night 提示符，SSH 下显示 user@host |
-| [atuin](atuin) | `.config/atuin/config.toml` | 本地历史搜索与疑似凭据过滤 |
-| [shuck](shuck) | `.config/shuck/shuck.toml` | 命令行与语言服务器共用的 Zsh 格式规则 |
-| [vim](vim) | `.vimrc` | 后备编辑器，状态使用 XDG state |
-| [skills](skills) | `.agents/skills/`、`.claude/skills/` | 按客户端声明入口，共用技能源文件 |
-| [codex](codex) | `.codex/agents/` | Codex 执行代理 `sol_worker` 的普通副本 |
-
-## 可选扩展
+## 可选扩展：Multipass 开发机
 
 [Multipass Ubuntu 开发机](multipass/README.md)在 Apple Silicon Mac 上创建独立虚拟机，
 配置 SSH，并从指定远程提交运行客户机内的核心 server bootstrap。创建、日常使用、

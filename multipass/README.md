@@ -1,106 +1,54 @@
 # Multipass Ubuntu 开发机
 
-本扩展在 Apple Silicon Mac 上创建独立的 Ubuntu arm64 虚拟机、配置 SSH，并从指定远程
-提交运行客户机内的 `bootstrap.sh --profile server`。在已有机器上部署终端环境，直接使用
-[核心脚本](../scripts/README.md)即可。
+本扩展在 Apple Silicon Mac 上创建独立的 Ubuntu arm64 虚拟机、自动配置 SSH 接入，并从指定的远程提交运行客户机内的 `bootstrap.sh --profile server`。在已有机器上部署终端环境，直接使用[核心脚本](../scripts/README.md)即可。
 
-客户机用户为 `ubuntu`，HOME 固定为 `/home/ubuntu`，项目目录固定为 `/home/ubuntu/workspace`，
-不挂载宿主目录，也不支持自定义这两个路径。`multipass/` 保存 VM 声明和 cloud-init 模板，
-不作为 Stow 包部署。
+客户机用户为 `ubuntu`，HOME 固定为 `/home/ubuntu`，项目目录固定为 `/home/ubuntu/workspace`。本扩展遵循**严格的安全隔离与非破坏性边界**：不挂载宿主目录（两者路径亦不支持自定义），宿主私钥绝不传入虚拟机，不接管同名非受管实例，所有变更均提供预览（`--dry-run`）且支持安全幂等重试。`multipass/` 目录保存 VM 声明与 cloud-init 模板，不作为 GNU Stow 包部署。
+
+```mermaid
+flowchart TD
+    subgraph Host["宿主机 macOS (Apple Silicon)"]
+        CLI["scripts/multipass.sh"] --> Preflight["环境与配置预检"]
+        Preflight --> HostCheck["Multipass 探测与安装/升级"]
+        HostCheck --> Launch["Multipass launch (cloud-init)"]
+        SSHProxy["ssh-proxy.py (动态 IP 解析)"] -.->|管理通道与 SSH| Guest
+    end
+
+    subgraph Guest["客户机 Ubuntu arm64 (ubuntu)"]
+        Launch --> CloudInit["cloud-init: 系统更新与依赖安装"]
+        CloudInit --> RebootCheck{"内核需要重启?"}
+        RebootCheck -- 是 --> Reboot["自动重启并核验 boot ID"]
+        RebootCheck -- 否 --> GitClone["Git 检出固定提交仓库"]
+        Reboot --> GitClone
+        GitClone --> GuestBootstrap["bootstrap.sh --profile server"]
+        GuestBootstrap --> Finalize["配置 Zsh 与个人 Git 身份"]
+        Finalize --> Verified["doctor.sh 最终环境验收"]
+    end
+```
 
 ## 宿主机要求与首次创建
 
-以普通用户在 macOS 15+ Apple Silicon 上运行，准备 Bash 3.2+、Python 3.9+、Git、curl、
-OpenSSH 和可访问官方软件源及公共 HTTPS 仓库的网络。入口还使用 macOS 的 `pkgutil`、
-`sudo`、`/usr/bin/nc`。HOME 与 `~/.ssh` 须为已存在的真实目录，HOME 为绝对路径；
-四个 XDG 变量须未设置、为空或直接指向 HOME 下的默认目录。
+### 宿主机环境与工具要求
 
-Multipass 缺失或低于[要求版本](host-releases.json)时，应用模式会安装或升级官方 pkg，
-可能需要前台 sudo 认证。预览不安装软件、不创建实例。
+运行入口需满足以下宿主环境约束：
+
+- **硬件与操作系统**：Apple Silicon Mac，运行 macOS 15+，以普通用户身份运行（禁止以 root 运行）。
+- **工具链依赖**：准备 Bash 3.2+、Python 3.9+、Git、curl、OpenSSH；脚本还会调用 macOS 原生命令 `pkgutil`、`sudo` 及 `/usr/bin/nc`（用于 SSH ProxyCommand）。
+- **网络访问**：网络须可正常访问 Canonical 官方软件源及公共 HTTPS Git 仓库。
+- **路径与环境变量**：`$HOME` 与 `~/.ssh` 必须为已存在的真实绝对路径目录（不得为符号链接）；四个 XDG 变量（`XDG_CONFIG_HOME`、`XDG_DATA_HOME`、`XDG_STATE_HOME`、`XDG_CACHE_HOME`）须未设置、为空或直接指向 `$HOME` 下的默认子目录。
+- **Multipass 引擎管理**：若宿主机未安装 Multipass 或版本低于[要求版本](host-releases.json)，应用模式（`--apply`）会自动下载校验官方 pkg 并调用 `sudo` 安装或升级；预览模式（`--dry-run`）绝不修改宿主软件环境，也不创建实例。
 
 ### 准备 SSH 身份
 
-在宿主机准备专用、带密码短语的密钥，并解锁加入 ssh-agent；已有专用密钥可直接复用。
-脚本接收普通文件形式的绝对公钥路径，要求 agent 中有对应身份；私钥留在宿主机。
+在宿主机准备专用的 Ed25519 密钥（建议设置密码短语），并解锁添加到 `ssh-agent` 中；若已有专用密钥可直接复用。脚本仅读取普通文件形式的公钥绝对路径，要求 agent 中存在匹配的身份凭证；私钥始终保留在宿主机：
 
 ```sh
 ssh-keygen -t ed25519 -a 100 -f ~/.ssh/id_ed25519_multipass
 ssh-add ~/.ssh/id_ed25519_multipass
 ```
 
-### 选择提交并创建
+### 预设个人配置（可选但推荐）
 
-以下命令在宿主机仓库根目录执行。将 `<40位SHA>` 替换为远程可获取的完整小写提交 SHA；
-创建后固定该提交，不自动跟随 `main`。
-
-```sh
-git ls-remote https://github.com/codeExpert666/dotfiles.git refs/heads/main
-bash scripts/multipass.sh create --dry-run --ref '<40位SHA>' \
-  --ssh-public-key "$HOME/.ssh/id_ed25519_multipass.pub"
-bash scripts/multipass.sh create --apply --ref '<40位SHA>' \
-  --ssh-public-key "$HOME/.ssh/id_ed25519_multipass.pub"
-```
-
-[默认值](defaults.json)为 `ubuntu-dev`、Ubuntu 24.04 LTS、4 CPU、8 GiB 内存和 40 GiB 磁盘。
-选择另一版镜像或名称时，在预览和应用命令中同时增加 `--image 26.04 --name ubuntu-dev-2604`；
-资源可用 `--cpus`、`--memory`、`--disk` 调整，内存和磁盘接受整数 `M`/`G`。
-应用前检查宿主磁盘余量，不接管同名非受管实例；完整选项见 `create --help`。
-
-创建依次完成系统更新与首次启动验收、必要的重启、身份与 SSH 配置、仓库检出和核心
-bootstrap。首次更新较慢时，可按[进度与记录](#进度与记录)定位当前步骤。
-bootstrap 由普通 `ubuntu` 用户运行，按需认证 sudo；成功后将登录 Shell 设为 Zsh。
-
-## 日常使用
-
-以下示例均在宿主机执行，将 `ubuntu-dev` 换成实际实例名；脚本命令在仓库根目录执行。
-
-### 连接与检查
-
-```sh
-ssh ubuntu-dev
-bash scripts/multipass.sh check --name ubuntu-dev
-bash scripts/multipass.sh check --name ubuntu-dev --runtime
-```
-
-`bash scripts/multipass.sh ssh --name ubuntu-dev` 也会进入普通 SSH 会话；端口转发可用
-`ssh -L 8080:localhost:8080 ubuntu-dev`。`check` 只查询，不启动或修复实例；
-`--runtime` 在客户机运行[受控诊断](../scripts/README.md#doctor-检查与证据)。
-
-### 重新配置或更新提交
-
-创建已完成的实例使用 `provision`。省略 `--ref` 会复用保存的目标提交；更新时将新 SHA
-同时传给预览和应用命令：
-
-```sh
-bash scripts/multipass.sh provision --dry-run --name ubuntu-dev --ref '<新40位SHA>'
-bash scripts/multipass.sh provision --apply --name ubuntu-dev --ref '<新40位SHA>'
-```
-
-重新配置前会检查仓库 origin、已跟踪与未跟踪改动，以及 bootstrap 锁；冲突时保留现场。
-创建中断后的续跑规则见[失败恢复](#失败处理与恢复边界)。
-
-### 停止与退役
-
-管理通道正常、来宾任务空闲时，使用原生 `multipass stop <name>` 和 `multipass start <name>`。
-`Starting`、`Restarting` 等异常状态先按下文排查。
-
-永久结束受管实例使用 destroy。应用会删除客户机数据，先保存需要的内容并核对预览：
-
-```sh
-bash scripts/multipass.sh destroy --dry-run --name ubuntu-dev
-bash scripts/multipass.sh destroy --apply --name ubuntu-dev
-```
-
-它核对身份后仅删除指定实例、清理对应 SSH 文件，将声明、回执和日志移至 `retired/`。
-停止的实例会先启动以核对身份；已标记 `Deleted` 的实例须先 `multipass recover <name>`。
-若已手动 purge，destroy 只收尾宿主状态；清理失败可在排除原因后重跑。
-它不安装或升级 Multipass，不运行无实例名的 purge，也不删除用户密钥；受管文件有改动时
-保留冲突文件和状态。
-
-## 配置、目录与状态
-
-参数按命令行、`~/.config/dotfiles-multipass/config.json`、[默认值](defaults.json)的顺序解析。
-已有实例的镜像、资源和仓库来源以创建声明为准，更新提交使用 `provision --ref`。
+参数解析遵循 **命令行选项 > `~/.config/dotfiles-multipass/config.json` > [默认值](defaults.json)** 的优先级。建议在首次创建前编写配置文件，这样可避免在每次命令中重复输入长公钥路径，并**预先设定客户机内的 Git 身份**（该选项仅支持配置文件传入，无 CLI 命令行参数）：
 
 ```json
 {
@@ -113,113 +61,231 @@ bash scripts/multipass.sh destroy --apply --name ubuntu-dev
 }
 ```
 
-公钥路径和身份示例须替换。`git_identity` 可省略；提供时姓名与邮箱须同时填写，
-bootstrap 成功后写入客户机个人 Git 入口，不改受管仓库文件。不提供时不读取宿主 Git 身份。
-直接运行核心 bootstrap 不设置登录 Shell 或 Git 身份，见[个人配置](../README.md#个人配置)。
+> [!NOTE]
+> `ssh_public_key` 须替换为本机的真实绝对路径。`git_identity` 可选，若提供则姓名与邮箱须同时填写；在客户机 bootstrap 成功后自动写入客户机的个人 Git 配置（`~/.config/git/config`），不触动受管仓库文件。若不提供，脚本不会读取宿主机的 Git 身份。直接在已有环境运行核心 bootstrap 不会自动设置登录 Shell 与 Git 身份，详见[个人配置](../README.md#个人配置)。
 
-| 所属位置 | 路径 | 内容 |
-| --- | --- | --- |
-| 宿主 HOME | `~/.config/dotfiles-multipass/config.json` | 个人参数 |
-| 宿主 HOME | `~/.local/state/dotfiles-multipass/instances/<name>/` | `declaration.json`、`receipt.json`、user-data、日志与锁 |
-| 宿主 HOME | `~/.local/state/dotfiles-multipass/retired/<name>-<uuid>/` | 退役后保留的声明、回执、日志与记录 |
-| 宿主 HOME | `~/.cache/dotfiles-multipass/` | 校验过的官方 pkg |
-| 宿主 HOME | `~/.ssh/config`、`~/.ssh/dotfiles-multipass/` | 受管 Include、Host 片段与专用 known_hosts |
-| 宿主 HOME | `~/.local/share/dotfiles-multipass/ssh-proxy.py` | 哈希管理的地址解析助手 |
-| 客户机 HOME | `~/.dotfiles`、`~/workspace` | 固定提交的仓库和项目目录 |
-| 客户机 HOME | `~/.config/git/config`、`~/.local/state/dotfiles-bootstrap/` | 个人 Git 入口及核心 bootstrap 日志、锁 |
+### 选择提交并创建
 
-宿主 SSH config 顶部只加入一次受管 Include，首次修改前备份原文；Host 片段固定 `ubuntu`、
-严格主机密钥检查和专用 known_hosts，连接时查询当前 IPv4。状态目录默认 0700，记录默认
-0600，不记录私钥或密码短语。主机公钥变化时须核实身份，不能清空信任记录或关闭严格检查。
+以下命令均在宿主机仓库根目录执行。将 `<40位SHA>` 替换为远程仓库中可获取的完整小写 Git 提交 SHA；创建完成后开发机将固定在该提交，不会自动跟随 `main` 分支变动。
+
+- **使用配置文件的推荐方式**（若已配置 `config.json`）：
+
+  ```sh
+  git ls-remote https://github.com/codeExpert666/dotfiles.git refs/heads/main
+  bash scripts/multipass.sh create --dry-run --ref '<40位SHA>'
+  bash scripts/multipass.sh create --apply --ref '<40位SHA>'
+  ```
+
+- **全命令行参数方式**（无需预先创建 `config.json`）：
+
+  ```sh
+  bash scripts/multipass.sh create --dry-run --ref '<40位SHA>' \
+    --ssh-public-key "$HOME/.ssh/id_ed25519_multipass.pub"
+  bash scripts/multipass.sh create --apply --ref '<40位SHA>' \
+    --ssh-public-key "$HOME/.ssh/id_ed25519_multipass.pub"
+  ```
+
+[默认资源规格](defaults.json)为名称 `ubuntu-dev`、Ubuntu 24.04 LTS、4 核 CPU、8 GiB 内存以及 40 GiB 虚拟磁盘。
+若需自定义，可在预览和应用命令中同时传入覆盖参数：
+
+- **指定镜像与实例名**：`--image 26.04 --name ubuntu-dev-2604`
+- **调整硬件规格**：`--cpus 8 --memory 16G --disk 60G`（内存与磁盘接受正整数 `M` 或 `G`）
+- **指定远程仓库**：`--repo-url https://github.com/your-fork/dotfiles.git`
+
+应用模式在执行前会自动检查宿主机磁盘余量（要求剩余空间不少于虚拟机磁盘大小 + 5 GiB），并拒绝接管同名但非受管的既有实例。完整选项可查看 `bash scripts/multipass.sh create --help`。
+
+创建流程会依次完成系统更新与首次启动验收、必要的内核重启、身份与 SSH 配置、仓库检出及核心 server bootstrap。bootstrap 由客户机内的普通用户 `ubuntu` 执行，按需申请 sudo 权限；成功后自动将用户默认登录 Shell 切换为 Zsh。
+
+## 日常使用
+
+以下命令均在宿主机执行，将 `ubuntu-dev` 替换为实际的实例名称；脚本命令在仓库根目录运行。
+
+### 连接与检查
+
+```sh
+# 1. 直接通过 OpenSSH 别名连接
+ssh ubuntu-dev
+
+# 2. 或使用脚本包装入口（预先核验实例运行状态）
+bash scripts/multipass.sh ssh --name ubuntu-dev
+
+# 3. 查看实例状态摘要（输出 JSON 格式）
+bash scripts/multipass.sh check --name ubuntu-dev
+
+# 4. 在客户机内运行受控运行诊断
+bash scripts/multipass.sh check --name ubuntu-dev --runtime
+```
+
+- **SSH 别名机制**：首次 `create --apply` 成功后，脚本会自动在宿主机 `~/.ssh/config` 顶部注入一次受管 `Include` 指令，并生成指向专用代理脚本 `ssh-proxy.py` 的 Host 配置。直接执行 `ssh ubuntu-dev` 会动态解析该实例当前的 IPv4 地址，要求宿主机 `ssh-agent` 中保留有已解锁的专用密钥。
+- **端口转发**：支持标准 SSH 语法，例如 `ssh -L 8080:localhost:8080 ubuntu-dev`。
+- **状态检查**：`check` 属于只读探测，不会启动已停止的实例，也不会修复状态。它校验声明一致性、客户机内部归属标记（`/var/lib/dotfiles-multipass/instance.json`）及 Git HEAD 状态；附加 `--runtime` 会流式执行[受控诊断](../scripts/README.md#doctor-检查与证据)，并在出现异常时返回非零退出码。
+- **客户机内日常操作**：登录客户机后，可在 `~/workspace` 开展开发工作；如需在客户机内自检环境，可直接运行 `~/.dotfiles/scripts/doctor.sh`。
+
+### 重新配置或更新提交
+
+针对已创建完成的实例，使用 `provision` 子命令进行重新配置或切换配置版本。省略 `--ref` 时会自动复用已保存的目标提交；更新提交时将新 40 位 SHA 同时传递给预览和应用命令：
+
+```sh
+bash scripts/multipass.sh provision --dry-run --name ubuntu-dev --ref '<新40位SHA>'
+bash scripts/multipass.sh provision --apply --name ubuntu-dev --ref '<新40位SHA>'
+```
+
+重新配置前，脚本会严格校验客户机仓库的 origin 地址、检查是否存在未提交的跟踪或未跟踪修改，并确认客户机 bootstrap 锁处于空闲状态；检测到冲突时立即停止并保留现场。若首次创建过程意外中断，请遵循[失败处理与恢复边界](#失败处理与恢复边界)中的续跑规则。
+
+### 停止与退役
+
+- **日常启停**：在管理通道正常且客户机任务空闲时，直接使用 Multipass 原生命令：
+
+  ```sh
+  multipass stop ubuntu-dev
+  multipass start ubuntu-dev
+  ```
+
+  若实例处于 `Starting`、`Restarting` 等非稳态，切勿作为正常停止状态处理，先按故障排查指引定位。
+
+- **永久销毁与退役（destroy）**：当需要永久移除受管实例时使用 `destroy`。该操作会彻底删除客户机数据，执行前请先核对预览输出并备份重要代码：
+
+  ```sh
+  bash scripts/multipass.sh destroy --dry-run --name ubuntu-dev
+  bash scripts/multipass.sh destroy --apply --name ubuntu-dev
+  ```
+
+`destroy` 的安全保证与清理机制包括：
+
+1. **核实实例归属**：销毁前必须先通过管理命令或安全通道核验客户机内部的创建 UUID、`machine_id` 及 cloud instance-id。若实例处于停止状态，会临时启动以校验身份；已被标记为 `Deleted` 的实例须先执行 `multipass recover <name>`。
+2. **定向清理 SSH 配置**：移除该实例对应的 Host 片段与 dedicated `known_hosts`。**当且仅当所有受管实例均被销毁后**，才会自动从宿主机 `~/.ssh/config` 中移除 `Include` 行并清理 `ssh-proxy.py` 助手。
+3. **元数据归档退役**：将声明（`declaration.json`）、回执（`receipt.json`）和执行日志移入 `retired/` 目录供日后审计。
+4. **非破坏性边界**：若已手动执行过 `multipass purge`，`destroy` 仅收尾清理宿主机状态；它不升级 Multipass、不执行无实例名的全量 purge、绝不删除用户私钥；若检测到受管 SSH 文件被外部篡改，会拒绝操作并保留冲突文件。
+
+## 配置、目录与状态
+
+### 状态目录与文件布局
+
+受管实例的所有配置、运行回执、日志和 SSH 凭据在宿主机与客户机中具有清晰的定位与权限控制：
+
+| 所属位置       | 路径                                                         | 内容与职责                                                                    |
+| -------------- | ------------------------------------------------------------ | ----------------------------------------------------------------------------- |
+| 宿主机 `$HOME` | `~/.config/dotfiles-multipass/config.json`                   | 个人默认参数与 Git 身份（可选）                                               |
+| 宿主机 `$HOME` | `~/.local/state/dotfiles-multipass/instances/<name>/`        | 当前实例的 `declaration.json`、`receipt.json`、`user-data.yaml`、日志及并发锁 |
+| 宿主机 `$HOME` | `~/.local/state/dotfiles-multipass/retired/<name>-<uuid>/`   | 实例退役后归档保存的历史声明、回执、操作日志与退役记录                        |
+| 宿主机 `$HOME` | `~/.cache/dotfiles-multipass/`                               | 校验过 SHA-256 的官方 Multipass 安装 pkg 缓存                                 |
+| 宿主机 `$HOME` | `~/.ssh/config`、`~/.ssh/dotfiles-multipass/`                | 受管 Include、各实例 Host 配置片段与专用 `known_hosts`                        |
+| 宿主机 `$HOME` | `~/.local/share/dotfiles-multipass/ssh-proxy.py`             | 经 SHA-256 哈希校验与受管更新的动态地址解析助手                               |
+| 客户机 `$HOME` | `~/.dotfiles`、`~/workspace`                                 | 固定提交检出的配置仓库与独立开发项目目录                                      |
+| 客户机 `$HOME` | `~/.config/git/config`、`~/.local/state/dotfiles-bootstrap/` | 个人 Git 身份入口及核心 bootstrap 执行日志、原子目录锁                        |
+
+### 安全隔离与配置完整性
+
+- **权限控制**：状态目录默认设为 `0700`，记录文件与声明默认为 `0600`；严禁在日志或回执中记录任何私钥明文或密码短语。
+- **SSH 配置文件保护**：宿主 `~/.ssh/config` 顶部仅添加一次受管 `Include` 指令，并带有专有所有权标记注释；在首次修改前会自动创建备份副本（`config.dotfiles-multipass.<uuid>.bak`）。
+- **严格的主机密钥校验**：各实例生成的 Host 片段固定登录用户为 `ubuntu`，启用 `StrictHostKeyChecking yes`，并将固定的 Ed25519 主机公钥记录在专用 `known_hosts` 中。若客户机主机公钥发生意外变化，必须人工核实实例身份，脚本绝不自动清空信任记录或放宽检查级别。
 
 ## 进度与记录
 
-计划、进度和错误写入 stderr；`check` 的状态摘要写入 stdout JSON，`ssh` 进入交互会话。
-`STAGE` 表示主阶段，`STEP` 表示具体动作；`RUN`、`OK`、`SKIP`、`FAIL` 表示开始、完成、
-复用和失败。`STEP WAIT` 每 30 秒显示等待时间与命令上限，不代表 apt 下载或 cloud-init
-内部进度。`CHILD BEGIN/END` 之间直接转发客户机 bootstrap 输出。
+### 执行阶段与状态标记
 
-预检只显示在终端；进入应用阶段后，实例目录中的记录负责保留执行证据：
+命令的执行计划、进度与诊断信息均输出至 stderr；`check` 命令的状态摘要以格式化 JSON 输出至 stdout；`ssh` 命令直接交由交互式会话接管。
 
-| 记录 | 用途 |
-| --- | --- |
-| `receipt.json` 的 `stages`、`current_step` | 各阶段最近结果和执行位置 |
-| `attempts`、`failed_at` | 每次尝试的完整阶段结果与失败位置 |
-| `logs/<尝试 ID>/<阶段>.log` | 对应尝试的命令输出；旧版平铺日志仍保留原位 |
-| 回执中的提交、身份、镜像、版本和 doctor 计数 | 核对目标与实际运行环境 |
+控制台日志采用统一的前缀标识：
 
-客户机 bootstrap 的安装规则和日志解释见[核心脚本说明](../scripts/README.md#bootstrap-准备完整环境)。
+- `STAGE`：标识主要生命周期阶段；
+- `STEP`：标识阶段内部的具体操作步骤；
+- `RUN` / `OK` / `SKIP` / `FAIL`：分别表示步骤的开始、成功完成、条件复用（跳过）及执行失败；
+- `STEP WAIT`：针对耗时操作（如网络下载、包安装），每 30 秒打印已耗时与超时上限，提示后台仍处于活跃状态；
+- `CHILD BEGIN` / `CHILD END`：在此区间内直接原样转发客户机执行 `bootstrap.sh` 的完整输出流。
+
+创建与配置流程包含 10 个标准的生命周期主阶段：
+
+| 阶段名 (`STAGE`)    | 职责说明                                                            |
+| ------------------- | ------------------------------------------------------------------- |
+| `host`              | 预检宿主环境，按需安装或升级 Multipass 官方包并核验守护进程         |
+| `launch`            | 校验 Ubuntu 镜像可用性，生成 cloud-init 配置并启动虚拟机实例        |
+| `cloud-init`        | 监控系统首次启动与初始包升级，核验必要的内核重启                    |
+| `guest`             | 传输临时助手脚本，验证客户机所有权标记、系统版本与包管理器锁状态    |
+| `ssh`               | 读取客户机 Ed25519 主机密钥，发布宿主 SSH 配置并验证互通登录        |
+| `repository`        | 在客户机内克隆或校验目标 Git 仓库，并签出到指定的固定提交 SHA       |
+| `bootstrap-preview` | 在客户机内执行 `bootstrap.sh --dry-run --profile server` 离线预检   |
+| `bootstrap`         | 在客户机内执行 `bootstrap.sh --apply --profile server` 准备完整环境 |
+| `finalize`          | 配置客户机用户登录 Shell（Zsh）并写入可选的个人 Git 身份            |
+| `verified`          | 重新核对客户机环境状态，收集已安装工具版本与 doctor 诊断结果        |
+
+### 证据保留与日志记录
+
+终端仅展示当前运行进度。进入应用阶段后，实例目录（`~/.local/state/dotfiles-multipass/instances/<name>/`）会持久化保留完整的执行证据：
+
+| 记录文件 / 字段                                   | 用途与排错价值                                                        |
+| ------------------------------------------------- | --------------------------------------------------------------------- |
+| `receipt.json` 中的 `stages`、`current_step`      | 记录各阶段的最新执行状态（`ok` / `fail`）与当前执行步骤               |
+| `receipt.json` 中的 `attempts`、`failed_at`       | 记录各次重试尝试的完整历史、失败时间点与具体步骤                      |
+| `logs/<尝试ID>/<阶段>.log`                        | 对应尝试各阶段命令的完整 stdout/stderr 输出（旧版平铺日志仍保留原位） |
+| `receipt.json` 中的提交、UUID、镜像与 doctor 计数 | 核对目标声明与实际客户机运行环境是否完全一致                          |
+
+客户机内 bootstrap 的详细安装逻辑与日志排查说明，参见[核心脚本说明](../scripts/README.md#bootstrap-准备完整环境)。
 
 ## 失败处理与恢复边界
 
 ### 先定位失败和实例状态
 
-失败保留实例及已完成修改。先看回执和对应日志，再用 `multipass list`、`multipass info <name>`
-核对管理状态；宿主 daemon 日志位于 `/Library/Logs/Multipass/multipassd.log`。
-launch 超时还须核对客户机实际启动与 cloud-init 结果。
+执行失败时，脚本始终保留虚拟机实例及已完成的修改，绝不自动回滚或直接销毁。排查时应先查看 `receipt.json` 及对应阶段日志，再在宿主机通过原生命令核对 Multipass 运行状态；宿主守护进程系统日志位于 `/Library/Logs/Multipass/multipassd.log`。若 launch 阶段超时，还须核实客户机内核启动与 cloud-init 的实际执行情况。
 
-| 状态 | 下一步 |
-| --- | --- |
-| `Running` | 核对身份、cloud-init 和任务状态后再续跑 |
-| `Stopped` / `Suspended` | `multipass start <name>`，等管理连接恢复后再续跑 |
-| `Starting` / `Restarting` / `Unknown` | 排查管理连接，不当作停止状态；`exec`、`shell` 可能隐式请求 start，不能作为纯查询 |
-| `Deleted` | 先 `multipass recover <name>` 恢复，再检查 |
-| 已缺失但仍有创建记录 | 保留旧声明与 SSH 信任；用 destroy 预览并退役旧身份后再创建，或换新名称，不自动同名重建 |
+| Multipass 状态                        | 诊断与下一步建议                                                                                             |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `Running`                             | 通过日志核对失败步骤；确认客户机身份、cloud-init 和任务处于空闲状态后再续跑                                  |
+| `Stopped` / `Suspended`               | 执行 `multipass start <name>`，等待管理连接就绪后选择对应命令续跑                                            |
+| `Starting` / `Restarting` / `Unknown` | 属于瞬态或通信异常，切勿当作已停止处理；避免调用 `exec` 或 `shell`（可能隐式触发启动）；排查 daemon 日志     |
+| `Deleted`                             | 实例已进入回收站，必须先执行 `multipass recover <name>` 恢复实例，再进行检查                                 |
+| 实例缺失但存在创建记录                | 保留旧声明与 SSH 信任记录；使用 `destroy` 预览并退役旧状态后再重新创建，或更换全新实例名称；禁止自动同名重建 |
 
 ### 管理恢复后选择续跑命令
 
-创建未完成时，保留声明、原提交和公钥，以原参数重跑 `create`；它复用实例、重新验收未完成
-阶段并继续配置，不重新指定仅供新实例使用的 `--creation-record`。首次启动阶段尚未成功时，
-`provision` 会拒绝执行；该阶段通过后，重新配置或更新提交使用 `provision`。
-
-首次系统更新只在创建阶段执行。自动重启最多请求一次，限制跨 create 重试保留：
-`reboot_from` 记录请求前的 boot ID，只有身份一致、boot ID 已变化且无待重启标志时才写入
-`reboot_to`。`cloud-init/restart` 超时不代表来宾没有重启；续跑核验原请求，不发起第二次重启。
-
-管理不可用时，helper 清理只查询状态，不调用可能隐式启动实例的 exec；失败路径与原因
-保存为 `pending_helper_cleanup`，恢复后续跑并成功清理才移除。清理失败不覆盖原故障，也
-不能算完整成功；原失败 attempt 和日志始终保留。
+- **首次创建未完成时**：保留已有声明、初始提交 SHA 和公钥，以**完全相同的参数重新运行 `create`**。脚本会自动识别并复用既有实例，重新验收未完成的阶段并继续推进后续配置；在重试时切勿重新传入仅供全新实例使用的 `--creation-record`。
+- **首次启动边界约束**：若 `cloud-init` 阶段（首次启动验收与初始更新）尚未完全成功，执行 `provision` 会被明确拒绝。只有在该阶段成功通过后，后续的重新配置或提交升级才使用 `provision`。
+- **单次自动重启保护**：客户机的全量系统更新仅在首次创建阶段执行一次。系统若提示需重启，自动重启最多仅触发一次：`reboot_from` 记录触发前的 boot ID，只有在实例身份吻合、boot ID 已发生改变且待重启标志清除后才写入 `reboot_to`。`cloud-init/restart` 超时并不等同于客户机未发生重启；续跑时会核验先前请求的有效性，绝不发起第二次无意义重启。
+- **Helper 脚本安全清理**：若管理通道出现故障，helper 清理操作仅执行只读探测，绝不调用可能隐式启动虚拟机的 exec 命令。未完成的清理路径会暂存为 `pending_helper_cleanup`，待通道恢复并成功清理后移除。清理失败不会掩盖原始报错，原失败 attempt 与日志均完整保留。
 
 ### SSH 可达但管理状态异常
 
-正常 stop/start 适合健康的管理状态，Multipass 1.16.4 的普通关机路径会拒绝 `Restarting`。
-确需人工恢复时按以下顺序处理：
+当 Multipass 处于 `Starting`、`Restarting` 等异常状态，但客户机 SSH 仍然可连时，不可盲目执行强制操作（Multipass 1.16.4 的普通关机路径会拒绝 `Restarting`），应按以下顺序手动排查恢复：
 
-1. 保存声明、回执和日志，通过可信 SSH 核对创建 UUID、machine-id、cloud instance-id，
-   确认 apt/dpkg 与 bootstrap 空闲，并确认来宾工作可中断。
-2. 正常关闭来宾，确认 QEMU 退出且 Multipass 显示 `Stopped` 后再 start。
-3. 重验实例身份和管理连接；仍不一致时保留现场，进一步排查 daemon，避免循环重试。
+1. **保存现场并核验身份**：通过受信任的 SSH 连入客户机，核对 `/var/lib/dotfiles-multipass/instance.json` 中的 UUID、`/etc/machine-id` 及 cloud instance-id；确认 `apt`/`dpkg` 和 `bootstrap` 进程均处于空闲状态，确保任务可安全中断。
+2. **正常关闭并重启**：在客户机内执行安全关机（如 `sudo poweroff`），确认宿主机对应 QEMU 进程退出、Multipass 状态刷新为 `Stopped` 后，再执行 `multipass start <name>`。
+3. **核验证据与守护进程**：重新核对管理连接与实例身份；若状态仍不一致，保留现场排查宿主 daemon，切忌盲目循环重试。
 
-脚本不强制关机、不自动重启宿主 daemon，也不停止其他实例；只有显式 `destroy --apply`
-才永久删除核对过身份的受管实例。
+脚本绝不强制关闭电源、不自动重启宿主 daemon，也绝不干扰其他无关实例；仅当用户显式执行 `destroy --apply` 时，才会对经过严格身份比对的受管实例执行彻底销毁。
 
 ### 其他失败的处理
 
-- **锁或内容冲突**：宿主锁、来宾 bootstrap 锁及仓库改动须先核实。PID 缺失或无法确认的
-  遗留锁不能直接忽略，SSH 文件被修改时也保留现场，不并行启动第二份安装。
-- **就绪失败**：宿主安装后的版本与服务探测可重试 120 秒，版本不达标或驱动配置错误立即停止；
-  launch 后暂时不可达的 SSH 连接也最多等待 120 秒，cloud-init 自身失败不会按连接故障重试。
+- **并发锁与内容冲突**：遇到宿主机锁（`lock`、`host-install.lock`）、客户机 bootstrap 锁或 Git 仓库变动时，必须先人工确认进程状态。丢失 PID 或无法确定属主的遗留锁不可盲目忽略；受管 SSH 文件发生外部修改时同样保留现场并报错，严禁并行发起第二份安装任务。
+- **就绪探测与超时处理**：宿主机安装 Multipass 后的版本与服务探测最长重试 120 秒，若版本不符或驱动配置错误立即终止；launch 后的 SSH 可达性探测最长等待 120 秒，若是 cloud-init 自身执行报错，绝不误当成连接故障盲目重试。
 
 ## 维护与验收
 
-默认资源在 [defaults.json](defaults.json)，宿主安装来源在 [host-releases.json](host-releases.json)，
-初始化内容在 [cloud-init.yaml.tmpl](cloud-init.yaml.tmpl)。编排代码位于
-[scripts/multipass/](../scripts/multipass/)，[离线测试](../tests/README.md#multipass)验证命令和 VM 替身。
+### 编排源码与资源清单
 
-真实双版本验收须另行显式运行，不由 `tests/all.sh` 启动。准备前述 SSH 身份和远程提交后，
-在宿主机仓库根目录执行：
+- **虚拟机与安装声明**：默认资源在 [defaults.json](defaults.json)，宿主 Multipass 安装版本与 SHA-256 校验在 [host-releases.json](host-releases.json)，客户机初始化模板在 [cloud-init.yaml.tmpl](cloud-init.yaml.tmpl)。
+- **编排代码实现**：宿主控制逻辑位于 [scripts/multipass/](../scripts/multipass/)，涵盖运行器、主机探测、SSH 配置及客户机交互。
+- **离线回归验证**：[离线测试](../tests/README.md#multipass)通过命令替身和虚拟机模拟验证全量编排状态机与失败保护，不依赖真实 Multipass。
+
+### 真实双版本在线验收
+
+真实双镜像闭环验收需另行显式执行，不会由离线全量套件 `tests/all.sh` 自动触发。准备好专用 SSH 密钥和远程提交后，在宿主机仓库根目录运行：
 
 ```sh
+# 查看验收脚本支持的选项
 bash tests/multipass-live.sh --help
+
+# 启动双镜像完整验收测试
 bash tests/multipass-live.sh --ref '<40位SHA>' \
   --ssh-public-key "$HOME/.ssh/id_ed25519_multipass.pub"
 ```
 
-它依次验收 Ubuntu 24.04、26.04 的创建、受控诊断、重复配置及原生重启后的 SSH，每版结束
-时定向清理。报告默认保留在 `~/.local/state/dotfiles-multipass/reports/<时间戳>/`，也可用
-`--report-dir <绝对路径>` 指定尚不存在的目录；结论仅适用于运行时的提交和环境。
+该验收套件依次针对 Ubuntu 24.04 与 26.04 镜像进行全流程实测：包含实例创建、受控诊断、重复配置（provision）以及原生重启后的 SSH 联通性，并在每个版本测试结束后执行定向清理。
+验收报告默认保存在 `~/.local/state/dotfiles-multipass/reports/<时间戳>/` 中，亦可通过 `--report-dir <绝对路径>` 自定义输出位置；测试结论仅对运行时的指定提交与机器环境有效。
 
-清理必须同时匹配本次创建记录、宿主状态和客户机标记；锁占用或身份不符时保留实例。
-预先存在的同名实例或状态目录会被拒绝，个人密钥与宿主 Multipass 不删除。
-高级自动化可在全新名称上使用 `create --creation-record <绝对路径>`：文件须不存在、父目录
-须已存在，应用时在 launch 前独占记录名称与 UUID，供失败后的归属核对；预览不写入。
+### 自动化归属标记与清理机制
+
+在线验收与高级自动化依托严格的清理与所有权比对机制：
+
+- **三重所有权核验**：清理操作必须同时匹配当前创建记录、宿主机 Multipass 状态以及客户机内部的 instance marker；若存在锁占用或身份不匹配，坚决保留实例。
+- **冲突保护**：预先存在的同名实例或遗留状态目录将被拒绝；用户个人 SSH 密钥与宿主机 Multipass 软件始终不予删除。
+- **预占所有权记录（`--creation-record`）**：在无人值守的高级自动化流水线中，可在全新实例名上附加 `--creation-record <绝对路径>` 参数。该路径必须指向已存在目录下的尚不存在文件；在 `--apply` 执行且尚未调用 `launch` 之前，预先原子性写入实例名与生成的 UUID，专供异常中断后的归属追溯与安全清理；预览模式（`--dry-run`）不执行写入。
