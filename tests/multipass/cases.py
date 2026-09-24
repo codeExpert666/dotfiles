@@ -27,6 +27,7 @@ import ssh_proxy
 
 PUB = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG3Z+/i5KijOrBwCDnV+BYuzxq76WhXpuN4V7UZckucA"
 REF = "a" * 40
+RECONNECT_ERROR = "exec failed: ssh connection failed: 'Timeout connecting to 192.168.252.43'"
 
 
 def args(**overrides):
@@ -311,6 +312,18 @@ class HostPolicy(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertTrue(any(part.endswith("cloud-init-output.log") for part in calls[1]))
 
+    def test_timeout_connecting_is_only_a_transport_failure_with_multipass_context(self):
+        self.assertTrue(runtime.transient_guest_connection(
+            runtime.CommandFailure(["multipass", "exec"], 2, RECONNECT_ERROR)))
+        for error in (runtime.Failure(RECONNECT_ERROR),
+                      runtime.CommandFailure(["multipass", "exec"], 1, RECONNECT_ERROR),
+                      runtime.CommandFailure(["multipass", "exec"], 2,
+                                             "cloud-init failed: Timeout connecting to 192.168.252.43"),
+                      runtime.CommandFailure(["multipass", "exec"], 2,
+                                             "exec failed: ssh connection failed: Permission denied (publickey)")):
+            with self.subTest(error=str(error)):
+                self.assertFalse(runtime.transient_guest_connection(error))
+
     def test_cloud_init_retries_only_a_transient_guest_connection_failure(self):
         machine = runtime.Machine(Path(self.temp.name), "test", runtime.Runner())
         machine.path.mkdir(parents=True)
@@ -331,6 +344,28 @@ class HostPolicy(unittest.TestCase):
         self.assertTrue(all("status" in argv for argv in calls))
         sleep.assert_called_once()
         self.assertEqual(machine.receipt["cloud_init"]["extended_status"], "done")
+
+    def test_cloud_init_retries_timeout_connecting_without_failure_diagnostic(self):
+        machine = runtime.Machine(Path(self.temp.name), "test", runtime.Runner())
+        machine.path.mkdir(parents=True)
+        calls = []
+
+        def call(*argv, **_kwargs):
+            calls.append(argv)
+            if len(calls) == 1:
+                raise runtime.CommandFailure(["multipass", "exec"], 2, RECONNECT_ERROR)
+            return SimpleNamespace(stdout=json.dumps({"status": "done", "errors": []}))
+
+        machine.m = call
+        output = io.StringIO()
+        with mock.patch.object(runtime.time, "sleep") as sleep, redirect_stderr(output):
+            machine.cloud_wait()
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all("status" in argv for argv in calls))
+        sleep.assert_called_once()
+        self.assertIn("STEP RETRY", output.getvalue())
+        self.assertNotIn("STEP DIAG", output.getvalue())
+        self.assertEqual(machine.receipt["cloud_init"]["status"], "done")
 
     def test_cloud_init_connection_retry_has_a_deadline(self):
         machine = runtime.Machine(Path(self.temp.name), "test", runtime.Runner())
@@ -355,23 +390,25 @@ class HostPolicy(unittest.TestCase):
         self.assertEqual(clock[0], 11)
 
     def test_cloud_init_guest_error_text_is_not_a_transport_retry(self):
-        machine = runtime.Machine(Path(self.temp.name), "test", runtime.Runner())
-        calls = []
+        for reason in ("No route to host", "Timeout connecting to 192.168.252.43"):
+            with self.subTest(reason=reason):
+                machine = runtime.Machine(Path(self.temp.name), "test", runtime.Runner())
+                calls = []
 
-        def call(*argv, **_kwargs):
-            calls.append(argv)
-            if "status" in argv:
-                raise runtime.CommandFailure(["multipass", "exec"], 2,
-                                             "cloud-init task failed: No route to host")
-            return SimpleNamespace(stdout="guest cloud-init output")
+                def call(*argv, **_kwargs):
+                    calls.append(argv)
+                    if "status" in argv:
+                        raise runtime.CommandFailure(["multipass", "exec"], 2,
+                                                     f"cloud-init task failed: {reason}")
+                    return SimpleNamespace(stdout="guest cloud-init output")
 
-        machine.m = call
-        with mock.patch.object(runtime.time, "sleep") as sleep, \
-                self.assertRaises(runtime.CommandFailure):
-            machine.cloud_wait()
-        sleep.assert_not_called()
-        self.assertEqual(len(calls), 2)
-        self.assertIn("tail", calls[1])
+                machine.m = call
+                with mock.patch.object(runtime.time, "sleep") as sleep, \
+                        self.assertRaises(runtime.CommandFailure):
+                    machine.cloud_wait()
+                sleep.assert_not_called()
+                self.assertEqual(len(calls), 2)
+                self.assertIn("tail", calls[1])
 
     def test_reboot_retransfers_ephemeral_guest_helper_before_identity_probe(self):
         machine = runtime.Machine(Path(self.temp.name), "test", runtime.Runner())
@@ -386,6 +423,56 @@ class HostPolicy(unittest.TestCase):
         self.assertEqual(calls[:4], [("restart", "--timeout",
                                       str(runtime.DEFAULTS["timeouts"]["reboot"]), "test"),
                                      ("cloud_wait",), ("transfer_helper",), ("verify_guest",)])
+
+    def test_reboot_recovers_from_timeout_connecting_and_records_verified_boot_id(self):
+        machine = runtime.Machine(Path(self.temp.name), "test", runtime.Runner())
+        machine.path.mkdir(parents=True)
+        machine.m = mock.Mock(return_value=SimpleNamespace(stdout=""))
+        machine.cloud_wait = mock.Mock()
+        machine.transfer_helper = mock.Mock()
+        machine.verify_guest = mock.Mock(side_effect=(
+            runtime.CommandFailure(["multipass", "exec"], 2, RECONNECT_ERROR),
+            {"boot_id": "new-boot", "reboot_required": False}))
+        with mock.patch.object(runtime.time, "sleep") as sleep:
+            probe = machine.reboot_if_required({"boot_id": "old-boot", "reboot_required": True})
+        self.assertEqual(probe["boot_id"], "new-boot")
+        self.assertEqual(machine.m.call_count, 1)
+        self.assertEqual(machine.m.call_args.args[0], "restart")
+        self.assertEqual(machine.cloud_wait.call_count, 2)
+        self.assertEqual(machine.transfer_helper.call_count, 2)
+        self.assertEqual(machine.verify_guest.call_count, 2)
+        sleep.assert_called_once()
+        receipt = json.loads(machine.receipt_file.read_text())
+        self.assertEqual(receipt["reboot_from"], "old-boot")
+        self.assertEqual(receipt["reboot_to"], "new-boot")
+
+    def test_reboot_timeout_connecting_stops_at_configured_deadline(self):
+        machine = runtime.Machine(Path(self.temp.name), "test", runtime.Runner())
+        machine.path.mkdir(parents=True)
+        clock = [0]
+        calls = []
+
+        def call(*argv, **_kwargs):
+            calls.append(argv)
+            if argv[0] == "exec":
+                raise runtime.CommandFailure(["multipass", "exec"], 2, RECONNECT_ERROR)
+            return SimpleNamespace(stdout="")
+
+        machine.m = call
+
+        def advance(seconds):
+            clock[0] += seconds
+
+        with mock.patch.dict(runtime.DEFAULTS["timeouts"], {"reboot": 11}), \
+                mock.patch.object(runtime.time, "monotonic", side_effect=lambda: clock[0]), \
+                mock.patch.object(runtime.time, "sleep", side_effect=advance), \
+                self.assertRaisesRegex(runtime.Failure, "management channel did not recover"):
+            machine.reboot_if_required({"boot_id": "old-boot", "reboot_required": True})
+        self.assertEqual(clock[0], 11)
+        self.assertEqual(sum(argv[0] == "restart" for argv in calls), 1)
+        self.assertEqual(sum(argv[0] == "exec" for argv in calls), 4)
+        self.assertEqual(machine.receipt["reboot_from"], "old-boot")
+        self.assertNotIn("reboot_to", machine.receipt)
 
     def test_restart_timeout_is_recorded_as_restart_step_after_cloud_init_done(self):
         machine = runtime.Machine(Path(self.temp.name), "test", runtime.Runner())

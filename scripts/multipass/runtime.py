@@ -367,8 +367,8 @@ def transient_guest_connection(exc):
     if "ssh connection failed" not in output and "failed to connect:" not in output:
         return False
     return any(reason in output for reason in ("no route to host", "connection refused",
-                                               "network is unreachable")) or \
-        "timed out" in output
+                                               "network is unreachable", "timed out",
+                                               "timeout connecting to "))
 
 
 def require_running(name, state):
