@@ -48,7 +48,7 @@ ssh-add ~/.ssh/id_ed25519_multipass
 
 ### 预设个人配置（可选但推荐）
 
-参数解析遵循 **命令行选项 > `~/.config/dotfiles-multipass/config.json` > [默认值](defaults.json)** 的优先级。建议在首次创建前编写配置文件，这样可避免在每次命令中重复输入长公钥路径，并**预先设定客户机内的 Git 身份**（该选项仅支持配置文件传入，无 CLI 命令行参数）：
+参数解析遵循 **命令行选项 > `~/.config/dotfiles-multipass/config.json` > [默认值](defaults.json)** 的优先级。建议在首次创建前编写配置文件，这样可避免在每次命令中重复输入长公钥路径，并**预先设定客户机内的 Git 身份**：
 
 ```json
 {
@@ -62,7 +62,7 @@ ssh-add ~/.ssh/id_ed25519_multipass
 ```
 
 > [!NOTE]
-> `ssh_public_key` 须替换为本机的真实绝对路径。`git_identity` 可选，若提供则姓名与邮箱须同时填写；在客户机 bootstrap 成功后自动写入客户机的个人 Git 配置（`~/.config/git/config`），不触动受管仓库文件。若不提供，脚本不会读取宿主机的 Git 身份。直接在已有环境运行核心 bootstrap 不会自动设置登录 Shell 与 Git 身份，详见[个人配置](../README.md#个人配置)。
+> `ssh_public_key` 须替换为本机的真实绝对路径。`git_identity` 可选，若提供则姓名与邮箱须同时填写且为非空字符串；在客户机 bootstrap 成功后自动写入客户机的个人 Git 配置（`~/.config/git/config`），不触动受管仓库文件。命令行的 `--git-name` 与 `--git-email` 也须成对提供，并作为整体覆盖配置文件中的 `git_identity`，不会混用两个来源的字段。两处都未提供时，新客户机不设置身份，重新配置已有客户机时保留其当前身份；脚本不会读取宿主机的 Git 身份。直接在已有环境运行核心 bootstrap 不会自动设置登录 Shell 与 Git 身份，详见[个人配置](../README.md#个人配置)。
 
 ### 选择提交并创建
 
@@ -80,9 +80,11 @@ ssh-add ~/.ssh/id_ed25519_multipass
 
   ```sh
   bash scripts/multipass.sh create --dry-run --ref '<40位SHA>' \
-    --ssh-public-key "$HOME/.ssh/id_ed25519_multipass.pub"
+    --ssh-public-key "$HOME/.ssh/id_ed25519_multipass.pub" \
+    --git-name 'Your Name' --git-email 'you@example.com'
   bash scripts/multipass.sh create --apply --ref '<40位SHA>' \
-    --ssh-public-key "$HOME/.ssh/id_ed25519_multipass.pub"
+    --ssh-public-key "$HOME/.ssh/id_ed25519_multipass.pub" \
+    --git-name 'Your Name' --git-email 'you@example.com'
   ```
 
 [默认资源规格](defaults.json)为名称 `ubuntu-dev`、Ubuntu 24.04 LTS、4 核 CPU、8 GiB 内存以及 40 GiB 虚拟磁盘。
@@ -131,6 +133,8 @@ bash scripts/multipass.sh provision --apply --name ubuntu-dev --ref '<新40位SH
 ```
 
 重新配置前，脚本会严格校验客户机仓库的 origin 地址、检查是否存在未提交的跟踪或未跟踪修改，并确认客户机 bootstrap 锁处于空闲状态；检测到冲突时立即停止并保留现场。若首次创建过程意外中断，请遵循[失败处理与恢复边界](#失败处理与恢复边界)中的续跑规则。
+
+需要通过命令行更新客户机 Git 身份时，在 `provision --dry-run` 和 `provision --apply` 中同时传入 `--git-name 'Your Name' --git-email 'you@example.com'`。`provision` 会重新执行完整的仓库检出和 server bootstrap 流程；后续调用若省略这两个参数但配置文件仍有 `git_identity`，会重新应用配置文件中的身份。预览会显示本次身份设置的来源或保留原状，不打印姓名与邮箱。
 
 ### 停止与退役
 
@@ -219,6 +223,7 @@ bash scripts/multipass.sh provision --apply --name ubuntu-dev --ref '<新40位SH
 | `receipt.json` 中的 `attempts`、`failed_at`       | 记录各次重试尝试的完整历史、失败时间点与具体步骤                      |
 | `logs/<尝试ID>/<阶段>.log`                        | 对应尝试各阶段命令的完整 stdout/stderr 输出（旧版平铺日志仍保留原位） |
 | `receipt.json` 中的提交、UUID、镜像与 doctor 计数 | 核对目标声明与实际客户机运行环境是否完全一致                          |
+| `receipt.json` 中的 `git_identity_action`         | 本次配置的身份写入进度（`pending` / `applied` / `skipped`）；该字段不含身份值 |
 
 客户机内 bootstrap 的详细安装逻辑与日志排查说明，参见[核心脚本说明](../scripts/README.md#bootstrap-准备完整环境)。
 

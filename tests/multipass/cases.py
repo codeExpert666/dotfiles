@@ -32,7 +32,8 @@ RECONNECT_ERROR = "exec failed: ssh connection failed: 'Timeout connecting to 19
 
 def args(**overrides):
     values = dict(action="create", name=None, config=None, dry_run=True, apply=False, ref=REF,
-                  ssh_public_key=None, image=None, cpus=None, memory=None, disk=None, repo_url=None)
+                  ssh_public_key=None, image=None, cpus=None, memory=None, disk=None, repo_url=None,
+                  git_name=None, git_email=None)
     values.update(overrides)
     return SimpleNamespace(**values)
 
@@ -70,13 +71,18 @@ class HelpTests(unittest.TestCase):
             self.assertIn(explanation, create)
         self.assertRegex(create, r"--creation-record FILE +on --apply for a fresh instance")
         self.assertRegex(create, r"new absolute file in an\s+existing directory")
+        self.assertIn("--git-name NAME", create)
+        self.assertIn("--git-email EMAIL", create)
 
         provision = self.help_output("provision")
         self.assertIn("Use --ref to select a new commit", provision)
+        self.assertIn("--git-name NAME", provision)
+        self.assertIn("--git-email EMAIL", provision)
         destroy = self.help_output("destroy")
         self.assertIn("--dry-run", destroy)
         self.assertIn("--apply", destroy)
         self.assertNotIn("--ref", destroy)
+        self.assertNotIn("--git-name", destroy)
         self.assertNotIn("--creation-record", provision)
         self.assertIn("run guest doctor diagnostics", self.help_output("check"))
 
@@ -121,6 +127,38 @@ class Inputs(unittest.TestCase):
                 runtime.declaration_from(args(ssh_public_key=self.key, **{field: bad}), {},
                                          None, PUB, "SHA256:test")
 
+    def test_git_identity_cli_pair_overrides_config_without_mixing_fields(self):
+        config = {"git_identity": {"name": "Config Name", "email": "config@example.invalid"}}
+        parsed = runtime.parser().parse_args(["create", "--git-name", "CLI Name",
+                                              "--git-email", "cli@example.invalid"])
+        self.assertEqual((parsed.git_name, parsed.git_email), ("CLI Name", "cli@example.invalid"))
+        identity, source = runtime.resolve_git_identity(
+            args(git_name="CLI Name", git_email="cli@example.invalid"), config)
+        self.assertEqual(identity, {"name": "CLI Name", "email": "cli@example.invalid"})
+        self.assertEqual(source, "CLI")
+        self.assertEqual(runtime.resolve_git_identity(args(), config), (config["git_identity"], "config"))
+        self.assertEqual(runtime.resolve_git_identity(args(), {}), ({}, "none"))
+        for incomplete in (args(git_name="CLI Name"), args(git_email="cli@example.invalid")):
+            with self.subTest(incomplete=incomplete), self.assertRaisesRegex(
+                    runtime.Failure, "must be supplied together") as failure:
+                runtime.resolve_git_identity(incomplete, config)
+            self.assertEqual(failure.exception.code, 2)
+
+    def test_git_identity_rejects_invalid_config_and_cli_values(self):
+        path = self.home / "config.json"
+        for identity in ({"name": "Only Name"}, {"name": 42, "email": "a@example.invalid"},
+                         {"name": "   ", "email": "a@example.invalid"},
+                         {"name": "Line\nBreak", "email": "a@example.invalid"}):
+            with self.subTest(identity=identity):
+                path.write_text(json.dumps({"git_identity": identity}))
+                with self.assertRaises(runtime.Failure) as failure:
+                    runtime.read_config(path)
+                self.assertEqual(failure.exception.code, 2)
+        for name, email in ((" ", "a@example.invalid"), ("A", "b\n@example.invalid")):
+            with self.subTest(name=name, email=email), self.assertRaises(runtime.Failure) as failure:
+                runtime.resolve_git_identity(args(git_name=name, git_email=email), {})
+            self.assertEqual(failure.exception.code, 2)
+
     def test_public_key_rejects_private_and_multiple_keys(self):
         runner = runtime.Runner()
         canonical, fingerprint = runtime.public_key(self.key, runner)
@@ -150,18 +188,24 @@ class Inputs(unittest.TestCase):
         (self.home / ".ssh").mkdir()
         (self.home / ".ssh/config").write_text("Host github.com\n    User git\n")
         before = sorted(str(path.relative_to(self.home)) for path in self.home.rglob("*"))
-        with mock.patch.object(runtime, "host_preflight"), \
+        plan = io.StringIO()
+        with redirect_stderr(plan), mock.patch.object(runtime, "host_preflight"), \
                 mock.patch.object(runtime, "public_key", return_value=(PUB, "SHA256:test")), \
                 mock.patch.object(runtime, "require_agent"), \
                 mock.patch.object(host.Host, "probe", return_value={"qualified": True,
                                                                     "client": "1.16.4"}), \
                 mock.patch.object(host.Host, "instances", return_value={}), \
                 mock.patch.object(host.Host, "verify_service"):
-            runtime.create_or_provision(args(ssh_public_key=self.key,
-                                            creation_record=self.home / "creation.json"), {}, self.home,
+            runtime.create_or_provision(args(ssh_public_key=self.key, git_name="CLI Name",
+                                            git_email="cli@example.invalid",
+                                            creation_record=self.home / "creation.json"),
+                                        {"git_identity": {"name": "Config Name",
+                                                          "email": "config@example.invalid"}}, self.home,
                                         runtime.Runner())
         after = sorted(str(path.relative_to(self.home)) for path in self.home.rglob("*"))
         self.assertEqual(before, after)
+        self.assertIn("PLAN: set guest Git identity from CLI", plan.getvalue())
+        self.assertNotIn("cli@example.invalid", plan.getvalue())
 
     def test_unmanaged_same_name_instance_is_a_conflict(self):
         (self.home / ".ssh").mkdir()
@@ -740,9 +784,29 @@ class Orchestration(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def apply(self, **kwargs):
+    def apply(self, *, local_config=None, **kwargs):
         runtime.create_or_provision(args(apply=True, dry_run=False, ssh_public_key=self.key, **kwargs),
-                                    {}, self.home, runtime.Runner())
+                                    local_config or {}, self.home, runtime.Runner())
+
+    def test_git_identity_cli_precedence_config_fallback_and_omission(self):
+        config = {"git_identity": {"name": "Config Name", "email": "config@example.invalid"}}
+        self.apply(local_config=config, git_name="CLI Name", git_email="cli@example.invalid")
+        self.assertIn(("finalize", "CLI Name", "cli@example.invalid"), self.events)
+        self.assertEqual(self.receipt()["git_identity_action"], "applied")
+
+        self.events.clear()
+        self.apply(action="provision", ref=None, local_config=config)
+        self.assertIn(("finalize", "Config Name", "config@example.invalid"), self.events)
+        self.assertEqual(self.receipt()["git_identity_action"], "applied")
+
+        receipt = self.receipt()
+        receipt["git_identity_configured"] = True
+        self.state.joinpath("receipt.json").write_text(json.dumps(receipt))
+        self.events.clear()
+        self.apply(action="provision", ref=None)
+        self.assertIn(("finalize", "", ""), self.events)
+        self.assertEqual(self.receipt()["git_identity_action"], "skipped")
+        self.assertNotIn("git_identity_configured", self.receipt())
 
     def test_creation_record_precedes_launch_and_survives_launch_timeout(self):
         self.fail_launch = True

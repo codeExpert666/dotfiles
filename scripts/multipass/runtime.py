@@ -199,6 +199,10 @@ def parser():
             sub.add_argument("--disk", metavar="SIZE", help="disk: integer M or G units, at least 20G")
             sub.add_argument("--repo-url", metavar="URL",
                              help="public HTTPS Git repository URL without credentials")
+            sub.add_argument("--git-name", metavar="NAME",
+                             help="guest Git user.name (requires --git-email; overrides config as a pair)")
+            sub.add_argument("--git-email", metavar="EMAIL",
+                             help="guest Git user.email (requires --git-name; overrides config as a pair)")
         if action == "check":
             sub.add_argument("--runtime", action="store_true",
                              help="run guest doctor diagnostics in addition to instance checks")
@@ -246,12 +250,31 @@ def read_config(path):
                "git_identity"}
     if not isinstance(data, dict) or set(data) - allowed:
         raise Failure("local config must be an object with documented keys only", 2)
-    identity = data.get("git_identity", {})
-    if not isinstance(identity, dict) or set(identity) - {"name", "email"}:
-        raise Failure("git_identity must contain only name and email", 2)
-    if identity and (not identity.get("name") or not identity.get("email")):
-        raise Failure("git_identity requires both name and email", 2)
+    validate_git_identity(data.get("git_identity", {}), "git_identity")
     return data
+
+
+def validate_git_identity(identity, label):
+    if not isinstance(identity, dict) or set(identity) - {"name", "email"}:
+        raise Failure(f"{label} must contain only name and email", 2)
+    if identity and set(identity) != {"name", "email"}:
+        raise Failure(f"{label} requires both name and email", 2)
+    for field, value in identity.items():
+        if not isinstance(value, str) or not value.strip() or any(
+                ord(char) < 32 or ord(char) == 127 for char in value):
+            raise Failure(f"{label}.{field} must be a nonempty string without control characters", 2)
+    return identity
+
+
+def resolve_git_identity(args, config):
+    name = args.git_name
+    email = args.git_email
+    if (name is None) != (email is None):
+        raise Failure("--git-name and --git-email must be supplied together", 2)
+    if name is not None:
+        return validate_git_identity({"name": name, "email": email}, "CLI Git identity"), "CLI"
+    identity = validate_git_identity(config.get("git_identity", {}), "git_identity")
+    return identity, "config" if identity else "none"
 
 
 def value(args, config, name, fallback=None):
@@ -1028,6 +1051,9 @@ class Machine:
         save_json(self.receipt_file, self.receipt)
 
     def provision(self, ref, git_identity):
+        self.receipt.pop("git_identity_configured", None)
+        self.receipt["git_identity_action"] = "pending"
+        save_json(self.receipt_file, self.receipt)
         try:
             with self.stage("guest"):
                 with self.step("helper", "Transfer the temporary guest helper", timeout=120):
@@ -1071,6 +1097,8 @@ class Machine:
                 with self.step("account", "Set guest login shell and optional Git identity", timeout=120):
                     self.guest("finalize", git_identity.get("name", ""), git_identity.get("email", ""),
                                root=True, timeout=120)
+                self.receipt["git_identity_action"] = "applied" if git_identity else "skipped"
+                save_json(self.receipt_file, self.receipt)
             with self.stage("verified"):
                 with self.step("identity", "Recheck guest identity and Zsh login shell"):
                     final = self.verify_guest()
@@ -1083,7 +1111,6 @@ class Machine:
                 with self.step("helper-cleanup", "Remove the temporary guest helper"):
                     self.cleanup_helper()
                 self.receipt["last_successful_ref"] = ref
-                self.receipt["git_identity_configured"] = bool(git_identity)
                 self.receipt["guest"] = final
                 save_json(self.receipt_file, self.receipt)
         finally:
@@ -1128,6 +1155,7 @@ def declaration_from(args, config, saved, canonical, fingerprint):
 def create_or_provision(args, config, home, runner):
     with preflight_progress("STAGE", "preflight", "Check host, SSH identity and saved instance state"):
         with preflight_progress("STEP", "preflight/host", "Validate macOS host and instance name"):
+            git_identity, git_identity_source = resolve_git_identity(args, config)
             host_preflight()
             name = value(args, config, "name", DEFAULTS["name"])
             validate_name(name)
@@ -1190,6 +1218,10 @@ def create_or_provision(args, config, home, runner):
     print(f"PLAN: {args.action} {name}, Ubuntu {requested['image']}, {requested['cpus']} CPU, "
           f"{requested['memory']} RAM, {requested['disk']} disk, ref {requested['target_ref']}",
           file=sys.stderr)
+    if git_identity:
+        print(f"PLAN: set guest Git identity from {git_identity_source}", file=sys.stderr)
+    else:
+        print("PLAN: leave guest Git identity unchanged (unset on a new instance)", file=sys.stderr)
     if not args.apply:
         print("Preview complete; no files or instances changed. DEFER: image availability and guest checks.",
               file=sys.stderr)
@@ -1271,7 +1303,7 @@ def create_or_provision(args, config, home, runner):
                 else:
                     machine.emit("STAGE SKIP [cloud-init] First-boot checks already succeeded; "
                                  "guest identity will be rechecked")
-            machine.provision(requested["target_ref"], config.get("git_identity", {}))
+            machine.provision(requested["target_ref"], git_identity)
     print(f"READY: {name}; SSH alias: ssh {name}", file=sys.stderr)
 
 
