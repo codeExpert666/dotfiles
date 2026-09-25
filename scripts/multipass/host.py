@@ -195,8 +195,8 @@ class Host:
         data = json_command(self.run, [self.cli, "list", "--format", "json"])
         return {entry["name"]: entry for entry in data.get("list", [])}
 
-    def info(self, name):
-        data = json_command(self.run, [self.cli, "info", name, "--format", "json"])
+    def info(self, name, timeout=15):
+        data = json_command(self.run, [self.cli, "info", name, "--format", "json"], timeout=timeout)
         entry = data.get("info", {}).get(name)
         if isinstance(entry, list):
             entry = entry[0] if len(entry) == 1 else None
@@ -211,9 +211,9 @@ class Host:
             raise ValueError(f"Ubuntu {release} release image is unavailable")
         return entry
 
-    def resources(self, name):
+    def resources(self, name, timeout=15, budget=None):
         result = {}
         for field in ("cpus", "memory", "disk"):
             result[field] = self.run([self.cli, "get", f"local.{name}.{field}"],
-                                     timeout=15).stdout.strip()
+                                     timeout=budget.remaining(timeout) if budget else timeout).stdout.strip()
         return result

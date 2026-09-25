@@ -51,6 +51,7 @@ STAGE_DESCRIPTIONS = {
 PROGRESS_INTERVAL = 30
 CONNECT_RETRY_SECONDS = 120
 CONNECT_RETRY_INTERVAL = 5
+REBOOT_PHASES = ("planned", "stop_requested", "stopped", "start_requested", "running", "verified")
 SERVER_MODULES = ("environment", "deployment", "dependencies", "zsh", "git", "lazygit",
                   "nvim", "starship", "atuin", "shuck", "vim", "state")
 
@@ -384,6 +385,39 @@ def require_running(name, state):
     raise Failure(f"instance {name} is {state or 'missing'}; {hint}")
 
 
+def require_create_state(machine, action, state):
+    if state == "Running":
+        return
+    if action == "create":
+        operation = machine.reboot_operation()
+        if operation and operation["phase"] != "verified":
+            phase = operation["phase"]
+            if state == "Stopped" and phase in ("stop_requested", "stopped", "start_requested"):
+                return
+            if state in ("Starting", "Restarting", "Unknown") and \
+                    phase in ("stop_requested", "start_requested"):
+                return
+    require_running(machine.name, state)
+
+
+class Deadline:
+    """One monotonic budget shared by a lifecycle command and all its observations."""
+
+    def __init__(self, seconds, label):
+        self.end = time.monotonic() + seconds
+        self.label = label
+
+    def remaining(self, cap=None):
+        left = self.end - time.monotonic()
+        if left <= 0:
+            raise Failure(f"{self.label} time budget exhausted")
+        return min(left, cap) if cap is not None else left
+
+    def child(self, seconds, label):
+        child = Deadline(seconds, label)
+        child.end = min(child.end, self.end)
+        return child
+
 class HeldLock:
     def __init__(self, path):
         self.path = path
@@ -437,6 +471,45 @@ class Machine:
         self.attempt_row = None
         self.current_stage = None
         self.current_step = None
+
+    def reboot_operation(self):
+        operation = self.receipt.get("reboot_operation")
+        if operation is None:
+            return None
+        declaration = self.declaration or {}
+        expected = {key: declaration.get(key) for key in ("name", "uuid", "image", "template_sha256")}
+        digest = hashlib.sha256(json.dumps(declaration, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        if not isinstance(operation, dict) or operation.get("method") != "stop-start" or \
+                operation.get("phase") not in REBOOT_PHASES or operation.get("declaration") != expected or \
+                (operation.get("phase") != "verified" and operation.get("declaration_sha256") != digest) or \
+                not operation.get("from_boot_id") or operation["from_boot_id"] != self.receipt.get("reboot_from") or \
+                not operation.get("machine_id") or operation["machine_id"] != self.receipt.get("machine_id") or \
+                not operation.get("cloud_instance_id") or \
+                operation["cloud_instance_id"] != self.receipt.get("cloud_instance_id") or \
+                not isinstance(operation.get("events"), list) or \
+                (operation.get("phase") == "verified" and
+                 (not self.receipt.get("reboot_to") or self.receipt["reboot_to"] == operation["from_boot_id"])):
+            raise Failure("saved stop/start reboot operation does not match the host declaration and "
+                          "recorded guest identity; inspect state before retrying")
+        return operation
+
+    def pending_stop_start(self):
+        operation = self.reboot_operation()
+        return operation is not None and operation["phase"] != "verified"
+
+    def reboot_event(self, kind, **details):
+        operation = self.reboot_operation()
+        operation["events"].append({"at": time.time(), "kind": kind, **details})
+        save_json(self.receipt_file, self.receipt)
+        summary = ", ".join(f"{key}={value}" for key, value in details.items() if key != "error")
+        self.emit(f"  STEP RESULT [cloud-init/reboot] {kind}" + (f"; {summary}" if summary else ""))
+
+    def reboot_phase(self, phase):
+        operation = self.reboot_operation()
+        operation["phase"] = phase
+        operation["updated_at"] = time.time()
+        save_json(self.receipt_file, self.receipt)
+        self.emit(f"  STEP STATE [cloud-init/reboot] stop/start phase={phase}")
 
     def refuse_missing_guest(self, instances):
         # 已留下身份或成功阶段记录的实例若消失，禁止同名重建以保留 SSH 信任边界。
@@ -575,9 +648,12 @@ class Machine:
                       "python3", self.helper, action, *args, timeout=timeout, stream=stream,
                       heartbeat=heartbeat)
 
-    def transfer_helper(self):
+    def transfer_helper(self, timeout=120, budget=None):
+        budget = budget or Deadline(timeout, "guest helper transfer")
+        require_running(self.name, self.read_management_state(budget))
         self.helper = f"/tmp/dotfiles-multipass-{self.declaration['uuid']}.py"
-        self.m("transfer", str(HERE / "guest.py"), f"{self.name}:{self.helper}", timeout=120)
+        self.m("transfer", str(HERE / "guest.py"), f"{self.name}:{self.helper}",
+               timeout=budget.remaining(timeout))
 
     def cleanup_helper(self):
         if self.helper:
@@ -613,8 +689,9 @@ class Machine:
         else:
             self.emit(f"CLEANUP OK   [{label}] Temporary guest helper removed")
 
-    def verify_guest(self):
-        probe = json.loads(self.guest("probe", root=True).stdout)
+    def verify_guest(self, budget=None):
+        probe = json.loads(self.guest("probe", root=True,
+                                      timeout=budget.remaining(15) if budget else 15).stdout)
         declaration = self.declaration
         marker = probe.get("marker") or {}
         # 先核对云初始化标记与机器身份，再信任该实例并更新收据。
@@ -627,13 +704,14 @@ class Machine:
             raise Failure("guest machine-id changed; refusing to take over replacement instance")
         if self.receipt.get("cloud_instance_id") and self.receipt["cloud_instance_id"] != probe["cloud_instance_id"]:
             raise Failure("cloud instance-id changed; refusing to take over replacement instance")
-        self.m("exec", "--no-map-working-directory", self.name, "--", "sudo", "-n", "true")
+        self.m("exec", "--no-map-working-directory", self.name, "--", "sudo", "-n", "true",
+               timeout=budget.remaining(15) if budget else 15)
         self.receipt.update(machine_id=probe["machine_id"], cloud_instance_id=probe["cloud_instance_id"],
                             guest=probe)
-        info = self.host.info(self.name)
+        info = self.host.info(self.name, timeout=budget.remaining(15) if budget else 15)
         if info.get("cpu_count") is not None and int(info["cpu_count"]) != declaration["cpus"]:
             raise Failure("guest CPU count differs from creation declaration")
-        resources = self.host.resources(self.name)
+        resources = self.host.resources(self.name, budget=budget)
         if int(resources["cpus"]) != declaration["cpus"] or \
                 any(abs(size_bytes(resources[field]) - size_bytes(declaration[field])) > 1024 ** 2
                     for field in ("memory", "disk")):
@@ -643,26 +721,37 @@ class Machine:
         save_json(self.receipt_file, self.receipt)
         return probe
 
-    def cloud_wait(self, timeout=None):
+    def cloud_wait(self, timeout=None, budget=None):
         timeout = timeout or DEFAULTS["timeouts"]["cloud_init"]
-        connect_deadline = time.monotonic() + min(CONNECT_RETRY_SECONDS, timeout)
+        budget = budget or Deadline(timeout, "cloud-init status")
+        connect_deadline = min(budget.end, time.monotonic() + CONNECT_RETRY_SECONDS)
         retries = 0
         while True:
             try:
                 result = self.m("exec", "--no-map-working-directory", self.name, "--", "cloud-init",
-                                "status", "--wait", "--format", "json", timeout=timeout,
+                                "status", "--wait", "--format", "json", timeout=budget.remaining(),
                                 heartbeat=PROGRESS_INTERVAL)
                 break
             except CommandFailure as exc:
-                remaining = connect_deadline - time.monotonic()
                 if transient_guest_connection(exc):
+                    if time.monotonic() >= budget.end:
+                        self.emit(f"  STEP WAIT [{self.current_stage or 'cloud-init'}/"
+                                  f"{self.current_step or 'status'}] time budget exhausted after guest "
+                                  "connection failure")
+                        raise
+                    state = self.read_management_state(budget)
+                    if state != "Running":
+                        self.management_snapshot(budget)
+                        raise Failure(f"instance {self.name} is {state or 'missing'} after guest connection "
+                                      "failure; refusing another exec until management recovers") from exc
+                    remaining = connect_deadline - time.monotonic()
                     if remaining > 0:
                         retries += 1
                         self.emit(f"  STEP RETRY [{self.current_stage or 'cloud-init'}/"
                                   f"{self.current_step or 'status'}] guest connection unavailable "
                                   f"({exc.output.strip()[-160:]}); attempt={retries}; "
                                   f"retrying in {min(CONNECT_RETRY_INTERVAL, remaining):.0f}s")
-                        time.sleep(min(CONNECT_RETRY_INTERVAL, remaining))
+                        time.sleep(min(CONNECT_RETRY_INTERVAL, remaining, budget.remaining()))
                         continue
                     self.emit(f"  STEP WAIT [{self.current_stage or 'cloud-init'}/"
                               f"{self.current_step or 'status'}] guest connection did not recover "
@@ -672,9 +761,12 @@ class Machine:
                     self.emit(f"  STEP DIAG [{self.current_stage or 'cloud-init'}/"
                               f"{self.current_step or 'status'}] collect guest cloud-init output if reachable")
                     try:
-                        self.m("exec", "--no-map-working-directory", self.name, "--", "sudo", "-n",
-                               "tail", "-n", "120", "/var/log/cloud-init-output.log", check=False)
-                    except (CommandFailure, OSError):
+                        state = self.read_management_state(budget)
+                        if state == "Running":
+                            self.m("exec", "--no-map-working-directory", self.name, "--", "sudo", "-n",
+                                   "tail", "-n", "120", "/var/log/cloud-init-output.log",
+                                   timeout=budget.remaining(15), check=False)
+                    except (Failure, OSError, ValueError):
                         pass
                 raise
         status = parse_json_output(result.stdout, "cloud-init status")
@@ -684,14 +776,47 @@ class Machine:
         self.receipt["cloud_init"] = status
         save_json(self.receipt_file, self.receipt)
 
-    def management_snapshot(self):
+    def read_management_state(self, budget):
+        result = self.m("list", "--format", "json", timeout=budget.remaining(15))
+        data = parse_json_output(result.stdout, "multipass list")
+        entry = next((row for row in data.get("list", []) if row.get("name") == self.name), None)
+        state = entry.get("state") if isinstance(entry, dict) else None
+        self.emit(f"  STEP OBSERVE [{self.current_stage or 'cloud-init'}/"
+                  f"{self.current_step or 'reboot'}] instance={self.name} state={state or 'missing'}")
+        return state
+
+    def wait_management_state(self, expected, budget, seconds):
+        accepted = (expected,) if isinstance(expected, str) else expected
+        label = "/".join(accepted)
+        local = budget.child(seconds, f"wait for {label}")
+        last = None
+        while True:
+            try:
+                last = self.read_management_state(local)
+            except (CommandFailure, ValueError) as exc:
+                self.emit(f"  STEP OBSERVE [{self.current_stage or 'cloud-init'}/"
+                          f"{self.current_step or 'reboot'}] read-only state query failed: {exc}")
+            else:
+                if last in accepted:
+                    return last
+                if last is None or last == "Deleted":
+                    raise Failure(f"instance {self.name} is {last or 'missing'} during stop/start recovery")
+            if time.monotonic() >= local.end:
+                self.management_snapshot(local)
+                raise Failure(f"instance {self.name} did not reach {label} within {seconds}s; "
+                              f"last observed state={last or 'unavailable'}")
+            pause = min(CONNECT_RETRY_INTERVAL, local.remaining())
+            if pause > 0:
+                time.sleep(pause)
+
+    def management_snapshot(self, budget=None):
         name = f"{self.current_stage or 'cloud-init'}/{self.current_step or 'restart'}"
         self.emit(f"  STEP DIAG [{name}] collect read-only Multipass state; each query has a 15s limit")
         for command in ("list", "info"):
             argv = (command, "--format", "json") if command == "list" else \
                 (command, self.name, "--format", "json")
             try:
-                result = self.m(*argv, timeout=15, check=False)
+                result = self.m(*argv, timeout=budget.remaining(15) if budget else 15, check=False)
             except (Failure, OSError, ValueError) as exc:
                 self.emit(f"  STEP DIAG [{name}] multipass {command} unavailable: {exc}")
                 continue
@@ -723,48 +848,155 @@ class Machine:
         save_json(self.receipt_file, self.receipt)
         return probe
 
+    def retry_guest_connection(self, action, budget):
+        retries = 0
+        while True:
+            require_running(self.name, self.read_management_state(budget))
+            try:
+                return action()
+            except CommandFailure as exc:
+                if not transient_guest_connection(exc) or time.monotonic() >= budget.end:
+                    raise
+                require_running(self.name, self.read_management_state(budget))
+                delay = min(CONNECT_RETRY_INTERVAL, budget.remaining())
+                retries += 1
+                self.emit(f"  STEP RETRY [{self.current_stage or 'cloud-init'}/{self.current_step}] "
+                          f"guest connection unavailable ({exc.output.strip()[-160:]}); "
+                          f"attempt={retries}; retrying in {delay:.0f}s")
+                time.sleep(delay)
+                if time.monotonic() >= budget.end:
+                    raise
+
+    def reboot_identity(self, budget, helper_step, identity_step):
+        helper_budget = budget.child(120, "helper retransfer")
+        with self.step(helper_step, "Transfer helper before reboot identity verification",
+                       timeout=helper_budget.remaining()):
+            self.retry_guest_connection(
+                lambda: self.transfer_helper(budget=helper_budget), helper_budget)
+        verify_budget = budget.child(120, "reboot identity verification")
+        with self.step(identity_step, "Verify current guest identity and read boot ID",
+                       timeout=verify_budget.remaining()):
+            probe = self.retry_guest_connection(lambda: self.verify_guest(budget=verify_budget), verify_budget)
+            require_running(self.name, self.read_management_state(verify_budget))
+            if not probe.get("boot_id"):
+                raise Failure("guest boot ID is missing during reboot recovery")
+            return probe
+
     def reboot_if_required(self, probe):
+        operation = self.reboot_operation()
+        resuming = operation is not None
         before = self.receipt.get("reboot_from")
-        if before:
-            # 超时不等于来宾没有重启；重跑 create 时验收已有请求，不覆盖原 boot ID 或再次重启。
+        if before and operation is None:
+            # 旧收据只含 reboot_from；不把旧 restart 请求解释成新的 stop/start 意图。
             with self.step("reconnect", "Verify the previously requested reboot after management recovery"):
                 return self.verify_reboot(probe, before)
-        if not probe["reboot_required"]:
-            self.emit(f"  STEP SKIP [{self.current_stage or 'cloud-init'}/restart] "
-                      "guest does not require a reboot")
-            return probe
-        before = probe["boot_id"]
-        self.receipt["reboot_from"] = before
-        save_json(self.receipt_file, self.receipt)
-        limit = DEFAULTS["timeouts"]["reboot"]
-        with self.step("restart", "Wait for Multipass restart to return", timeout=limit + 30):
-            try:
-                self.m("restart", "--timeout", str(limit), self.name, timeout=limit + 30,
-                       stream=True, heartbeat=PROGRESS_INTERVAL, show_output=False)
-            except CommandFailure:
-                self.management_snapshot()
-                raise
-        with self.step("reconnect", "Verify guest boot ID and management connection", timeout=limit):
-            deadline = time.monotonic() + limit
-            last_report = time.monotonic()
-            while time.monotonic() < deadline:
-                try:
-                    remaining = max(1, int(deadline - time.monotonic()))
-                    self.cloud_wait(timeout=remaining)
-                    # /tmp 中的助手可能在重启时被清除；验证新 boot ID 前重新传入。
-                    self.transfer_helper()
-                    after = self.verify_guest()
-                    if after["boot_id"] != before:
-                        return self.verify_reboot(after, before)
-                except CommandFailure as exc:
-                    if not transient_guest_connection(exc):
-                        raise
-                now = time.monotonic()
-                if now - last_report >= PROGRESS_INTERVAL:
-                    self.wait_update(limit - (deadline - now), limit)
-                    last_report = now
-                time.sleep(min(CONNECT_RETRY_INTERVAL, max(0, deadline - now)))
-            raise Failure("guest boot ID did not change or management channel did not recover")
+        if operation is None:
+            if not probe["reboot_required"]:
+                self.emit(f"  STEP SKIP [{self.current_stage or 'cloud-init'}/reboot] "
+                          "guest does not require a reboot")
+                return probe
+            if not probe.get("boot_id"):
+                raise Failure("guest boot ID is missing before required reboot")
+            before = probe["boot_id"]
+            operation = {"method": "stop-start", "phase": "planned", "from_boot_id": before,
+                         "declaration": {key: self.declaration[key]
+                                         for key in ("name", "uuid", "image", "template_sha256")},
+                         "declaration_sha256": hashlib.sha256(json.dumps(
+                             self.declaration, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+                         "machine_id": probe["machine_id"],
+                         "cloud_instance_id": probe["cloud_instance_id"],
+                         "created_at": time.time(), "events": []}
+            self.receipt["reboot_from"] = before
+            self.receipt["reboot_operation"] = operation
+            save_json(self.receipt_file, self.receipt)
+            self.emit(f"  STEP INTENT [cloud-init/reboot] method=stop-start; from_boot_id={before}; "
+                      f"instance={self.name}")
+        if operation["phase"] == "verified":
+            with self.step("reconnect", "Recheck the completed stop/start reboot"):
+                return self.verify_reboot(probe, before)
+
+        budget = Deadline(DEFAULTS["timeouts"]["reboot"], "stop/start reboot")
+        with self.step("state", "Observe Multipass state before resuming stop/start",
+                       timeout=budget.remaining()):
+            state = self.read_management_state(budget)
+            if state in ("Starting", "Restarting", "Unknown"):
+                state = self.wait_management_state(("Running", "Stopped"), budget, 120)
+            if state not in ("Running", "Stopped"):
+                require_running(self.name, state)
+
+        if resuming and state == "Running" and operation["phase"] in ("planned", "stop_requested"):
+            # 本地意图不是当前 VM 的身份证明；人工恢复可能已完成重启，也可能出现同名替换实例。
+            current = self.reboot_identity(budget, "resume-helper", "resume-identity")
+            if current["boot_id"] != before:
+                self.reboot_event("boot-reconciled", observed_state="Running", boot_id=current["boot_id"])
+                self.reboot_phase("running")
+
+        phase = operation["phase"]
+        if phase in ("planned", "stop_requested"):
+            if state == "Stopped":
+                if phase == "planned":
+                    raise Failure("instance stopped before the recorded stop request; refusing automatic start")
+                self.reboot_event("stop-reconciled", observed_state=state)
+                self.reboot_phase("stopped")
+            else:
+                with self.step("stop", "Stop the declared instance normally", timeout=budget.remaining(120)):
+                    self.reboot_phase("stop_requested")
+                    command_error = None
+                    try:
+                        # Multipass stop has no --timeout; Runner enforces this limit.
+                        self.m("stop", self.name, timeout=budget.remaining(120),
+                               heartbeat=PROGRESS_INTERVAL, show_output=False)
+                    except CommandFailure as exc:
+                        command_error = exc
+                    self.reboot_event("stop-return", exit_code=command_error.returncode if command_error else 0,
+                                      error=str(command_error)[-500:] if command_error else None)
+                with self.step("stopped", "Confirm Stopped using read-only Multipass state",
+                               timeout=budget.remaining(120)):
+                    self.wait_management_state("Stopped", budget, 120)
+                    self.reboot_event("stop-observed", observed_state="Stopped",
+                                      command_exit=command_error.returncode if command_error else 0)
+                    self.reboot_phase("stopped")
+                state = "Stopped"
+
+        phase = operation["phase"]
+        if phase in ("stopped", "start_requested"):
+            if state == "Running":
+                self.reboot_event("start-reconciled", observed_state=state)
+                self.reboot_phase("running")
+            else:
+                with self.step("start", "Start the stopped declared instance",
+                               timeout=budget.remaining(120)):
+                    self.reboot_phase("start_requested")
+                    command_error = None
+                    command_limit = budget.remaining(120)
+                    try:
+                        self.m("start", "--timeout", str(max(1, int(command_limit) - 2)), self.name,
+                               timeout=command_limit, heartbeat=PROGRESS_INTERVAL, show_output=False)
+                    except CommandFailure as exc:
+                        command_error = exc
+                    self.reboot_event("start-return", exit_code=command_error.returncode if command_error else 0,
+                                      error=str(command_error)[-500:] if command_error else None)
+                with self.step("running", "Confirm Running using read-only Multipass state",
+                               timeout=budget.remaining(180)):
+                    self.wait_management_state("Running", budget, 180)
+                    self.reboot_event("start-observed", observed_state="Running",
+                                      command_exit=command_error.returncode if command_error else 0)
+                    self.reboot_phase("running")
+                state = "Running"
+
+        if state != "Running" or operation["phase"] != "running":
+            raise Failure(f"stop/start recovery cannot verify from phase={operation['phase']} state={state}")
+        reconnect_budget = budget.child(180, "management reconnect")
+        with self.step("reconnect", "Confirm management connection and clean cloud-init",
+                       timeout=reconnect_budget.remaining()):
+            self.cloud_wait(budget=reconnect_budget)
+        after = self.reboot_identity(budget, "helper-retransfer", "reboot-identity")
+        with self.step("verify-reboot", "Verify identity, new boot ID and cleared reboot flag",
+                       timeout=budget.remaining(120)):
+            self.verify_reboot(after, before)
+            self.reboot_event("verified", observed_state="Running", boot_id=after["boot_id"])
+            self.reboot_phase("verified")
+            return after
 
     def ssh_config(self, host_info):
         declaration = self.declaration
@@ -931,7 +1163,7 @@ def create_or_provision(args, config, home, runner):
             if name in instances and not saved:
                 raise Failure(f"same-name instance {name} is not managed by this entrypoint")
             if name in instances:
-                require_running(name, instances[name].get("state"))
+                require_create_state(machine, args.action, instances[name].get("state"))
             if args.action == "provision" and name not in instances:
                 raise Failure(f"managed instance {name} is missing")
             if args.action == "provision" and machine.receipt["stages"].get("cloud-init", {}).get("status") != "ok":
@@ -989,6 +1221,8 @@ def create_or_provision(args, config, home, runner):
                     observed = machine.host.ensure(observed)
                 with machine.step("instances", "Read current Multipass instances"):
                     existing = machine.host.instances()
+                    if name in existing:
+                        require_create_state(machine, args.action, existing[name].get("state"))
                 machine.receipt["host"] = {"macos": platform.mac_ver()[0],
                                            "multipass": observed, "source": machine.host.source,
                                            "runtime_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
@@ -1016,15 +1250,20 @@ def create_or_provision(args, config, home, runner):
                     machine.emit(f"STAGE SKIP [launch] Reuse existing managed instance {name}")
                 if machine.receipt["stages"].get("cloud-init", {}).get("status") != "ok":
                     with machine.stage("cloud-init"):
-                        with machine.step("status", "Wait for cloud-init to complete cleanly",
-                                          timeout=DEFAULTS["timeouts"]["cloud_init"]):
-                            machine.cloud_wait()
-                        with machine.step("helper", "Transfer the temporary guest helper", timeout=120):
-                            machine.transfer_helper()
                         try:
-                            with machine.step("identity", "Verify guest marker, OS and VM resources"):
-                                probe = machine.verify_guest()
-                            machine.reboot_if_required(probe)
+                            if machine.pending_stop_start():
+                                machine.emit("  STEP RESUME [cloud-init/reboot] Reconcile saved stop/start "
+                                             "operation before guest commands")
+                                machine.reboot_if_required(None)
+                            else:
+                                with machine.step("status", "Wait for cloud-init to complete cleanly",
+                                                  timeout=DEFAULTS["timeouts"]["cloud_init"]):
+                                    machine.cloud_wait()
+                                with machine.step("helper", "Transfer the temporary guest helper", timeout=120):
+                                    machine.transfer_helper()
+                                with machine.step("identity", "Verify guest marker, OS and VM resources"):
+                                    probe = machine.verify_guest()
+                                machine.reboot_if_required(probe)
                             with machine.step("helper-cleanup", "Remove the temporary guest helper"):
                                 machine.cleanup_helper()
                         finally:

@@ -280,7 +280,7 @@ Multipass 编排在执行 `--apply` 时包含 10 个标准的生命周期阶段�
 
 1. `host`：检查宿主机架构、依赖工具与 Multipass 服务状态；
 2. `launch`：创建并启动指定镜像的 Ubuntu 实例；
-3. `cloud-init`：核验 cloud-init 首启动引导与必要重启；
+3. `cloud-init`：核验首次启动与初始更新；需重启时记录 stop/start 意图与原 boot ID，正常停止、确认 `Stopped`、显式启动，再验收管理连接、身份、cloud-init 和新 boot ID；
 4. `guest`：验证客户机身份、系统架构与基础包环境；
 5. `ssh`：发布专用 SSH 身份并建立无密码 sudo 信任；
 6. `repository`：在客户机 `~/workspace` 克隆受管仓库并检出固定提交；
@@ -295,6 +295,8 @@ Multipass 编排在执行 `--apply` 时包含 10 个标准的生命周期阶段�
 [日常使用](../multipass/README.md#日常使用)、
 [配置与目录](../multipass/README.md#配置目录与状态)、
 [失败恢复](../multipass/README.md#失败处理与恢复边界)。
+
+首次 stop/start 的未完成阶段保存在 `receipt.json` 的 `reboot_operation` 中。重新 `create --apply` 只在声明和客户机身份匹配时续跑：`Stopped` 可以接着启动；旧停止请求遇到已 `Running` 的实例时，先核验当前身份和 boot ID，已完成重启则只做验收。helper 和身份探测的暂时连接故障在剩余预算内重试，管理状态异常时停止重试。旧式仅含 `reboot_from` 的收据只验收已有重启，不获得新的自动启动权限。`Starting`、`Restarting` 和 `Unknown` 在管理状态稳定前只读查询，不运行 guest 命令。异常实例的宿主 daemon 恢复须按[人工恢复步骤](../multipass/README.md#ssh-可达但管理状态异常)单独处理。
 
 ## 维护与验证
 

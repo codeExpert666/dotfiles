@@ -305,12 +305,15 @@ class HostPolicy(unittest.TestCase):
             if "status" in argv:
                 raise runtime.CommandFailure(["multipass", "exec", "cloud-init"], 2,
                                              "degraded done")
+            if argv[0] == "list":
+                return SimpleNamespace(stdout=json.dumps({"list": [{"name": "test", "state": "Running"}]}))
             return SimpleNamespace(stdout="cloud-init error")
         machine.m = call
         with self.assertRaises(runtime.CommandFailure):
             machine.cloud_wait()
-        self.assertEqual(len(calls), 2)
-        self.assertTrue(any(part.endswith("cloud-init-output.log") for part in calls[1]))
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[1][0], "list")
+        self.assertTrue(any(part.endswith("cloud-init-output.log") for part in calls[2]))
 
     def test_timeout_connecting_is_only_a_transport_failure_with_multipass_context(self):
         self.assertTrue(runtime.transient_guest_connection(
@@ -331,6 +334,8 @@ class HostPolicy(unittest.TestCase):
 
         def call(*argv, **_kwargs):
             calls.append(argv)
+            if argv[0] == "list":
+                return SimpleNamespace(stdout=json.dumps({"list": [{"name": "test", "state": "Running"}]}))
             if len(calls) == 1:
                 raise runtime.CommandFailure(["multipass", "exec"], 2,
                                              "ssh connection failed: No route to host")
@@ -340,8 +345,8 @@ class HostPolicy(unittest.TestCase):
         machine.m = call
         with mock.patch.object(runtime.time, "sleep") as sleep:
             machine.cloud_wait()
-        self.assertEqual(len(calls), 2)
-        self.assertTrue(all("status" in argv for argv in calls))
+        self.assertEqual(len(calls), 3)
+        self.assertEqual([argv[0] for argv in calls], ["exec", "list", "exec"])
         sleep.assert_called_once()
         self.assertEqual(machine.receipt["cloud_init"]["extended_status"], "done")
 
@@ -352,6 +357,8 @@ class HostPolicy(unittest.TestCase):
 
         def call(*argv, **_kwargs):
             calls.append(argv)
+            if argv[0] == "list":
+                return SimpleNamespace(stdout=json.dumps({"list": [{"name": "test", "state": "Running"}]}))
             if len(calls) == 1:
                 raise runtime.CommandFailure(["multipass", "exec"], 2, RECONNECT_ERROR)
             return SimpleNamespace(stdout=json.dumps({"status": "done", "errors": []}))
@@ -360,8 +367,8 @@ class HostPolicy(unittest.TestCase):
         output = io.StringIO()
         with mock.patch.object(runtime.time, "sleep") as sleep, redirect_stderr(output):
             machine.cloud_wait()
-        self.assertEqual(len(calls), 2)
-        self.assertTrue(all("status" in argv for argv in calls))
+        self.assertEqual(len(calls), 3)
+        self.assertEqual([argv[0] for argv in calls], ["exec", "list", "exec"])
         sleep.assert_called_once()
         self.assertIn("STEP RETRY", output.getvalue())
         self.assertNotIn("STEP DIAG", output.getvalue())
@@ -374,6 +381,8 @@ class HostPolicy(unittest.TestCase):
 
         def fail(*argv, **_kwargs):
             calls.append(argv)
+            if argv[0] == "list":
+                return SimpleNamespace(stdout=json.dumps({"list": [{"name": "test", "state": "Running"}]}))
             raise runtime.CommandFailure(["multipass", "exec"], 2,
                                          "ssh connection failed: No route to host")
 
@@ -386,7 +395,7 @@ class HostPolicy(unittest.TestCase):
                 mock.patch.object(runtime.time, "sleep", side_effect=advance), \
                 self.assertRaises(runtime.CommandFailure):
             machine.cloud_wait()
-        self.assertEqual(len(calls), 4)
+        self.assertEqual(sum(argv[0] == "exec" for argv in calls), 4)
         self.assertEqual(clock[0], 11)
 
     def test_cloud_init_guest_error_text_is_not_a_transport_retry(self):
@@ -400,6 +409,8 @@ class HostPolicy(unittest.TestCase):
                     if "status" in argv:
                         raise runtime.CommandFailure(["multipass", "exec"], 2,
                                                      f"cloud-init task failed: {reason}")
+                    if argv[0] == "list":
+                        return SimpleNamespace(stdout=json.dumps({"list": [{"name": "test", "state": "Running"}]}))
                     return SimpleNamespace(stdout="guest cloud-init output")
 
                 machine.m = call
@@ -407,91 +418,46 @@ class HostPolicy(unittest.TestCase):
                         self.assertRaises(runtime.CommandFailure):
                     machine.cloud_wait()
                 sleep.assert_not_called()
-                self.assertEqual(len(calls), 2)
-                self.assertIn("tail", calls[1])
+                self.assertEqual(len(calls), 3)
+                self.assertIn("tail", calls[2])
 
-    def test_reboot_retransfers_ephemeral_guest_helper_before_identity_probe(self):
+    def test_cloud_wait_limits_retries_and_commands_to_remaining_time(self):
         machine = runtime.Machine(Path(self.temp.name), "test", runtime.Runner())
-        calls = []
-        machine.m = lambda *argv, **_kwargs: calls.append(argv)
-        machine.cloud_wait = lambda **_kwargs: calls.append(("cloud_wait",))
-        machine.transfer_helper = lambda: calls.append(("transfer_helper",))
-        machine.verify_guest = lambda: (calls.append(("verify_guest",)) or
-                                        {"boot_id": "new-boot", "reboot_required": False})
-        with mock.patch.object(runtime, "save_json"):
-            machine.reboot_if_required({"boot_id": "old-boot", "reboot_required": True})
-        self.assertEqual(calls[:4], [("restart", "--timeout",
-                                      str(runtime.DEFAULTS["timeouts"]["reboot"]), "test"),
-                                     ("cloud_wait",), ("transfer_helper",), ("verify_guest",)])
-
-    def test_reboot_recovers_from_timeout_connecting_and_records_verified_boot_id(self):
-        machine = runtime.Machine(Path(self.temp.name), "test", runtime.Runner())
-        machine.path.mkdir(parents=True)
-        machine.m = mock.Mock(return_value=SimpleNamespace(stdout=""))
-        machine.cloud_wait = mock.Mock()
-        machine.transfer_helper = mock.Mock()
-        machine.verify_guest = mock.Mock(side_effect=(
-            runtime.CommandFailure(["multipass", "exec"], 2, RECONNECT_ERROR),
-            {"boot_id": "new-boot", "reboot_required": False}))
-        with mock.patch.object(runtime.time, "sleep") as sleep:
-            probe = machine.reboot_if_required({"boot_id": "old-boot", "reboot_required": True})
-        self.assertEqual(probe["boot_id"], "new-boot")
-        self.assertEqual(machine.m.call_count, 1)
-        self.assertEqual(machine.m.call_args.args[0], "restart")
-        self.assertEqual(machine.cloud_wait.call_count, 2)
-        self.assertEqual(machine.transfer_helper.call_count, 2)
-        self.assertEqual(machine.verify_guest.call_count, 2)
-        sleep.assert_called_once()
-        receipt = json.loads(machine.receipt_file.read_text())
-        self.assertEqual(receipt["reboot_from"], "old-boot")
-        self.assertEqual(receipt["reboot_to"], "new-boot")
-
-    def test_reboot_timeout_connecting_stops_at_configured_deadline(self):
-        machine = runtime.Machine(Path(self.temp.name), "test", runtime.Runner())
-        machine.path.mkdir(parents=True)
         clock = [0]
-        calls = []
+        limits = []
 
-        def call(*argv, **_kwargs):
-            calls.append(argv)
-            if argv[0] == "exec":
-                raise runtime.CommandFailure(["multipass", "exec"], 2, RECONNECT_ERROR)
-            return SimpleNamespace(stdout="")
+        def call(*_argv, **kwargs):
+            if _argv[0] == "list":
+                return SimpleNamespace(stdout=json.dumps({"list": [{"name": "test", "state": "Running"}]}))
+            limits.append(kwargs["timeout"])
+            clock[0] += min(3, kwargs["timeout"])
+            raise runtime.CommandFailure(["multipass", "exec"], 2, RECONNECT_ERROR)
 
         machine.m = call
+        with mock.patch.object(runtime.time, "monotonic", side_effect=lambda: clock[0]), \
+                mock.patch.object(runtime.time, "sleep", side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)), \
+                self.assertRaises(runtime.CommandFailure):
+            machine.cloud_wait(timeout=10)
+        self.assertLessEqual(clock[0], 10)
+        self.assertEqual(limits, [10, 2])
 
-        def advance(seconds):
-            clock[0] += seconds
-
-        with mock.patch.dict(runtime.DEFAULTS["timeouts"], {"reboot": 11}), \
-                mock.patch.object(runtime.time, "monotonic", side_effect=lambda: clock[0]), \
-                mock.patch.object(runtime.time, "sleep", side_effect=advance), \
-                self.assertRaisesRegex(runtime.Failure, "management channel did not recover"):
-            machine.reboot_if_required({"boot_id": "old-boot", "reboot_required": True})
-        self.assertEqual(clock[0], 11)
-        self.assertEqual(sum(argv[0] == "restart" for argv in calls), 1)
-        self.assertEqual(sum(argv[0] == "exec" for argv in calls), 4)
-        self.assertEqual(machine.receipt["reboot_from"], "old-boot")
-        self.assertNotIn("reboot_to", machine.receipt)
-
-    def test_restart_timeout_is_recorded_as_restart_step_after_cloud_init_done(self):
+    def test_state_observation_command_uses_substep_remaining_time(self):
         machine = runtime.Machine(Path(self.temp.name), "test", runtime.Runner())
-        machine.path.mkdir(parents=True)
-        machine.receipt["cloud_init"] = {"status": "done", "extended_status": "done", "errors": []}
-        machine.m = mock.Mock(side_effect=runtime.CommandFailure(["multipass", "restart"], 124,
-                                                         "command timed out"))
-        with self.assertRaises(runtime.CommandFailure) as failure:
-            with machine.attempt("create"):
-                with machine.stage("cloud-init"):
-                    machine.reboot_if_required({"boot_id": "first", "reboot_required": True})
-        self.assertEqual(failure.exception.progress_path, "cloud-init/restart")
-        self.assertIn("FAIL [cloud-init/restart]", runtime.failure_line(failure.exception))
-        receipt = json.loads(machine.receipt_file.read_text())
-        self.assertEqual(receipt["cloud_init"]["status"], "done")
-        self.assertEqual(receipt["stages"]["cloud-init"]["current_step"], "restart")
-        self.assertEqual(receipt["stages"]["cloud-init"]["steps"][0]["status"], "failed")
-        self.assertEqual(receipt["attempts"][-1]["status"], "failed")
-        self.assertEqual(receipt["attempts"][-1]["failed_at"], "cloud-init/restart")
+        clock = [0]
+        limits = []
+
+        def call(*argv, **kwargs):
+            self.assertEqual(argv[0], "list")
+            limits.append(kwargs["timeout"])
+            clock[0] += kwargs["timeout"]
+            return SimpleNamespace(stdout=json.dumps({"list": [{"name": "test", "state": "Running"}]}))
+
+        machine.m = call
+        with mock.patch.object(runtime.time, "monotonic", side_effect=lambda: clock[0]), \
+                self.assertRaisesRegex(runtime.Failure, "did not reach Stopped"):
+            machine.wait_management_state("Stopped", runtime.Deadline(10, "reboot"), 6)
+        self.assertEqual(limits, [6])
+        self.assertEqual(clock[0], 6)
 
     def test_restart_diagnostic_reports_only_target_instance_state(self):
         machine = runtime.Machine(Path(self.temp.name), "test", runtime.Runner())
@@ -702,6 +668,8 @@ class Orchestration(unittest.TestCase):
         self.shell = "/bin/bash"
         self.boot_id = "fixture-boot"
         self.reboot_required = False
+        self.next_boot_id = "second-boot"
+        self.clear_reboot_required_on_start = True
         case = self
 
         def probe(machine):
@@ -722,6 +690,16 @@ class Orchestration(unittest.TestCase):
                                      {"name": machine.name, "uuid": machine.declaration["uuid"]})
                 if case.fail_launch:
                     raise runtime.CommandFailure(["multipass", "launch"], 124, "launch timed out")
+            elif argv[0] == "list":
+                return SimpleNamespace(stdout=json.dumps({"list": [
+                    {"name": name, **entry} for name, entry in case.instances.items()]}), returncode=0)
+            elif argv[0] == "stop":
+                case.instances[machine.name]["state"] = "Stopped"
+            elif argv[0] == "start":
+                case.instances[machine.name]["state"] = "Running"
+                case.boot_id = case.next_boot_id
+                if case.clear_reboot_required_on_start:
+                    case.reboot_required = False
             return SimpleNamespace(stdout="", returncode=0)
 
         def guest_command(machine, action, *argv, **_kwargs):
@@ -756,7 +734,7 @@ class Orchestration(unittest.TestCase):
                     mock.patch.object(host.Host, "resources", return_value={"cpus": "4", "memory": "8G", "disk": "40G"}),
                     mock.patch.object(runtime.Machine, "m", multipass),
                     mock.patch.object(runtime.Machine, "guest", guest_command),
-                    mock.patch.object(runtime.Machine, "cloud_wait", side_effect=lambda: self.events.append(("cloud-wait",))),
+                    mock.patch.object(runtime.Machine, "cloud_wait", side_effect=lambda **_kwargs: self.events.append(("cloud-wait",))),
                     mock.patch.object(runtime.Machine, "ssh_config", side_effect=lambda _info: self.events.append(("ssh",)))]
         for patcher in patchers:
             patcher.start()
@@ -793,35 +771,246 @@ class Orchestration(unittest.TestCase):
         self.apply(creation_record=self.record)
         first = json.loads((self.state / "receipt.json").read_text())
         self.assertEqual(first["last_successful_ref"], REF)
+        self.assertFalse(any(event[0] in ("stop", "start", "restart") for event in self.events))
         self.assertEqual(self.events.count(("cloud-wait",)), 1)
         self.apply()
         self.assertEqual(sum(event[0] == "launch" for event in self.events), 1)
         self.assertEqual(self.events.count(("cloud-wait",)), 1)
         self.assertEqual(json.loads((self.state / "receipt.json").read_text())["machine_id"], first["machine_id"])
 
-    def fail_during_restart(self):
+    def require_reboot(self):
         self.reboot_required = True
         self.boot_id = "first-boot"
+
+    def receipt(self):
+        return json.loads((self.state / "receipt.json").read_text())
+
+    def interrupt_at_reboot_phase(self, phase):
+        self.require_reboot()
+        original = runtime.Machine.reboot_phase
+
+        def interrupt(machine, new_phase):
+            original(machine, new_phase)
+            if new_phase == phase:
+                raise runtime.Failure(f"interrupted after {phase}")
+
+        with mock.patch.object(runtime.Machine, "reboot_phase", interrupt), \
+                self.assertRaisesRegex(runtime.Failure, f"interrupted after {phase}"):
+            self.apply(creation_record=self.record)
+        return self.receipt()
+
+    def test_required_reboot_stops_starts_and_retransfers_helper(self):
+        self.require_reboot()
+        self.apply(creation_record=self.record)
+        receipt = self.receipt()
+        self.assertEqual(receipt["reboot_from"], "first-boot")
+        self.assertEqual(receipt["reboot_to"], "second-boot")
+        self.assertEqual(receipt["reboot_operation"]["method"], "stop-start")
+        self.assertEqual(receipt["reboot_operation"]["phase"], "verified")
+        self.assertEqual([event[0] for event in self.events].count("stop"), 1)
+        self.assertEqual([event[0] for event in self.events].count("start"), 1)
+        self.assertFalse(any(event[0] == "restart" for event in self.events))
+        self.assertEqual(self.events.count(("cloud-wait",)), 2)
+        self.assertGreaterEqual(sum(event[0] == "transfer" for event in self.events), 2)
+        self.assertEqual(self.instances["ubuntu-dev"]["state"], "Running")
+
+    def test_stop_failure_without_stopped_state_never_starts(self):
+        self.require_reboot()
         original = runtime.Machine.m
 
         def command(machine, *argv, **kwargs):
-            if argv[0] == "restart":
+            if argv[0] == "stop":
                 self.events.append(argv)
-                self.instances[machine.name]["state"] = "Restarting"
-                self.boot_id = "second-boot"
-                self.reboot_required = False
-                raise runtime.CommandFailure(["multipass", *argv], 5, "Timed out waiting for instance to restart")
+                raise runtime.CommandFailure(["multipass", *argv], 5, "stop failed")
             return original(machine, *argv, **kwargs)
 
-        with mock.patch.object(runtime.Machine, "m", command), \
-                self.assertRaises(runtime.CommandFailure) as failure:
-            self.apply(creation_record=self.record)
-        self.assertEqual(failure.exception.returncode, 5)
-        self.assertEqual(failure.exception.progress_path, "cloud-init/restart")
-        return json.loads((self.state / "receipt.json").read_text())
+        real_wait = runtime.Machine.wait_management_state
+        def observe(machine, expected, budget, seconds):
+            if expected == "Stopped":
+                self.assertEqual(machine.read_management_state(budget), "Running")
+                raise runtime.Failure("did not reach Stopped; last observed state=Running")
+            return real_wait(machine, expected, budget, seconds)
 
-    def test_restart_timeout_resumes_create_without_launch_or_another_restart(self):
-        first = self.fail_during_restart()
+        with mock.patch.object(runtime.Machine, "m", command), \
+                mock.patch.object(runtime.Machine, "wait_management_state", observe), \
+                self.assertRaisesRegex(runtime.Failure, "did not reach Stopped"):
+            self.apply(creation_record=self.record)
+        self.assertFalse(any(event[0] == "start" for event in self.events))
+        self.assertEqual(self.receipt()["reboot_operation"]["phase"], "stop_requested")
+        self.assertEqual(self.receipt()["attempts"][-1]["failed_at"], "cloud-init/stopped")
+        self.events.clear()
+        self.apply()
+        self.assertEqual(self.receipt()["reboot_operation"]["phase"], "verified")
+        self.assertEqual(sum(event[0] == "stop" for event in self.events), 1)
+        self.assertEqual(sum(event[0] == "start" for event in self.events), 1)
+
+    def test_nonzero_stop_and_start_are_reconciled_with_observed_state(self):
+        self.require_reboot()
+        original = runtime.Machine.m
+        def command(machine, *argv, **kwargs):
+            result = original(machine, *argv, **kwargs)
+            if argv[0] in ("stop", "start"):
+                raise runtime.CommandFailure(["multipass", *argv], 5, f"{argv[0]} timed out")
+            return result
+        with mock.patch.object(runtime.Machine, "m", command):
+            self.apply(creation_record=self.record)
+        self.assertEqual(self.receipt()["reboot_operation"]["phase"], "verified")
+        returns = [event for event in self.receipt()["reboot_operation"]["events"]
+                   if event["kind"].endswith("-return")]
+        self.assertEqual([event["exit_code"] for event in returns], [5, 5])
+
+    def test_start_timeout_in_starting_state_resumes_without_second_start(self):
+        self.require_reboot()
+        original = runtime.Machine.m
+        real_wait = runtime.Machine.wait_management_state
+
+        def command(machine, *argv, **kwargs):
+            if argv[0] == "start":
+                self.events.append(argv)
+                self.instances[machine.name]["state"] = "Starting"
+                self.boot_id = "second-boot"
+                self.reboot_required = False
+                raise runtime.CommandFailure(["multipass", *argv], 124, "start timed out")
+            return original(machine, *argv, **kwargs)
+
+        def observe(machine, expected, budget, seconds):
+            if expected == "Running" or isinstance(expected, tuple):
+                self.assertEqual(machine.read_management_state(budget), "Starting")
+                raise runtime.Failure("did not reach Running; last observed state=Starting")
+            return real_wait(machine, expected, budget, seconds)
+
+        with mock.patch.object(runtime.Machine, "m", command), \
+                mock.patch.object(runtime.Machine, "wait_management_state", observe), \
+                self.assertRaisesRegex(runtime.Failure, "last observed state=Starting"):
+            self.apply(creation_record=self.record)
+        self.assertEqual(self.receipt()["reboot_operation"]["phase"], "start_requested")
+        self.assertEqual(sum(event[0] == "start" for event in self.events), 1)
+        self.events.clear()
+        with mock.patch.object(runtime.Machine, "wait_management_state", observe), \
+                self.assertRaisesRegex(runtime.Failure, "last observed state=Starting"):
+            self.apply()
+        self.assertFalse(any(event[0] in ("exec", "start", "stop") for event in self.events))
+        self.events.clear()
+        self.instances["ubuntu-dev"]["state"] = "Running"
+        self.apply()
+        self.assertFalse(any(event[0] in ("start", "stop", "restart") for event in self.events))
+        self.assertEqual(self.receipt()["reboot_to"], "second-boot")
+
+    def test_stopped_without_matching_operation_is_not_auto_started(self):
+        self.apply()
+        self.instances["ubuntu-dev"]["state"] = "Stopped"
+        before = (self.state / "receipt.json").read_bytes()
+        self.events.clear()
+        with self.assertRaisesRegex(runtime.Failure, "use multipass start"):
+            self.apply()
+        self.assertEqual((self.state / "receipt.json").read_bytes(), before)
+        self.assertEqual(self.events, [])
+
+    def test_pending_operation_with_changed_declaration_is_rejected_before_start(self):
+        self.interrupt_at_reboot_phase("stopped")
+        receipt = self.receipt()
+        receipt["reboot_operation"]["declaration"]["uuid"] = "replacement"
+        runtime.save_json(self.state / "receipt.json", receipt)
+        self.events.clear()
+        with self.assertRaisesRegex(runtime.Failure, "does not match the host declaration"):
+            self.apply()
+        self.assertFalse(any(event[0] in ("start", "stop", "exec") for event in self.events))
+
+    def test_pending_operation_rejects_changed_saved_host_resources(self):
+        self.interrupt_at_reboot_phase("stopped")
+        declaration = runtime.load_json(self.state / "declaration.json")
+        declaration["disk"] = "50G"
+        runtime.save_json(self.state / "declaration.json", declaration)
+        self.events.clear()
+        with self.assertRaisesRegex(runtime.Failure, "does not match the host declaration"):
+            self.apply()
+        self.assertFalse(any(event[0] in ("start", "stop", "exec") for event in self.events))
+
+    def test_legacy_reboot_from_is_verified_without_new_stop_start_operation(self):
+        self.apply()
+        receipt = self.receipt()
+        receipt["reboot_from"] = "first-boot"
+        receipt["stages"]["cloud-init"]["status"] = "failed"
+        runtime.save_json(self.state / "receipt.json", receipt)
+        self.boot_id = "second-boot"
+        self.events.clear()
+        self.apply()
+        updated = self.receipt()
+        self.assertEqual(updated["reboot_to"], "second-boot")
+        self.assertNotIn("reboot_operation", updated)
+        self.assertFalse(any(event[0] in ("stop", "start", "restart") for event in self.events))
+
+    def test_unchanged_boot_id_fails_after_one_cycle(self):
+        self.require_reboot()
+        self.next_boot_id = "first-boot"
+        with self.assertRaisesRegex(runtime.Failure, "boot ID did not change"):
+            self.apply(creation_record=self.record)
+        self.assertNotIn("reboot_to", self.receipt())
+        self.assertEqual(sum(event[0] == "stop" for event in self.events), 1)
+        self.assertEqual(sum(event[0] == "start" for event in self.events), 1)
+        self.events.clear()
+        with self.assertRaisesRegex(runtime.Failure, "boot ID did not change"):
+            self.apply()
+        self.assertFalse(any(event[0] in ("stop", "start") for event in self.events))
+
+    def test_remaining_reboot_flag_fails_after_one_cycle(self):
+        self.require_reboot()
+        self.clear_reboot_required_on_start = False
+        with self.assertRaisesRegex(runtime.Failure, "still requires reboot"):
+            self.apply(creation_record=self.record)
+        self.assertNotIn("reboot_to", self.receipt())
+        self.assertEqual(sum(event[0] == "stop" for event in self.events), 1)
+        self.assertEqual(sum(event[0] == "start" for event in self.events), 1)
+        self.events.clear()
+        with self.assertRaisesRegex(runtime.Failure, "still requires reboot"):
+            self.apply()
+        self.assertFalse(any(event[0] in ("stop", "start") for event in self.events))
+
+    def test_cloud_init_error_after_start_is_preserved_without_second_cycle(self):
+        self.require_reboot()
+        def status(**kwargs):
+            self.events.append(("cloud-wait",))
+            if kwargs.get("budget") is not None:
+                raise runtime.Failure("cloud-init reported errors")
+        with mock.patch.object(runtime.Machine, "cloud_wait", side_effect=status), \
+                self.assertRaisesRegex(runtime.Failure, "cloud-init reported errors"):
+            self.apply(creation_record=self.record)
+        self.assertEqual(self.receipt()["reboot_operation"]["phase"], "running")
+        self.events.clear()
+        with mock.patch.object(runtime.Machine, "cloud_wait", side_effect=status), \
+                self.assertRaisesRegex(runtime.Failure, "cloud-init reported errors"):
+            self.apply()
+        self.assertFalse(any(event[0] in ("stop", "start") for event in self.events))
+
+    def test_reboot_budget_is_shared_across_commands_and_reconnect(self):
+        self.require_reboot()
+        clock = [0]
+        limits = []
+        original = runtime.Machine.m
+
+        def command(machine, *argv, **kwargs):
+            if argv[0] in ("stop", "start"):
+                limits.append((argv[0], kwargs["timeout"]))
+                clock[0] += 4
+            return original(machine, *argv, **kwargs)
+
+        def wait(machine, **kwargs):
+            self.events.append(("cloud-wait",))
+            if kwargs.get("budget") is not None:
+                clock[0] += 2
+
+        with mock.patch.dict(runtime.DEFAULTS["timeouts"], {"reboot": 10}), \
+                mock.patch.object(runtime.time, "monotonic", side_effect=lambda: clock[0]), \
+                mock.patch.object(runtime.Machine, "m", command), \
+                mock.patch.object(runtime.Machine, "cloud_wait", wait), \
+                self.assertRaisesRegex(runtime.Failure, "time budget exhausted"):
+            self.apply(creation_record=self.record)
+        self.assertEqual(clock[0], 10)
+        self.assertEqual(limits, [("stop", 10), ("start", 6)])
+        self.assertEqual(self.receipt()["reboot_operation"]["phase"], "running")
+
+    def test_resume_after_stopped_only_starts_once_and_preserves_history(self):
+        first = self.interrupt_at_reboot_phase("stopped")
         self.assertFalse(any(event[0] == "exec" and "rm" in event for event in self.events))
         declaration = (self.state / "declaration.json").read_bytes()
         creation = self.record.read_bytes()
@@ -829,10 +1018,10 @@ class Orchestration(unittest.TestCase):
         old_contents = old_log.read_bytes()
         self.assertEqual(first["reboot_from"], "first-boot")
         self.assertIn("pending_helper_cleanup", first)
-        self.instances["ubuntu-dev"]["state"] = "Running"
+        self.assertEqual(self.instances["ubuntu-dev"]["state"], "Stopped")
         self.events.clear()
         self.apply()
-        second = json.loads((self.state / "receipt.json").read_text())
+        second = self.receipt()
         self.assertEqual([row["status"] for row in second["attempts"]], ["failed", "ok"])
         self.assertEqual(second["attempts"][0], first["attempts"][0])
         self.assertEqual(second["reboot_from"], "first-boot")
@@ -844,25 +1033,156 @@ class Orchestration(unittest.TestCase):
         self.assertEqual((self.state / "declaration.json").read_bytes(), declaration)
         self.assertEqual(self.record.read_bytes(), creation)
         self.assertEqual(old_log.read_bytes(), old_contents)
-        self.assertFalse(any(event[0] in ("launch", "restart", "start", "stop") for event in self.events))
+        self.assertEqual(sum(event[0] == "start" for event in self.events), 1)
+        self.assertFalse(any(event[0] in ("launch", "restart", "stop") for event in self.events))
         self.assertTrue(any(event[0] == "exec" and "rm" in event for event in self.events))
 
-    def test_restart_resume_rejects_replacement_identity_before_ssh_or_repository(self):
-        first = self.fail_during_restart()
-        self.instances["ubuntu-dev"]["state"] = "Running"
+    def test_resume_after_running_does_not_repeat_lifecycle(self):
+        first = self.interrupt_at_reboot_phase("running")
+        self.assertEqual(first["reboot_operation"]["phase"], "running")
+        self.events.clear()
+        self.apply()
+        self.assertEqual(self.receipt()["reboot_to"], "second-boot")
+        self.assertFalse(any(event[0] in ("stop", "start", "restart", "launch") for event in self.events))
+
+    def test_resume_stopping_operation_probes_identity_before_lifecycle(self):
+        first = self.interrupt_at_reboot_phase("stop_requested")
+        self.generation += 1
+        for phase in ("planned", "stop_requested"):
+            with self.subTest(phase=phase):
+                first["reboot_operation"]["phase"] = phase
+                runtime.save_json(self.state / "receipt.json", first)
+                self.events.clear()
+                with self.assertRaisesRegex(runtime.Failure, "machine-id changed"):
+                    self.apply()
+                self.assertFalse(any(event[0] in ("stop", "start", "ssh", "repository", "bootstrap")
+                                     for event in self.events))
+                self.assertEqual(self.receipt()["machine_id"], first["machine_id"])
+                self.assertNotIn("reboot_to", self.receipt())
+
+    def test_resume_stopping_operation_recognizes_manual_reboot(self):
+        first = self.interrupt_at_reboot_phase("stop_requested")
+        self.boot_id = "manually-recovered-boot"
+        self.reboot_required = False
+        for phase in ("planned", "stop_requested"):
+            with self.subTest(phase=phase):
+                first["reboot_operation"]["phase"] = phase
+                runtime.save_json(self.state / "receipt.json", first)
+                self.events.clear()
+                self.apply()
+                self.assertEqual(self.receipt()["reboot_to"], "manually-recovered-boot")
+                self.assertEqual(self.receipt()["reboot_operation"]["phase"], "verified")
+                self.assertFalse(any(event[0] in ("stop", "start", "restart") for event in self.events))
+
+    def test_manual_reboot_with_pending_flag_is_not_repeated(self):
+        self.interrupt_at_reboot_phase("stop_requested")
+        self.boot_id = "manually-recovered-boot"
+        self.events.clear()
+        with self.assertRaisesRegex(runtime.Failure, "still requires reboot"):
+            self.apply()
+        self.assertFalse(any(event[0] in ("stop", "start", "restart") for event in self.events))
+        self.assertNotIn("reboot_to", self.receipt())
+
+    def test_resume_with_unreadable_boot_id_never_stops(self):
+        self.interrupt_at_reboot_phase("stop_requested")
+        self.boot_id = ""
+        self.events.clear()
+        with self.assertRaisesRegex(runtime.Failure, "boot ID is missing"):
+            self.apply()
+        self.assertFalse(any(event[0] in ("stop", "start", "restart") for event in self.events))
+
+    def transient_reboot_failure(self, method, message=RECONNECT_ERROR):
+        self.require_reboot()
+        original = getattr(runtime.Machine, method)
+        attempts = []
+
+        def transient(machine, *argv, **kwargs):
+            if machine.receipt.get("reboot_operation", {}).get("phase") == "running":
+                attempts.append(method)
+                if len(attempts) == 1:
+                    raise runtime.CommandFailure(["multipass", "exec"], 2, message)
+            return original(machine, *argv, **kwargs)
+
+        with mock.patch.object(runtime.Machine, method, transient), \
+                mock.patch.object(runtime.time, "sleep") as sleep:
+            self.apply(creation_record=self.record)
+        self.assertEqual(attempts, [method, method])
+        sleep.assert_called_once()
+        self.assertEqual(self.receipt()["reboot_to"], "second-boot")
+        self.assertEqual(sum(event[0] == "stop" for event in self.events), 1)
+        self.assertEqual(sum(event[0] == "start" for event in self.events), 1)
+
+    def test_reboot_retries_transient_helper_transfer_failure(self):
+        self.transient_reboot_failure("transfer_helper")
+
+    def test_reboot_retries_transient_identity_probe_failure(self):
+        self.transient_reboot_failure("verify_guest")
+
+    def test_reboot_probe_transport_retries_share_the_total_budget(self):
+        self.require_reboot()
+        original = runtime.Machine.guest
+        clock = [0]
+        limits = []
+
+        def command(machine, action, *argv, **kwargs):
+            if action == "probe" and self.boot_id == "second-boot":
+                limits.append(kwargs["timeout"])
+                clock[0] += min(3, kwargs["timeout"])
+                raise runtime.CommandFailure(["multipass", "exec"], 2, RECONNECT_ERROR)
+            return original(machine, action, *argv, **kwargs)
+
+        with mock.patch.dict(runtime.DEFAULTS["timeouts"], {"reboot": 11}), \
+                mock.patch.object(runtime.time, "monotonic", side_effect=lambda: clock[0]), \
+                mock.patch.object(runtime.time, "sleep", side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)), \
+                mock.patch.object(runtime.Machine, "guest", command), \
+                self.assertRaises(runtime.CommandFailure):
+            self.apply(creation_record=self.record)
+        self.assertEqual(limits, [11, 3])
+        self.assertEqual(clock[0], 11)
+        self.assertEqual(self.receipt()["reboot_operation"]["phase"], "running")
+        self.assertNotIn("reboot_to", self.receipt())
+
+    def test_reboot_probe_retry_refuses_non_running_management_state(self):
+        self.require_reboot()
+        original = runtime.Machine.guest
+        attempts = []
+
+        def command(machine, action, *argv, **kwargs):
+            if action == "probe" and self.boot_id == "second-boot":
+                attempts.append(action)
+                self.instances[machine.name]["state"] = "Starting"
+                raise runtime.CommandFailure(["multipass", "exec"], 2, RECONNECT_ERROR)
+            return original(machine, action, *argv, **kwargs)
+
+        with mock.patch.object(runtime.Machine, "guest", command), \
+                mock.patch.object(runtime.time, "sleep") as sleep, \
+                self.assertRaisesRegex(runtime.Failure, "is Starting"):
+            self.apply(creation_record=self.record)
+        sleep.assert_not_called()
+        self.assertEqual(attempts, ["probe"])
+        self.assertIn("pending_helper_cleanup", self.receipt())
+        self.assertFalse(any(event[0] == "exec" and "rm" in event for event in self.events))
+
+    def test_reboot_identity_command_errors_are_not_retried(self):
+        with self.assertRaisesRegex(runtime.CommandFailure, "Permission denied"):
+            self.transient_reboot_failure("verify_guest", "probe failed: Permission denied")
+        self.assertNotIn("reboot_to", self.receipt())
+
+    def test_resume_rejects_replacement_identity_before_ssh_or_repository(self):
+        first = self.interrupt_at_reboot_phase("running")
         self.generation += 1
         self.events.clear()
         with self.assertRaisesRegex(runtime.Failure, "machine-id changed"):
             self.apply()
-        self.assertFalse(any(event[0] in ("ssh", "repository", "restart", "bootstrap") for event in self.events))
-        receipt = json.loads((self.state / "receipt.json").read_text())
+        self.assertFalse(any(event[0] in ("ssh", "repository", "stop", "start", "bootstrap")
+                             for event in self.events))
+        receipt = self.receipt()
         self.assertEqual(receipt["machine_id"], first["machine_id"])
         self.assertEqual(receipt["reboot_from"], "first-boot")
         self.assertNotIn("reboot_to", receipt)
 
     def test_provision_cannot_skip_incomplete_first_boot_or_change_saved_ref(self):
-        self.fail_during_restart()
-        self.instances["ubuntu-dev"]["state"] = "Running"
+        self.interrupt_at_reboot_phase("running")
         before = {str(path): path.read_bytes() for path in self.state.rglob("*") if path.is_file()}
         self.events.clear()
         with self.assertRaisesRegex(runtime.Failure, "first-boot checks are incomplete.*create"):
@@ -891,8 +1211,9 @@ class Orchestration(unittest.TestCase):
         self.assertEqual(receipt["last_successful_ref"], REF)
         self.assertNotIn("pending_helper_cleanup", receipt)
 
-    def test_restarting_state_is_reported_without_start_hint_or_guest_commands(self):
-        self.fail_during_restart()
+    def test_restarting_state_without_valid_operation_is_rejected_before_guest_commands(self):
+        self.apply()
+        self.instances["ubuntu-dev"]["state"] = "Restarting"
         before = {str(path): path.read_bytes() for path in self.state.rglob("*") if path.is_file()}
         self.events.clear()
         for action in ("create", "provision", "check", "ssh"):
@@ -1058,7 +1379,7 @@ class Orchestration(unittest.TestCase):
         self.assertIn("  STEP RUN  [host/service] Verify the existing Multipass daemon", lines)
         self.assertIn("STAGE RUN  [cloud-init] Verify first boot", lines)
         self.assertIn("  STEP RUN  [cloud-init/status] Wait for cloud-init", lines)
-        self.assertIn("  STEP SKIP [cloud-init/restart] guest does not require a reboot", lines)
+        self.assertIn("  STEP SKIP [cloud-init/reboot] guest does not require a reboot", lines)
         self.assertIn("    CHILD BEGIN [bootstrap] Guest bootstrap output follows unchanged", lines)
         self.assertIn("    CHILD END   [bootstrap] See guest bootstrap log", lines)
         self.assertIn("STAGE OK   [verified]", lines)
@@ -1309,6 +1630,18 @@ class LiveCleanup(unittest.TestCase):
         self.assertIn(self.name, self.instances)
         self.assertFalse((self.report / "2404/cleanup-ok.txt").exists())
 
+    def test_single_image_retry_never_runs_the_other_image(self):
+        selected = SimpleNamespace(ref=REF, ssh_public_key=self.key, report_dir=self.report,
+                                   only_image="26.04")
+        with mock.patch.object(live, "arguments", return_value=selected), \
+                mock.patch.object(live, "acceptance") as acceptance:
+            self.assertFalse(live.main())
+        self.assertEqual(acceptance.call_count, 1)
+        self.assertEqual(acceptance.call_args.args[:2],
+                         (f"dotfiles-test-2604-{self.stamp}", "26.04"))
+        self.assertEqual(json.loads((self.report / "summary.json").read_text())["images"], ["26.04"])
+        self.assertFalse((self.report / "2404").exists())
+
     def test_saved_state_without_vm_is_not_claimed_by_acceptance(self):
         self.seed()
         self.instances.clear()
@@ -1345,6 +1678,7 @@ class LiveCleanup(unittest.TestCase):
         self.assertFalse((self.state / self.name).exists())
         self.assertTrue((self.report / "2404/state/declaration.json").is_file())
         self.assertTrue((self.report / "2404/cleanup-ok.txt").is_file())
+        self.assertIn("bootstrap failed after launch", (self.report / "2404/failure.txt").read_text())
         self.assertEqual((self.home / ".ssh/config").read_text(), "Host github.com\n    User git\n")
         self.assertEqual(self.key.read_text(), PUB + "\n")
 
@@ -1372,6 +1706,16 @@ class LiveCleanup(unittest.TestCase):
             live.cleanup(self.name, self.report / "2404", True)
         self.assert_preserved(before)
 
+    def test_unstable_registered_instance_is_only_observed_and_retained(self):
+        self.seed(register=True)
+        self.instances[self.name]["state"] = "Starting"
+        self.calls.clear()
+        with self.assertRaisesRegex(RuntimeError, "retaining it"):
+            live.cleanup(self.name, self.report / "2404", True)
+        self.assertTrue((self.state / self.name / "declaration.json").exists())
+        self.assertFalse(any(argv[1] in ("exec", "transfer", "start", "delete") for argv in self.calls))
+        self.assertIn("state=Starting", (self.report / "2404/guest-collection-skipped.txt").read_text())
+
     def test_active_creator_lock_prevents_cleanup(self):
         self.seed(register=True)
         before = self.snapshot()
@@ -1379,6 +1723,120 @@ class LiveCleanup(unittest.TestCase):
             with self.assertRaisesRegex(runtime.Failure, "lock exists"):
                 live.cleanup(self.name, self.report / "2404", True)
         self.assert_preserved(before)
+
+
+class LiveAcceptance(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.home = Path(self.temp.name)
+        self.state = self.home / "state"
+        self.name = "acceptance-test"
+        self.calls = []
+        self.interruption_exit = None
+        self.reboot_required = False
+        self.boot_id = "initial-boot"
+        self.current_state = "Running"
+        (self.home / ".ssh").mkdir()
+        (self.home / ".ssh/config").write_text(live.INCLUDE_MARKER)
+        for patcher in (mock.patch.object(live, "HOME", self.home),
+                        mock.patch.object(live, "STATE", self.state),
+                        mock.patch.object(live, "run", side_effect=self.command),
+                        mock.patch.object(live, "interrupt_after_first_stop", return_value={})):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def command(self, argv, log=None, **_kwargs):
+        self.calls.append(argv)
+        if log:
+            log.write_text("$ " + " ".join(map(str, argv)) + "\n")
+        if argv[:3] == ["bash", str(live.ENTRY), "create"]:
+            directory = self.state / self.name
+            if "--creation-record" in argv:
+                directory.mkdir(parents=True, exist_ok=True)
+                runtime.save_json(directory / "declaration.json", {"name": self.name, "uuid": "owned"})
+                receipt = {"machine_id": "machine", "cloud_instance_id": "cloud",
+                           "stages": {"cloud-init": {"status": "ok"}}, "guest": {"boot_id": self.boot_id},
+                           "attempts": [{"status": "ok"}]}
+                if self.interruption_exit is not None:
+                    self.current_state = "Stopped"
+                    receipt.update(reboot_from="initial-boot", reboot_operation={"phase": "stop_requested"},
+                                   stages={"cloud-init": {"status": "failed"}}, attempts=[{"status": "failed"}])
+                runtime.save_json(directory / "receipt.json", receipt)
+                if self.interruption_exit is not None:
+                    raise RuntimeError(f"command failed (exit {self.interruption_exit}); see {log}")
+            else:
+                receipt = runtime.load_json(directory / "receipt.json")
+                self.boot_id = "new-boot"
+                self.current_state = "Running"
+                receipt.update(reboot_to=self.boot_id, guest={"boot_id": self.boot_id},
+                               reboot_operation={"method": "stop-start", "phase": "verified", "events": [
+                                   {"kind": kind} for kind in ("stop-reconciled", "start-observed", "verified")]})
+                receipt["stages"]["cloud-init"]["status"] = "ok"
+                receipt["attempts"].append({"status": "ok"})
+                runtime.save_json(directory / "receipt.json", receipt)
+            return ""
+        if argv[0] in ("bash", "ssh"):
+            return ""
+        if argv[:2] == ["multipass", "list"]:
+            return json.dumps({"list": [{"name": self.name, "state": self.current_state}]})
+        if argv[:2] == ["multipass", "info"]:
+            return "{}"
+        if argv[:2] == ["multipass", "stop"]:
+            self.current_state = "Stopped"
+            return ""
+        if argv[:2] == ["multipass", "start"]:
+            self.current_state = "Running"
+            return ""
+        if argv[:2] == ["multipass", "exec"]:
+            if argv[-1] == "/var/lib/dotfiles-multipass/instance.json":
+                return json.dumps({"name": self.name, "uuid": "owned"})
+            if argv[-1] == "/etc/machine-id":
+                return "machine"
+            if argv[-1] == "instance_id":
+                return "cloud"
+            if argv[-1] == "/proc/sys/kernel/random/boot_id":
+                return self.boot_id
+            if "status" in argv:
+                return json.dumps({"status": "done", "errors": []})
+            if "reboot-required" in argv[-1]:
+                return "true" if self.reboot_required else "false"
+            return ""
+        raise AssertionError(argv)
+
+    def test_no_required_reboot_records_missing_coverage_and_completes_other_checks(self):
+        report = self.home / "report"
+        live.acceptance(self.name, "24.04", REF, self.home / "key.pub", report)
+        self.assertEqual(runtime.load_json(report / "reboot-coverage.json")["status"], "skipped")
+        self.assertTrue(all(runtime.load_json(report / "first-boot-assertions.json").values()))
+        self.assertFalse((report / "first-reboot-assertions.json").exists())
+        self.assertEqual(sum(argv[:3] == ["bash", str(live.ENTRY), "create"] for argv in self.calls), 1)
+        self.assertTrue(any(argv[:3] == ["bash", str(live.ENTRY), "provision"] for argv in self.calls))
+        self.assertTrue(any(argv[:2] == ["multipass", "stop"] for argv in self.calls))
+        self.assertTrue((report / "ssh-after-restart.log").is_file())
+
+    def test_controlled_interruption_accepts_direct_and_bash_signal_exit_codes(self):
+        for code in (-15, 143):
+            with self.subTest(code=code):
+                self.interruption_exit = code
+                report = self.home / f"report-{code}"
+                live.acceptance(self.name, "24.04", REF, self.home / "key.pub", report)
+                self.assertEqual(runtime.load_json(report / "reboot-coverage.json")["status"], "passed")
+                self.assertTrue(all(runtime.load_json(report / "first-reboot-assertions.json").values()))
+                self.assertTrue((report / "create-resumed.log").is_file())
+
+    def test_other_failed_exit_is_not_accepted_as_controlled_interruption(self):
+        self.interruption_exit = 1
+        with self.assertRaisesRegex(RuntimeError, "interruption ended unexpectedly"):
+            live.acceptance(self.name, "24.04", REF, self.home / "key.pub", self.home / "report")
+        self.assertFalse(any(argv[:3] == ["bash", str(live.ENTRY), "provision"] for argv in self.calls))
+
+    def test_missing_reboot_operation_does_not_hide_a_live_reboot_requirement(self):
+        self.reboot_required = True
+        report = self.home / "report"
+        with self.assertRaisesRegex(RuntimeError, "first boot assertions failed"):
+            live.acceptance(self.name, "24.04", REF, self.home / "key.pub", report)
+        self.assertFalse((report / "reboot-coverage.json").exists())
 
 
 class GuestGit(unittest.TestCase):

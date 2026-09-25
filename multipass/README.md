@@ -16,7 +16,7 @@ flowchart TD
     subgraph Guest["客户机 Ubuntu arm64 (ubuntu)"]
         Launch --> CloudInit["cloud-init: 系统更新与依赖安装"]
         CloudInit --> RebootCheck{"内核需要重启?"}
-        RebootCheck -- 是 --> Reboot["自动重启并核验 boot ID"]
+        RebootCheck -- 是 --> Reboot["记录意图 → 正常 stop → 确认 Stopped → start → 核验"]
         RebootCheck -- 否 --> GitClone["Git 检出固定提交仓库"]
         Reboot --> GitClone
         GitClone --> GuestBootstrap["bootstrap.sh --profile server"]
@@ -94,7 +94,7 @@ ssh-add ~/.ssh/id_ed25519_multipass
 
 应用模式在执行前会自动检查宿主机磁盘余量（要求剩余空间不少于虚拟机磁盘大小 + 5 GiB），并拒绝接管同名但非受管的既有实例。完整选项可查看 `bash scripts/multipass.sh create --help`。
 
-创建流程会依次完成系统更新与首次启动验收、必要的内核重启、身份与 SSH 配置、仓库检出及核心 server bootstrap。bootstrap 由客户机内的普通用户 `ubuntu` 执行，按需申请 sudo 权限；成功后自动将用户默认登录 Shell 切换为 Zsh。
+创建流程会依次完成系统更新与首次启动验收、必要的内核重启、身份与 SSH 配置、仓库检出及核心 server bootstrap。首次更新要求重启时，编排器在核验当前实例身份后，正常停止指定实例、只读确认 `Stopped`、显式启动指定实例，再核验管理连接和新 boot ID；不调用 `multipass restart`。bootstrap 由客户机内的普通用户 `ubuntu` 执行，按需申请 sudo 权限；成功后自动将用户默认登录 Shell 切换为 Zsh。
 
 ## 日常使用
 
@@ -231,7 +231,7 @@ bash scripts/multipass.sh provision --apply --name ubuntu-dev --ref '<新40位SH
 | Multipass 状态                        | 诊断与下一步建议                                                                                             |
 | ------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
 | `Running`                             | 通过日志核对失败步骤；确认客户机身份、cloud-init 和任务处于空闲状态后再续跑                                  |
-| `Stopped` / `Suspended`               | 执行 `multipass start <name>`，等待管理连接就绪后选择对应命令续跑                                            |
+| `Stopped` / `Suspended`               | 一般先人工核验身份，再执行 `multipass start <name>`；仅有匹配的未完成首次 stop/start 记录时，`create` 才能续跑 `Stopped` 实例；`Suspended` 不自动启动 |
 | `Starting` / `Restarting` / `Unknown` | 属于瞬态或通信异常，切勿当作已停止处理；避免调用 `exec` 或 `shell`（可能隐式触发启动）；排查 daemon 日志     |
 | `Deleted`                             | 实例已进入回收站，必须先执行 `multipass recover <name>` 恢复实例，再进行检查                                 |
 | 实例缺失但存在创建记录                | 保留旧声明与 SSH 信任记录；使用 `destroy` 预览并退役旧状态后再重新创建，或更换全新实例名称；禁止自动同名重建 |
@@ -240,7 +240,9 @@ bash scripts/multipass.sh provision --apply --name ubuntu-dev --ref '<新40位SH
 
 - **首次创建未完成时**：保留已有声明、初始提交 SHA 和公钥，以**完全相同的参数重新运行 `create`**。脚本会自动识别并复用既有实例，重新验收未完成的阶段并继续推进后续配置；在重试时切勿重新传入仅供全新实例使用的 `--creation-record`。
 - **首次启动边界约束**：若 `cloud-init` 阶段（首次启动验收与初始更新）尚未完全成功，执行 `provision` 会被明确拒绝。只有在该阶段成功通过后，后续的重新配置或提交升级才使用 `provision`。
-- **单次自动重启保护**：客户机的全量系统更新仅在首次创建阶段执行一次。系统若提示需重启，自动重启最多仅触发一次：`reboot_from` 记录触发前的 boot ID，只有在实例身份吻合、boot ID 已发生改变且待重启标志清除后才写入 `reboot_to`。`cloud-init/restart` 超时并不等同于客户机未发生重启；续跑时会核验先前请求的有效性，绝不发起第二次无意义重启。
+- **首次必要重启与记录**：客户机的全量系统更新仅在首次创建阶段执行一次。需重启时，`reboot_from` 保存原 boot ID；`reboot_operation` 保存 `stop-start` 方式、宿主声明与客户机身份、`planned` → `stop_requested` → `stopped` → `start_requested` → `running` → `verified` 进度及命令返回、实际状态的事件。每个副作用前先持久化意图，只有只读查询确认目标状态后才推进阶段。完成时还要求管理状态 `Running`、`multipass exec` 可用、UUID、machine-id 与 cloud instance-id 匹配、boot ID 已改变、cloud-init 干净完成及 `reboot_required=false`，然后写入 `reboot_to`。stop 不支持 `--timeout`，由命令执行器限制；全流程最多 600 秒，stop/等待 `Stopped`/start 各最多 120 秒，等待 `Running` 与管理重连各最多 180 秒，helper 重传及最后核验各最多 120 秒。每一步还必须服从全流程剩余时间。
+- **中断续跑**：以完全相同的声明重新执行 `create --apply`。仅当本地存在与声明及已记录身份匹配的未完成 `reboot_operation` 时，`Stopped` 才可进入自动续跑；`Starting`、`Restarting`、`Unknown` 只做限定时间的只读状态观察，未恢复稳定状态前不调用 guest `exec`、helper 或清理。若 stop/start 命令非零返回，脚本先查询目标状态；已达到目标状态则继续，未达到则保留失败历史与当前阶段。旧进度还在 `planned` / `stop_requested` 而实例已 `Running` 时，先重新核验客户机身份和 boot ID；若已发生重启则直接验收，若仍为原 boot ID 才继续原停止请求。同名替换实例在生命周期命令前被拒绝。仅含 `reboot_from` 的旧收据保持原有核验边界，不能被解释成新的 stop/start 授权。
+- **重连重试**：cloud-init 等待、helper 重传及身份探测遇到可识别的 SSH 暂时连接失败时，在各步骤及全流程剩余预算内重试；每次重试前只读确认状态仍为 `Running`。身份不符、权限错误及客户机命令自身失败不会被当作连接故障重试。
 - **Helper 脚本安全清理**：若管理通道出现故障，helper 清理操作仅执行只读探测，绝不调用可能隐式启动虚拟机的 exec 命令。未完成的清理路径会暂存为 `pending_helper_cleanup`，待通道恢复并成功清理后移除。清理失败不会掩盖原始报错，原失败 attempt 与日志均完整保留。
 
 ### SSH 可达但管理状态异常
@@ -248,8 +250,10 @@ bash scripts/multipass.sh provision --apply --name ubuntu-dev --ref '<新40位SH
 当 Multipass 处于 `Starting`、`Restarting` 等异常状态，但客户机 SSH 仍然可连时，不可盲目执行强制操作（Multipass 1.16.4 的普通关机路径会拒绝 `Restarting`），应按以下顺序手动排查恢复：
 
 1. **保存现场并核验身份**：通过受信任的 SSH 连入客户机，核对 `/var/lib/dotfiles-multipass/instance.json` 中的 UUID、`/etc/machine-id` 及 cloud instance-id；确认 `apt`/`dpkg` 和 `bootstrap` 进程均处于空闲状态，确保任务可安全中断。
-2. **正常关闭并重启**：在客户机内执行安全关机（如 `sudo poweroff`），确认宿主机对应 QEMU 进程退出、Multipass 状态刷新为 `Stopped` 后，再执行 `multipass start <name>`。
-3. **核验证据与守护进程**：重新核对管理连接与实例身份；若状态仍不一致，保留现场排查宿主 daemon，切忌盲目循环重试。
+2. **谨慎尝试正常关闭并启动**：在客户机内执行安全关机（如 `sudo poweroff`），确认宿主机对应 QEMU 进程退出、Multipass 状态刷新为 `Stopped` 后，再执行一次 `multipass start <name>`。这只是已有管理异常的人工恢复尝试；本机 1.16.4 上已有 `Restarting` 实例即使正常关机，随后仍可能停在 `Starting`。
+3. **核验证据与守护进程**：重新核对管理状态、连接与实例身份；若状态仍不一致，保留现场。准备宿主 daemon 恢复前，先只读检查全部实例、在途 Multipass 命令和 `/Library/Logs/Multipass/multipassd.log`，确认其他 VM 可中断或已安全停止。`com.canonical.multipassd` 是宿主级服务，重启它会影响所有由该 daemon 管理的实例；由操作人择机执行并逐一验证，不能把这一步当作 `create` 的自动续跑。当前对既有异常实例的 daemon 恢复尚未经实测。
+
+本机可用 `multipass list --format json` 与 `launchctl print system/com.canonical.multipassd` 只读确认服务和实例。若操作人已安排好其他实例的中断窗口，再使用 `sudo launchctl kickstart -k system/com.canonical.multipassd` 重启宿主服务，随后重新查询全部实例状态、管理连接和日志。此命令需要宿主管理员权限；执行前保留当前日志与创建回执。不要在自动创建流程中调用它。
 
 脚本绝不强制关闭电源、不自动重启宿主 daemon，也绝不干扰其他无关实例；仅当用户显式执行 `destroy --apply` 时，才会对经过严格身份比对的受管实例执行彻底销毁。
 
@@ -279,7 +283,9 @@ bash tests/multipass-live.sh --ref '<40位SHA>' \
   --ssh-public-key "$HOME/.ssh/id_ed25519_multipass.pub"
 ```
 
-该验收套件依次针对 Ubuntu 24.04 与 26.04 镜像进行全流程实测：包含实例创建、受控诊断、重复配置（provision）以及原生重启后的 SSH 联通性，并在每个版本测试结束后执行定向清理。
+该验收套件依次针对 Ubuntu 24.04 与 26.04 镜像进行全流程实测：在首次正常 stop 成功后受控中断 `create`，确认实例为 `Stopped`，再用原声明续跑；独立核对管理连接、身份、新 boot ID、cloud-init 与重启标志，然后验收 bootstrap、doctor、重复配置（provision）及日常 stop/start 后的 SSH 联通性。诊断采集在非 `Running` 状态只使用只读管理查询；定向清理必须匹配本轮创建记录、声明与客户机 marker，无法验证时保留实例。
+若镜像更新后无需重启，套件独立核验首次启动、身份及清除的重启标志，并继续完成其余验收；`reboot-coverage.json` 将中断恢复场景记为 `skipped`，不会冒充已经覆盖。发生重启且受控续跑验收通过时，该字段为 `passed`。汇总报告记录本轮宿主 `runtime_sha256`、实际执行的镜像和各自的 `reboot_coverage`；客户机 bootstrap 的固定提交由 `ref` 单独记录。
+若一个镜像已完成、另一个镜像因外部下载超时等原因失败，可用新的 `--report-dir` 并加 `--only-image 24.04` 或 `--only-image 26.04` 单独重试失败镜像；报告的 `images` 字段只列出本次实际执行的镜像。
 验收报告默认保存在 `~/.local/state/dotfiles-multipass/reports/<时间戳>/` 中，亦可通过 `--report-dir <绝对路径>` 自定义输出位置；测试结论仅对运行时的指定提交与机器环境有效。
 
 ### 自动化归属标记与清理机制

@@ -70,7 +70,7 @@ bash tests/multipass.sh Inputs.test_missing_ssh_key
 通过公开入口和命令/VM 替身验证宿主编排的完整状态机与安全约定，完全离线运行且不连接真实 Multipass：
 
 - **输入与身份**：参数解析、镜像与资源分配、公钥与 agent 身份核验、提交 SHA 固定、SSH 信任关系；遇到同名冲突、脏仓库或锁被占用时安全保留现场。
-- **失败与续跑**：元数据记录先于 launch 创建，持久化保存失败历史与实例 UUID；重启后比对核验 boot ID，防止重复重启，禁止借 provision 跳过首次启动；异常状态下 helper 清理不得隐式启动实例，未完成的清理保留待办标记。
+- **失败与续跑**：元数据记录先于 launch 创建，持久化保存失败历史与实例 UUID；首次必要重启按 stop → `Stopped` → start → `Running` 核对状态，覆盖命令非零但目标已达成、中断续跑、旧收据边界、身份与 boot ID、cloud-init、helper 清理和共享超时预算；禁止借 provision 跳过首次启动。异常状态下 helper 清理和在线诊断不得隐式启动实例，未完成的清理保留待办标记。
 - **退役与归属**：严禁凭旧回执同名重建；验证 destroy 预览、定向删除实例、宿主状态迁移至 `retired/` 以及共享 SSH 配置的安全保留。
 
 ## 验证范围与证据边界
@@ -112,7 +112,9 @@ bash tests/multipass-live.sh --ref '<40位提交SHA>' \
   --ssh-public-key "$HOME/.ssh/id_ed25519_multipass.pub"
 ```
 
-该入口依次验收 Ubuntu 24.04 与 26.04 实例的创建、配置更新、诊断及重启后的 SSH 可达性，并在每个版本结束后安全定向清理。详细运行参数、测试报告位置及归属清理安全机制见 [Multipass 维护与验收](../multipass/README.md#维护与验收)。
+该入口依次验收 Ubuntu 24.04 与 26.04：首次正常 stop 后受控中断创建，再以同一声明续跑，独立核验管理状态、身份、boot ID、cloud-init 与重启标志，并完成 bootstrap/doctor、重新配置及日常 stop/start 的 SSH 检查。每个版本结束后仅清理本轮登记且能再次核实归属的实例；状态不稳时只读采集并保留实例。详细运行参数、测试报告位置及清理机制见 [Multipass 维护与验收](../multipass/README.md#维护与验收)。
+首次启动无需重启时，仍独立验证客户机状态、身份和重启标志并继续其余检查，将中断恢复场景明确记为 `skipped`。`summary.json` 的 `reboot_coverage` 区分已通过、已跳过和未到达的场景，并保存本轮宿主编排器的 `runtime_sha256`；检查双镜像覆盖时须同时核对这些字段。
+外部下载临时失败时，可用 `--only-image 24.04` 或 `--only-image 26.04` 与新的报告目录只重试失败镜像；这份单镜像报告不能单独代表双镜像全部通过。
 
 ## 失败定位与维护
 
