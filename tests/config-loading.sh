@@ -77,7 +77,8 @@ pass
 case_label='Zsh interactive startup loads shared settings and the default history path'
 case_log="$case_root/zsh-interactive.log"
 # shellcheck disable=SC2016
-run_interactive_zsh '[[ ${aliases[ll]-} == "ls -alF" && $HISTFILE == "$HOME/.local/state/zsh/history" ]]' > "$case_log" 2>&1 || fail 'Zsh did not load the interactive settings'
+run_interactive_zsh '[[ ${aliases[ll]-} == "ls -alF" && ${aliases[lg]-} == lazygit &&
+  ${aliases[mp]-} == multipass && $HISTFILE == "$HOME/.local/state/zsh/history" ]]' > "$case_log" 2>&1 || fail 'Zsh did not load the interactive settings'
 printf 'Antidote is missing: %s/.local/share/antidote\n' "$case_home" > "$case_root/zsh-interactive.expected"
 cmp -s "$case_log" "$case_root/zsh-interactive.expected" || fail 'unexpected interactive startup output'
 pass

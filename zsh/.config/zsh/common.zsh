@@ -2,6 +2,10 @@
 alias ll='ls -alF'
 alias la='ls -A'
 
+# 常用交互命令的简写。
+alias lg='lazygit'
+alias mp='multipass'
+
 # GNU/Linux 与 macOS 自带的 grep 都支持按终端自动着色匹配内容。
 alias grep='grep --color=auto'
 

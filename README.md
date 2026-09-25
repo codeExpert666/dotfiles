@@ -25,6 +25,9 @@
 | [skills](skills)               | 声明式软链 | 全平台   | `.agents/skills/`、`.claude/skills/` | 按客户端声明入口，共用 `skills/src/` 技能源文件           |
 | [codex](codex)                 | 独立副本   | 全平台   | `.codex/agents/`                     | Codex 执行代理 `sol_worker.toml` 的普通副本（不支持软链） |
 
+Zsh 交互会话提供 `lg`（`lazygit`）和 `mp`（系统 `multipass`）别名。`mp` 调用原生命令，
+仓库的开发机编排入口仍是 `bash scripts/multipass.sh`。
+
 ## 快速开始
 
 ### 部署前须知与环境要求
