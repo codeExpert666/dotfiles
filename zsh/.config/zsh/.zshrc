@@ -86,6 +86,8 @@ unset antidote_dir plugin_manifest plugin_static
 # 仅在 fzf 存在且支持 --zsh 时加载按键绑定与模糊补全，避免缺失或旧版本打断 Shell 启动。
 # 保留 Ctrl-T 文件选择；禁用 fzf 的 Ctrl-R 与 Alt-C，分别由 Atuin 和 zoxide 的 zi 承担历史搜索与目录选择。
 if (($+commands[fzf])) && fzf --zsh > /dev/null 2>&1; then
+	# cd **<Tab> 等目录补全也搜索隐藏目录，与 Ctrl-T 的目录候选保持一致。
+	export FZF_COMPLETION_DIR_OPTS='--walker dir,follow,hidden'
 	FZF_CTRL_R_COMMAND= FZF_ALT_C_COMMAND= source <(fzf --zsh) # shuck: ignore=C002,C024 # fzf 官方初始化方式：空值禁用对应按键，脚本由 fzf 动态生成。
 fi
 
