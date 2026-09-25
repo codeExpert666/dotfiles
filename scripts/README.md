@@ -238,6 +238,25 @@ Mason 模块的要求，bootstrap 不改写该设置。单独运行 Brewfile 只
 | Neovim | 用配置副本与 `lazy-lock.json` 恢复插件，不写回锁文件；Mason 按配置和 registry 解析工具，Treesitter 跟随锁定插件修订，补全资源也须准备成功 |
 | 字体   | 按内部族名选择并保留许可，Sarasa Term SC 解包需要 7zz；macOS 用 Ghostty `+list-fonts --family=...` 精确验收                               |
 
+Neovim 准备会立即输出各动作的 `RUN`，完成时输出带耗时的 `READY`，失败时输出带原因的
+`FAIL`。整个准备期间通过通知报告的 `ERROR` 也会使总体准备失败；普通警告不改变退出码。
+插件准备、Mason registry 与逐项工具安装、Treesitter `install → update → verify`、
+补全资源各有独立边界。动作运行期间约每 30 秒输出 `WAIT`；`elapsed` 只计当前动作，
+`timeout` 是该动作适用的本地上限。Mason registry 和补全资源各为 300 秒，单个 Mason
+工具与 Treesitter 的 install、update 各为 600 秒。标为 `none (caller controls the total
+command)` 的动作没有单独上限；由 `bootstrap.sh` 的 Neovim 命令总上限 2400 秒保护。
+通过 Multipass 调用时，宿主的 `STEP WAIT [bootstrap/child]` 另计整个客户机 bootstrap
+命令的耗时和 7200 秒上限，不代表当前解析器的耗时。
+
+Treesitter 的 `PARSER` 行来自锁定插件实际创建的解析器任务，带 UTC 时间、当前动作累计耗时、
+解析器名及下载、编译、安装等插件事件；`WAIT` 中的 `active` 只列出已发出事件且尚未报告
+安装完成的解析器。若插件尚未发出解析器事件，会明确写出仍在等待插件任务。更新已有解析器时，
+旧 `parser.so` 的存在不代表修订对齐完成；只有插件 update 任务结束后才会输出该阶段的
+`READY`。插件报告的下载器或编译器原始错误会出现在 `PARSER FAIL` 和阶段 `FAIL` 中。
+这些行同样进入下方的 bootstrap `run.*` 日志；通过 Multipass 运行时，客户机输出也会原样
+进入宿主对应尝试的 `bootstrap.log`。若耗时仍不明，可按阶段与解析器事件的时间戳检查两处日志，
+再对照客户机的 `~/.local/state/nvim/mason.log`。
+
 字体重跑会复用已可查询的族名。macOS 发布或复用受管字体后最多等待 30 秒供系统识别；
 查询失败或超时会保留文件供重试，不能仅凭 Ghostty 默认等宽字体列表判断字体缺失。
 

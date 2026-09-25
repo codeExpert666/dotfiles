@@ -5,6 +5,45 @@ local function report(message)
   io.stdout:flush()
 end
 
+local uv = vim.uv
+
+local function elapsed(started)
+  return string.format("%.1fs", (uv.hrtime() - started) / 1e9)
+end
+
+-- vim.wait() 会处理 libuv 事件；心跳使用独立定时器，等待始终使用同一个截止时间。
+local function step(label, timeout_ms, work, detail)
+  local started = uv.hrtime()
+  local limit = timeout_ms and (timeout_ms / 1000 .. "s") or "none (caller controls the total command)"
+  report("RUN: " .. label .. "; timeout=" .. limit)
+  local timer = assert(uv.new_timer())
+  local active = true
+  timer:start(30000, 30000, function()
+    if active then
+      local suffix = detail and detail() or ""
+      report("WAIT: " .. label .. "; elapsed=" .. elapsed(started) .. "; timeout=" .. limit .. suffix)
+    end
+  end)
+  local function remaining()
+    if not timeout_ms then
+      return nil
+    end
+    local left = math.floor((started + timeout_ms * 1e6 - uv.hrtime()) / 1e6)
+    assert(left > 0, label .. " timed out after " .. timeout_ms / 1000 .. "s")
+    return left
+  end
+  local ok, result = pcall(work, remaining)
+  active = false
+  timer:stop()
+  timer:close()
+  if not ok then
+    report("FAIL: " .. label .. "; elapsed=" .. elapsed(started) .. "; reason=" .. tostring(result))
+    error(result, 0)
+  end
+  report("READY: " .. label .. "; elapsed=" .. elapsed(started))
+  return result
+end
+
 local function command(args)
   local result = vim.system(args, { text = true }):wait(60000)
   assert(result.code == 0, table.concat(args, " ") .. ": " .. (result.stderr or ""))
@@ -13,17 +52,10 @@ end
 
 -- 以下阶段适配 lazy-lock.json 锁定版本的插件接口；这些临时覆盖只用于准备阶段，
 -- 更新锁定版本时须重新验证接口和覆盖行为。
-local function prepare_plugins(config_dir, lock_path, lock, notifications)
+local function prepare_plugins(config_dir, lock_path, lock)
   vim.opt.rtp:prepend(vim.fn.stdpath("data") .. "/lazy/lazy.nvim")
   local lazy = require("lazy")
   local setup = lazy.setup
-  vim.notify = function(message, level)
-    if level == vim.log.levels.ERROR then
-      notifications[#notifications + 1] = tostring(message)
-    end
-    report(tostring(message))
-  end
-
   -- 推迟插件启动，避免在恢复锁定提交前执行旧版本。
   local loader = require("lazy.core.loader")
   local startup = loader.startup
@@ -70,7 +102,9 @@ local function prepare_plugins(config_dir, lock_path, lock, notifications)
     })
     return setup(opts)
   end
-  dofile(config_dir .. "/init.lua")
+  step("Neovim / plugins / setup", nil, function()
+    dofile(config_dir .. "/init.lua")
+  end)
   lazy.setup = setup
   loader.startup = startup
 
@@ -84,35 +118,47 @@ local function prepare_plugins(config_dir, lock_path, lock, notifications)
     end
   end
   if #restore > 0 then
-    lazy.restore({ plugins = restore, wait = true, show = false })
+    step("Neovim / plugins / restore", nil, function()
+      lazy.restore({ plugins = restore, wait = true, show = false })
+    end)
   end
-  for name, pinned in pairs(lock) do
-    local plugin = cfg.plugins[name]
-    for _, task in ipairs(plugin._.tasks or {}) do
-      assert(not task:has_errors(), name .. ": " .. task:output(vim.log.levels.ERROR))
+  step("Neovim / plugins / verify", nil, function()
+    for name, pinned in pairs(lock) do
+      local plugin = cfg.plugins[name]
+      for _, task in ipairs(plugin._.tasks or {}) do
+        assert(not task:has_errors(), name .. ": " .. task:output(vim.log.levels.ERROR))
+      end
+      assert(command({ "git", "-C", plugin.dir, "rev-parse", "HEAD" }) == pinned.commit, "lock mismatch: " .. name)
     end
-    assert(command({ "git", "-C", plugin.dir, "rev-parse", "HEAD" }) == pinned.commit, "lock mismatch: " .. name)
-  end
+  end)
   report("READY: all plugin checkouts match lazy-lock.json")
 
   -- LazyVim 的初始化会建立选项辅助函数；必须等插件恢复完成后再运行。
-  startup()
+  step("Neovim / plugins / startup", nil, startup)
 end
 
 local function prepare_mason()
   local lazy = require("lazy")
-  lazy.load({ plugins = { "mason.nvim", "mason-lspconfig.nvim", "nvim-lspconfig" } })
-  local registry = require("mason-registry")
-  local registry_done = false
-  registry.refresh(function()
-    registry_done = true
+  step("Neovim / Mason / load", nil, function()
+    lazy.load({ plugins = { "mason.nvim", "mason-lspconfig.nvim", "nvim-lspconfig" } })
   end)
-  assert(
-    vim.wait(300000, function()
-      return registry_done
-    end, 50),
-    "Mason registry refresh timed out"
-  )
+  local registry = require("mason-registry")
+  step("Neovim / Mason / registry refresh", 300000, function(remaining)
+    local registry_done, registry_failure = false, nil
+    registry.refresh(function(success, result)
+      registry_done = true
+      if success ~= true then
+        registry_failure = type(result) == "string" and result or vim.inspect(result)
+      end
+    end)
+    assert(
+      vim.wait(remaining(), function()
+        return registry_done
+      end, 50),
+      "Mason registry refresh timed out"
+    )
+    assert(not registry_failure, "Mason registry refresh failed: " .. tostring(registry_failure))
+  end)
   -- ShellCheck 和 Shuck 使用 PATH 中的命令；其余工具从当前 Mason 与 LSP 配置解析，
   -- 让工具安装列表随实际配置变化。
   local packages = {}
@@ -130,21 +176,23 @@ local function prepare_mason()
   for _, name in ipairs(names) do
     local package = registry.get_package(name)
     if not package:is_installed() then
-      report("INSTALL: Mason " .. name)
-      local done, failure = false, nil
-      package:install({}, function(success, err)
-        done = true
-        if not success then
-          failure = tostring(err)
-        end
+      step("Neovim / Mason / install / " .. name, 600000, function(remaining)
+        local done, failure = false, nil
+        package:install({}, function(success, err)
+          done = true
+          if not success then
+            failure = tostring(err)
+          end
+        end)
+        assert(
+          vim.wait(remaining(), function()
+            return done
+          end, 50),
+          "Mason installation timed out: " .. name
+        )
+        assert(not failure, "Mason installation failed: " .. name .. ": " .. tostring(failure))
+        assert(package:is_installed(), "Mason package is not installed: " .. name)
       end)
-      assert(
-        vim.wait(600000, function()
-          return done
-        end, 50),
-        "Mason installation timed out: " .. name
-      )
-      assert(not failure, "Mason installation failed: " .. name .. ": " .. tostring(failure))
     end
     assert(package:is_installed(), "Mason package is not installed: " .. name)
     report("READY: Mason " .. name)
@@ -162,61 +210,173 @@ local function prepare_mason()
   end
 end
 
+-- 锁定的 nvim-treesitter 在 install.lua 中为每个实际任务创建 install/<lang>
+-- logger。只转发这些 logger 的真实事件；旧 parser.so 不能代表 update 已完成。
+local function treesitter_events()
+  local log = require("nvim-treesitter.log")
+  local original_new = log.new
+  local state = { phase = nil, started = nil, active = {}, errors = {} }
+  log.new = function(context)
+    local logger = original_new(context)
+    local lang = context and context:match("^install/(.+)$")
+    if not lang then
+      return logger
+    end
+    local original_info, original_error = logger.info, logger.error
+    logger.info = function(self, message, ...)
+      local formatted = message:format(...)
+      local result = original_info(self, message, ...)
+      if state.phase then
+        if formatted == "Language installed" then
+          state.active[lang] = nil
+        else
+          state.active[lang] = formatted
+        end
+        report(
+          "PARSER: Neovim / Treesitter / "
+            .. state.phase
+            .. " / "
+            .. lang
+            .. "; at="
+            .. os.date("!%Y-%m-%dT%H:%M:%SZ")
+            .. "; elapsed="
+            .. elapsed(state.started)
+            .. "; action="
+            .. formatted
+        )
+      end
+      return result
+    end
+    logger.error = function(self, message, ...)
+      local formatted = message:format(...)
+      local result = original_error(self, message, ...)
+      if state.phase then
+        state.errors[#state.errors + 1] = lang .. ": " .. formatted
+        state.active[lang] = nil
+        report(
+          "PARSER FAIL: Neovim / Treesitter / "
+            .. state.phase
+            .. " / "
+            .. lang
+            .. "; at="
+            .. os.date("!%Y-%m-%dT%H:%M:%SZ")
+            .. "; elapsed="
+            .. elapsed(state.started)
+            .. "; reason="
+            .. formatted
+        )
+      end
+      return result
+    end
+    return logger
+  end
+  return state, function()
+    log.new = original_new
+  end
+end
+
+local function wait_treesitter(task, remaining, state)
+  local ok, result = task:pwait(remaining())
+  if not ok then
+    if result == "timeout" then
+      local closed, close_error = pcall(function()
+        task:close()
+      end)
+      if not closed then
+        report("FAIL: Neovim / Treesitter / " .. state.phase .. " cleanup: " .. tostring(close_error))
+      end
+      local active = vim.tbl_keys(state.active)
+      table.sort(active)
+      local parser = #active > 0 and table.concat(active, ", ") or "unknown (no parser event yet)"
+      error("Treesitter " .. state.phase .. " timed out; active parser=" .. parser, 0)
+    end
+    error(task:traceback(result), 0)
+  end
+  local reason = #state.errors > 0 and table.concat(state.errors, "\n")
+    or "plugin returned false without a parser error"
+  assert(result, "Treesitter " .. state.phase .. " failed: " .. reason)
+end
+
 local function prepare_treesitter()
   local lazy = require("lazy")
-  lazy.load({ plugins = { "nvim-treesitter" } })
+  step("Neovim / Treesitter / load", nil, function()
+    lazy.load({ plugins = { "nvim-treesitter" } })
+  end)
   local ts = require("nvim-treesitter")
   local parsers = LazyVim.opts("nvim-treesitter").ensure_installed
   assert(type(parsers) == "table" and #parsers > 0, "no configured Treesitter parser set")
   -- 补装缺失的解析器，并将已有解析器更新到锁定插件声明的修订；
   -- nvim-treesitter 会跳过已经匹配的修订。
-  assert(ts.install(parsers):wait(600000), "Treesitter installation failed")
-  assert(ts.update(parsers):wait(600000), "Treesitter update to pinned parser revisions failed")
+  local state, restore_log = treesitter_events()
+  local function active_parsers()
+    local entries = {}
+    for name, action in pairs(state.active) do
+      entries[#entries + 1] = name .. " (" .. action .. ")"
+    end
+    table.sort(entries)
+    return #entries > 0 and "; active=" .. table.concat(entries, ", ") or "; waiting for nvim-treesitter task"
+  end
+  local ok, err = pcall(function()
+    for _, phase in ipairs({ "install", "update" }) do
+      state.phase, state.started, state.active, state.errors = phase, uv.hrtime(), {}, {}
+      step("Neovim / Treesitter / " .. phase, 600000, function(remaining)
+        wait_treesitter(ts[phase](parsers), remaining, state)
+      end, active_parsers)
+    end
+  end)
+  restore_log()
+  if not ok then
+    error(err, 0)
+  end
   -- 首次安装前目录尚不存在，lazy.nvim 加载插件时可能将其从 runtimepath 移除；
   -- 安装完成后补回实际目录，让本次会话能发现新安装的解析器及查询文件。
-  vim.opt.rtp:prepend(require("nvim-treesitter.config").get_install_dir(""))
-  local installed = ts.get_installed()
-  for _, name in ipairs(parsers) do
-    assert(vim.tbl_contains(installed, name), "Treesitter parser missing: " .. name)
-    local loaded, err = vim.treesitter.language.add(name)
-    assert(loaded, "Treesitter parser cannot be loaded: " .. name .. ": " .. tostring(err))
-  end
+  step("Neovim / Treesitter / verify", nil, function()
+    vim.opt.rtp:prepend(require("nvim-treesitter.config").get_install_dir(""))
+    local installed = ts.get_installed()
+    for _, name in ipairs(parsers) do
+      assert(vim.tbl_contains(installed, name), "Treesitter parser missing: " .. name)
+      report("PARSER: Neovim / Treesitter / verify / " .. name .. "; action=load")
+      local loaded, load_error = vim.treesitter.language.add(name)
+      assert(loaded, "Treesitter parser cannot be loaded: " .. name .. ": " .. tostring(load_error))
+    end
+  end)
   report("READY: configured Treesitter parsers installed and loadable")
 end
 
 local function prepare_completion()
   local lazy = require("lazy")
-  lazy.load({ plugins = { "blink.cmp" } })
-  local done, failure, implementation = false, nil, nil
-  require("blink.cmp.fuzzy.download").ensure_downloaded(function(err, selected)
-    done, failure, implementation = true, err, selected
+  step("Neovim / completion / load", nil, function()
+    lazy.load({ plugins = { "blink.cmp" } })
   end)
-  assert(
-    vim.wait(300000, function()
-      return done
-    end, 50),
-    "completion resource preparation timed out"
-  )
-  assert(not failure, "completion resources: " .. tostring(failure))
-  assert(
-    implementation == "rust" or implementation == "lua",
-    "invalid completion implementation: " .. tostring(implementation)
-  )
-  local requested = require("blink.cmp.config").fuzzy.implementation
-  assert(implementation == "rust" or requested == "lua", "completion binary download failed and fell back to Lua")
-  require("blink.cmp.fuzzy").set_implementation(implementation)
+  local implementation = step("Neovim / completion / resources", 300000, function(remaining)
+    local done, failure, selected = false, nil, nil
+    require("blink.cmp.fuzzy.download").ensure_downloaded(function(err, value)
+      done, failure, selected = true, err, value
+    end)
+    assert(
+      vim.wait(remaining(), function()
+        return done
+      end, 50),
+      "completion resource preparation timed out"
+    )
+    assert(not failure, "completion resources: " .. tostring(failure))
+    assert(selected == "rust" or selected == "lua", "invalid completion implementation: " .. tostring(selected))
+    local requested = require("blink.cmp.config").fuzzy.implementation
+    assert(selected == "rust" or requested == "lua", "completion binary download failed and fell back to Lua")
+    require("blink.cmp.fuzzy").set_implementation(selected)
+    return selected
+  end)
   report("READY: completion resources (" .. implementation .. ")")
 end
 
-local function main()
+local function main(notifications)
   -- 启动时使用 -u NONE 跳过隐式配置加载；本脚本负责显式初始化。
   vim.go.loadplugins = true
   local config_dir = vim.fn.stdpath("config")
   local lock_path = config_dir .. "/lazy-lock.json"
   local lock_text = table.concat(vim.fn.readfile(lock_path), "\n")
   local lock = vim.json.decode(lock_text)
-  local notifications = {}
-  prepare_plugins(config_dir, lock_path, lock, notifications)
+  prepare_plugins(config_dir, lock_path, lock)
   prepare_mason()
   prepare_treesitter()
   prepare_completion()
@@ -224,7 +384,19 @@ local function main()
   assert(#notifications == 0, table.concat(notifications, "\n"))
 end
 
-local ok, err = xpcall(main, debug.traceback)
+-- lazy.nvim 可仅通过 ERROR 通知报告配置异常；收集必须覆盖后续惰性加载与异步准备。
+-- 整体成功或异常退出都在同一处恢复通知接口。
+local original_notify, notifications = vim.notify, {}
+vim.notify = function(message, level)
+  if level == vim.log.levels.ERROR then
+    notifications[#notifications + 1] = tostring(message)
+  end
+  report(tostring(message))
+end
+local ok, err = xpcall(function()
+  main(notifications)
+end, debug.traceback)
+vim.notify = original_notify
 if not ok then
   io.stderr:write("FAIL: Neovim preparation: " .. tostring(err) .. "\n")
   vim.cmd("cquit 1")

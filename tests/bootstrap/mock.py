@@ -210,6 +210,10 @@ elif name == 'resources-fixture':
         Path(args[3]).touch()
 elif name == 'nvim' and '--headless' in args:
     event('nvim', args)
+    if os.environ.get('BOOTSTRAP_TEST_NVM_PROGRESS'):
+        print('RUN: Neovim / Treesitter / install; timeout=600s', flush=True)
+        print('WAIT: Neovim / Treesitter / install; elapsed=30s; timeout=600s; active=bash (Compiling parser)',
+              flush=True)
     if os.environ.get('BOOTSTRAP_TEST_FAIL') == 'nvim':
         sys.exit(44)
     if os.environ.get('BOOTSTRAP_TEST_FAIL') == 'signal':

@@ -857,6 +857,15 @@ class Orchestration(unittest.TestCase):
         process.send_signal(signal.SIGTERM)
         self.assertEqual(process.wait(timeout=10), 143)
 
+    def test_neovim_child_progress_reaches_terminal_and_persistent_log(self):
+        self.env['BOOTSTRAP_TEST_NVM_PROGRESS'] = '1'
+        output = self.invoke('--apply', '--profile', 'server').stderr
+        line = ('WAIT: Neovim / Treesitter / install; elapsed=30s; timeout=600s; '
+                'active=bash (Compiling parser)')
+        self.assertIn(line, output)
+        log = next((self.home / '.local/state/dotfiles-bootstrap').glob('run.*'))
+        self.assertIn(line, log.read_text())
+
     def test_cleanup_failure_never_reports_success_or_masks_primary_failure(self):
         self.mock_shell('rmdir', 'case "$*" in */lock) exit 72;; esac\nexec '
                         + shlex.quote(REAL_TOOLS['rmdir']) + ' "$@"\n')
@@ -1191,7 +1200,7 @@ class Preparation(unittest.TestCase):
         (data / 'site').rename(cached_site)
         for scenario, arguments in (
                 ('first-install', [str(REPO / 'tests/bootstrap/nvim-first-install.lua'), str(cached_site), entrypoint]),
-                ('retry', [entrypoint])):
+                ('retry', [str(REPO / 'tests/bootstrap/nvim-cached-offline.lua'), entrypoint])):
             with self.subTest(scenario=scenario):
                 child = run(command + arguments, env=self.env, cwd=self.root, timeout=90)
                 stdout, stderr = child.stdout, child.stderr
@@ -1200,17 +1209,182 @@ class Preparation(unittest.TestCase):
                     self.assertIn('FIXTURE: published parsers during first installation', stdout)
                 for stage in ('all plugin checkouts match', 'Mason', 'Treesitter parsers installed', 'completion resources'):
                     self.assertIn('READY: ' + stage if stage != 'Treesitter parsers installed' else stage, stdout)
+                for phase in ('install', 'update', 'verify'):
+                    self.assertIn('RUN: Neovim / Treesitter / ' + phase, stdout)
+                    self.assertIn('READY: Neovim / Treesitter / ' + phase, stdout)
+                self.assertIn('PARSER: Neovim / Treesitter / verify / bash; action=load', stdout)
                 self.assertEqual((config / 'lazy-lock.json').read_bytes(), lock)
+
+        # 旧 parser.so 仍在时使修订记录过期；真实 update 必须尝试工作，并转发下载器原始错误。
+        with self.subTest(scenario='stale-parser-update-diagnostic'):
+            parser = data / 'site/parser/bash.so'
+            before_parser = (parser.stat().st_size, parser.stat().st_mtime_ns)
+            revision = data / 'site/parser-info/bash.revision'
+            original_revision = revision.read_bytes()
+            revision.write_text('stale-revision')
+            try:
+                child = run(command + [str(REPO / 'tests/bootstrap/nvim-cached-offline.lua'), entrypoint],
+                            env=self.env, cwd=self.root, timeout=90)
+                self.assertEqual(child.returncode, 1, child.stdout + child.stderr)
+                self.assertIn('READY: Neovim / Treesitter / install', child.stdout)
+                self.assertIn('PARSER: Neovim / Treesitter / update / bash;', child.stdout)
+                self.assertIn('PARSER FAIL: Neovim / Treesitter / update / bash;', child.stdout)
+                self.assertIn('Error during download: unexpected network request', child.stdout)
+                self.assertNotIn('READY: Neovim / Treesitter / update', child.stdout)
+                self.assertEqual((parser.stat().st_size, parser.stat().st_mtime_ns), before_parser)
+                self.assertEqual((config / 'lazy-lock.json').read_bytes(), lock)
+            finally:
+                revision.write_bytes(original_revision)
 
         # 保留查询和修订记录，让插件仍将 bash 视为已安装；真实加载必须报告缺少解析器。
         with self.subTest(scenario='missing-parser-diagnostic'):
             (data / 'site/parser/bash.so').unlink()
-            child = run(command + [entrypoint], env=self.env, cwd=self.root, timeout=90)
+            child = run(command + [str(REPO / 'tests/bootstrap/nvim-cached-offline.lua'), entrypoint],
+                        env=self.env, cwd=self.root, timeout=90)
             self.assertEqual(child.returncode, 1, child.stdout + child.stderr)
             self.assertIn('Treesitter parser cannot be loaded: bash: No parser for language "bash"', child.stderr)
             self.assertNotIn('READY: configured Treesitter', child.stdout)
             self.assertNotIn('READY: completion resources', child.stdout)
             self.assertEqual((config / 'lazy-lock.json').read_bytes(), lock)
+
+
+@unittest.skipUnless(REAL_TOOLS['nvim'], 'native Neovim is required for production Lua progress tests')
+class NeovimProgress(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix='bootstrap-nvim-progress-')
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+        config = self.root / '.config/nvim'
+        config.mkdir(parents=True)
+        (config / 'init.lua').write_text('require("lazy").setup({ spec = {} })\n')
+        (config / 'lazy-lock.json').write_text('{}\n')
+        self.env = dict(os.environ, HOME=str(self.root), XDG_CONFIG_HOME=str(self.root / '.config'),
+                        XDG_DATA_HOME=str(self.root / '.local/share'), XDG_STATE_HOME=str(self.root / '.local/state'),
+                        XDG_CACHE_HOME=str(self.root / '.cache'), NVIM_LOG_FILE=str(self.root / 'nvim.log'))
+
+    def execute(self, scenario, waiting_for=None):
+        marker = self.root / (scenario + '.release')
+        command = [REAL_TOOLS['nvim'], '--headless', '-u', 'NONE', '-n', '-i', 'NONE', '-l',
+                   str(REPO / 'tests/bootstrap/nvim-progress.lua'), str(REPO / 'scripts/bootstrap/nvim.lua'),
+                   scenario, str(marker)]
+        process = subprocess.Popen(command, env=self.env, cwd=self.root, stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, start_new_session=True)
+        prefix = b''
+        try:
+            if waiting_for:
+                deadline = time.monotonic() + 8
+                expected = waiting_for.encode()
+                while expected not in prefix:
+                    self.assertLess(time.monotonic(), deadline, prefix.decode(errors='replace'))
+                    readable, _, _ = select.select([process.stdout], [], [], 0.1)
+                    if readable:
+                        chunk = os.read(process.stdout.fileno(), 4096)
+                        self.assertTrue(chunk, prefix.decode(errors='replace'))
+                        prefix += chunk
+                    self.assertIsNone(process.poll(), prefix.decode(errors='replace'))
+                ready = waiting_for.replace('WAIT: ', 'READY: ', 1).rstrip(';')
+                self.assertNotIn(ready, prefix.decode(errors='replace'))
+                marker.touch()
+            output, _ = process.communicate(timeout=8)
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.communicate()
+        text = (prefix + output).decode(errors='replace')
+        timers = json.loads((self.root / (scenario + '.release.timers')).read_text())
+        self.assertEqual(timers['started'], timers['stopped'], text)
+        self.assertEqual(timers['started'], timers['closed'], text)
+        self.assertTrue(timers['notify_restored'], text)
+        return process.returncode, text, timers
+
+    def test_cache_reuse_and_distinct_treesitter_phases(self):
+        code, output, _ = self.execute('reuse')
+        self.assertEqual(code, 0, output)
+        for phase in ('install', 'update', 'verify'):
+            self.assertIn('RUN: Neovim / Treesitter / ' + phase, output)
+            self.assertIn('READY: Neovim / Treesitter / ' + phase, output)
+        self.assertNotIn('PARSER: Neovim / Treesitter / install /', output)
+        self.assertNotIn('PARSER: Neovim / Treesitter / update /', output)
+        self.assertIn('PARSER: Neovim / Treesitter / verify / bash; action=load', output)
+
+    def test_slow_install_and_existing_parser_update_report_real_task_events(self):
+        for scenario, phase in (('install_wait', 'install'), ('update_wait', 'update')):
+            with self.subTest(scenario=scenario):
+                code, output, _ = self.execute(scenario, 'WAIT: Neovim / Treesitter / ' + phase + ';')
+                self.assertEqual(code, 0, output)
+                self.assertIn('timeout=600s; active=bash (Downloading tree-sitter-bash...)', output)
+                self.assertIn('PARSER: Neovim / Treesitter / ' + phase + ' / bash;', output)
+                self.assertIn('action=Compiling parser', output)
+                self.assertIn('action=Installing parser', output)
+                self.assertLess(output.index('WAIT: Neovim / Treesitter / ' + phase),
+                                output.index('READY: Neovim / Treesitter / ' + phase))
+                self.assertNotIn('WAIT:', output[output.index('READY: Neovim / Treesitter / ' + phase):])
+
+    def test_registry_mason_and_completion_waits_identify_their_own_action(self):
+        for scenario, label, timeout in (('registry_wait', 'Mason / registry refresh', '300s'),
+                                         ('mason_wait', 'Mason / install / taplo', '600s'),
+                                         ('completion_wait', 'completion / resources', '300s')):
+            with self.subTest(scenario=scenario):
+                code, output, _ = self.execute(scenario, 'WAIT: Neovim / ' + label + ';')
+                self.assertEqual(code, 0, output)
+                self.assertIn('WAIT: Neovim / ' + label + '; elapsed=', output)
+                self.assertIn('timeout=' + timeout, output)
+                self.assertIn('READY: Neovim / ' + label, output)
+
+    def test_later_plugin_error_notifications_fail_preparation(self):
+        for scenario, reason in (
+                ('mason_notify_error', 'fixture config failed: mason.nvim'),
+                ('treesitter_notify_error', 'fixture config failed: nvim-treesitter'),
+                ('completion_notify_error', 'fixture config failed: blink.cmp'),
+                ('completion_async_notify_error', 'fixture completion callback failed')):
+            with self.subTest(scenario=scenario):
+                code, output, _ = self.execute(scenario)
+                self.assertEqual(code, 1, output)
+                failure = output[output.index('FAIL: Neovim preparation:'):]
+                self.assertIn(reason, failure)
+
+    def test_warning_notification_does_not_fail_preparation(self):
+        code, output, _ = self.execute('treesitter_notify_warning')
+        self.assertEqual(code, 0, output)
+        self.assertIn('fixture config warning: nvim-treesitter', output)
+        self.assertNotIn('FAIL: Neovim preparation:', output)
+
+    def test_parser_failure_and_timeout_keep_reason_and_clear_timer(self):
+        code, output, _ = self.execute('install_failure', 'WAIT: Neovim / Treesitter / install;')
+        self.assertEqual(code, 1, output)
+        self.assertIn('PARSER FAIL: Neovim / Treesitter / install / bash;', output)
+        self.assertIn('Error during "tree-sitter build": clang: bad grammar', output)
+        self.assertIn('FAIL: Neovim / Treesitter / install;', output)
+        self.assertNotIn('READY: Neovim / Treesitter / install', output)
+        self.assertLess(output.rfind('WAIT:'), output.index('FAIL: Neovim / Treesitter / install;'))
+
+        code, output, timers = self.execute('install_timeout')
+        self.assertEqual(code, 1, output)
+        self.assertIn('WAIT: Neovim / Treesitter / install;', output)
+        self.assertIn('Treesitter install timed out; active parser=bash', output)
+        self.assertNotIn('READY: Neovim / Treesitter / install', output)
+        self.assertEqual(timers['task_closed'], 1)
+        self.assertLess(output.rfind('WAIT:'), output.index('FAIL: Neovim / Treesitter / install;'))
+
+    def test_registry_mason_verify_and_lock_failures(self):
+        for scenario, reason, absent in (
+                ('setup_failure', 'fixture plugin setup failed', 'READY: Neovim / plugins / setup'),
+                ('registry_failure', 'Mason registry refresh failed: registry transport refused',
+                 'READY: Neovim / Mason / registry refresh'),
+                ('mason_failure', 'Mason installation failed: taplo: archive checksum mismatch',
+                 'READY: Neovim / Mason / install / taplo'),
+                ('mason_not_installed', 'Mason package is not installed: taplo',
+                 'READY: Neovim / Mason / install / taplo'),
+                ('verify_failure', 'Treesitter parser cannot be loaded: bash: No parser for language "bash"',
+                 'READY: Neovim / Treesitter / verify'),
+                ('lock_failure', 'bootstrap changed the lockfile', 'Bootstrap complete.')):
+            with self.subTest(scenario=scenario):
+                wait = ('WAIT: Neovim / Mason / install / taplo;' if scenario in
+                        ('mason_failure', 'mason_not_installed') else None)
+                code, output, _ = self.execute(scenario, wait)
+                self.assertEqual(code, 1, output)
+                self.assertIn(reason, output)
+                self.assertNotIn(absent, output)
 
 
 class Publication(unittest.TestCase):

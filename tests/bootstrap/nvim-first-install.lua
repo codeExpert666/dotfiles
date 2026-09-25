@@ -4,6 +4,9 @@ local cached_site, entrypoint = assert(arg[1]), assert(arg[2])
 local data = vim.fn.stdpath("data")
 assert(not vim.uv.fs_stat(data .. "/site"), "first installation must start without the site directory")
 vim.opt.rtp:prepend(data .. "/lazy/nvim-treesitter")
+-- 离线缓存集成仍调用真实 Mason refresh API，但不刷新已过期的 registry。
+vim.opt.rtp:prepend(data .. "/lazy/mason.nvim")
+require("mason.settings").current.registry_cache.refresh = false
 local ts = require("nvim-treesitter")
 local install = ts.install
 ts.install = function(...)
