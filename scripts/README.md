@@ -252,10 +252,23 @@ Treesitter 的 `PARSER` 行来自锁定插件实际创建的解析器任务，�
 解析器名及下载、编译、安装等插件事件；`WAIT` 中的 `active` 只列出已发出事件且尚未报告
 安装完成的解析器。若插件尚未发出解析器事件，会明确写出仍在等待插件任务。更新已有解析器时，
 旧 `parser.so` 的存在不代表修订对齐完成；只有插件 update 任务结束后才会输出该阶段的
-`READY`。插件报告的下载器或编译器原始错误会出现在 `PARSER FAIL` 和阶段 `FAIL` 中。
+`READY`。插件报告的下载器或编译器错误会出现在 `PARSER FAIL` 和阶段 `FAIL` 中。
+仅实际启动的 Treesitter curl 请求另有 `DOWNLOAD` 行，以阶段、解析器和 `request` 区分并发请求。
+`start` 显示原始 URL，运行中的 `stderr`、`retry` 保留 curl 的错误和重试提示；`WAIT` 的
+`downloads` 显示最近一条真实事件。`finish` 包含退出码、最终 HTTP 状态、最终响应字节数、
+原始及重定向后的 URL。URL 的用户信息、查询参数和片段会隐去。`retry_notices` 只计实际看到的
+重试提示；`retries` 仅在 curl 8.9.0+ 可读，其他版本为 `unavailable`，不从耗时推断次数。
+`dns_at`、`connect_at`、`tls_at`、`first_byte_at` 是 curl 对最终传输报告的累计时间检查点，
+不是四段独立耗时；普通 HTTP 的 `tls_at=0` 不表示执行了 TLS。`redirect_total` 包含重定向
+步骤，`curl_total` 不能代表含重试退避的总等待。
+单独的 `wall_elapsed` 从请求启动到退出计时。未返回的字段标为 `unavailable`，取消时输出
+`cancel` 而非 `finish`。准备退出时会显式取消仍在运行的下载，并最多等待 2 秒回收进程；
+清理失败会单独报告，同时保留原始故障。字段含义详见
+[curl 的 write-out 文档](https://curl.se/docs/manpage.html#-w)。
 这些行同样进入下方的 bootstrap `run.*` 日志；通过 Multipass 运行时，客户机输出也会原样
-进入宿主对应尝试的 `bootstrap.log`。若耗时仍不明，可按阶段与解析器事件的时间戳检查两处日志，
-再对照客户机的 `~/.local/state/nvim/mason.log`。
+进入宿主对应尝试的 `bootstrap.log`。排查慢下载时先按 `request` 找到运行中的重试/错误事件，
+再比较 `wall_elapsed`、`curl_total` 和 `redirect_total`；无法据此单独断定网络慢速的根因。
+若还没有下载器事件，`WAIT` 不判断请求正处于连接还是传输。
 
 字体重跑会复用已可查询的族名。macOS 发布或复用受管字体后最多等待 30 秒供系统识别；
 查询失败或超时会保留文件供重试，不能仅凭 Ghostty 默认等宽字体列表判断字体缺失。

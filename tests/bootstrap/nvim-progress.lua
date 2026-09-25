@@ -26,10 +26,11 @@ if vim.env.DOTFILES_TEST_REAL_TIMER ~= "1" then
   end
 end
 
-local original_notify, original_cmd = vim.notify, vim.cmd
+local original_notify, original_system, original_cmd = vim.notify, vim.system, vim.cmd
 vim.cmd = function(command)
   if command == "qa!" or command == "cquit 1" then
     counters.notify_restored = vim.notify == original_notify
+    counters.system_restored = vim.system == original_system
     -- 清理后留出多个心跳周期，确认不会再输出 WAIT。
     vim.wait(100, function()
       return false
@@ -90,7 +91,8 @@ LazyVim = {
     elseif name == "nvim-lspconfig" then
       return { servers = {} }
     elseif name == "nvim-treesitter" then
-      return { ensure_installed = { "bash" } }
+      local parallel = scenario == "curl_parallel" or scenario:match("^curl_real_")
+      return { ensure_installed = parallel and { "bash", "go" } or { "bash" } }
     end
     error("unexpected plugin options: " .. name)
   end,
@@ -167,7 +169,131 @@ package.preload["nvim-treesitter.log"] = function()
   }
 end
 
+package.preload["nvim-treesitter.parsers"] = function()
+  local base = vim.env.DOTFILES_TEST_CURL_BASE or "http://127.0.0.1:1"
+  return {
+    bash = { install_info = { url = base .. "/repo/bash", revision = "test-revision" } },
+    go = { install_info = { url = base .. "/repo/go", revision = "test-revision" } },
+  }
+end
+
+local function curl_task(phase)
+  if phase == "update" then
+    return {
+      pwait = function()
+        return true, true
+      end,
+    }
+  end
+  vim.fn.mkdir(vim.fn.stdpath("cache"), "p")
+  local names = scenario == "curl_parallel" and { "bash", "go" } or { "bash" }
+  local handles, completed, failures = {}, {}, {}
+  local non_target_done, unrelated_done = scenario ~= "curl_no_stats", scenario ~= "curl_no_stats"
+  for _, name in ipairs(names) do
+    local thread = coroutine.create(function()
+      local log = require("nvim-treesitter.log").new("install/" .. name)
+      log:info("Downloading tree-sitter-" .. name .. "...")
+      if scenario == "curl_no_stats" then
+        local other = vim.system({ "sh", "-c", "printf unchanged" }, nil, function(result)
+          counters.non_target_original = result.code == 0 and result.stdout == "unchanged"
+          non_target_done = true
+        end)
+        assert(other.close == nil, "non-download SystemObj was replaced")
+        local unrelated = vim.system(
+          {
+            "curl",
+            "--silent",
+            "--fail",
+            "--show-error",
+            "--retry",
+            "7",
+            "-L",
+            "http://example.invalid/unrelated",
+            "--output",
+            vim.fs.joinpath(vim.fn.stdpath("cache"), "unrelated.tar.gz"),
+          },
+          nil,
+          function(result)
+            counters.unrelated_curl_original = result.code == 0 and result.stdout == ""
+            unrelated_done = true
+          end
+        )
+        assert(unrelated.close == nil, "unrelated curl SystemObj was replaced")
+      end
+      local info = require("nvim-treesitter.parsers")[name].install_info
+      local target = info.url .. "/archive/" .. info.revision .. ".tar.gz"
+      local output = vim.fs.joinpath(vim.fn.stdpath("cache"), "tree-sitter-" .. name .. ".tar.gz")
+      -- 与锁定插件 install.lua 的参数和回调方式一致；响应来自本地 HTTP 服务。
+      local handle = vim.system(
+        { "curl", "--silent", "--fail", "--show-error", "--retry", "7", "-L", target, "--output", output },
+        nil,
+        function(result)
+          counters.curl_callbacks = (counters.curl_callbacks or 0) + 1
+          if result.code ~= 0 then
+            failures[#failures + 1] = name
+            log:error("Error during download: %s", result.stderr)
+          else
+            log:info("Compiling parser")
+            log:info("Installing parser")
+            log:info("Language installed")
+          end
+          completed[name] = true
+        end
+      )
+      handles[name] = handle
+      local file = assert(io.open(marker .. "." .. name .. ".pid", "w"))
+      file:write(handle.pid)
+      file:close()
+    end)
+    assert(coroutine.resume(thread))
+  end
+  return {
+    pwait = function(_, timeout)
+      local limit = scenario == "curl_cancel" and 90 or timeout
+      local finished = vim.wait(limit, function()
+        if not non_target_done or not unrelated_done then
+          return false
+        end
+        for _, name in ipairs(names) do
+          if not completed[name] then
+            return false
+          end
+        end
+        return true
+      end, 10)
+      if not finished then
+        return false, "timeout"
+      end
+      return true, #failures == 0
+    end,
+    close = function()
+      counters.task_closed = counters.task_closed + 1
+      local closed, needed = 0, 0
+      for _, name in ipairs(names) do
+        if not completed[name] then
+          needed = needed + 1
+          handles[name]:close(function()
+            closed = closed + 1
+          end)
+        end
+      end
+      assert(
+        vim.wait(2000, function()
+          return closed == needed
+        end, 10),
+        "curl cancellation did not reap child"
+      )
+    end,
+    traceback = function(_, reason)
+      return reason
+    end,
+  }
+end
+
 local function task(phase)
+  if scenario:match("^curl_") then
+    return curl_task(phase)
+  end
   local slow = (scenario == "install_wait" or scenario == "install_failure" or scenario == "install_timeout")
       and phase == "install"
     or scenario == "update_wait" and phase == "update"
@@ -227,7 +353,7 @@ package.preload["nvim-treesitter"] = function()
       return task("update")
     end,
     get_installed = function()
-      return { "bash" }
+      return scenario == "curl_parallel" and { "bash", "go" } or { "bash" }
     end,
   }
 end
@@ -283,6 +409,59 @@ package.preload["blink.cmp.fuzzy"] = function()
       end
     end,
   }
+end
+
+if scenario:match("^curl_real_") then
+  -- 真实安装器的 join 不会级联关闭下载任务；不能用上方手动遍历 handles 的夹具替代。
+  for _, name in ipairs({ "nvim-treesitter", "nvim-treesitter.config", "nvim-treesitter.log" }) do
+    package.preload[name], package.loaded[name] = nil, nil
+  end
+  vim.opt.rtp:prepend(assert(vim.env.DOTFILES_TEST_TREESITTER))
+  local system = vim.system
+  vim.system = function(cmd, opts, callback)
+    if cmd[1] ~= "curl" or cmd[2] == "--version" then
+      return system(cmd, opts, callback)
+    end
+    local process = system(cmd, opts, function(result)
+      counters.real_curl_exits = (counters.real_curl_exits or 0) + 1
+      callback(result)
+    end)
+    local name = assert(cmd[10]:match("/tree%-sitter%-(.+)%.tar%.gz$"))
+    local file = assert(io.open(marker .. "." .. name .. ".pid", "w"))
+    file:write(process.pid)
+    file:close()
+    if scenario == "curl_real_cleanup_failure" then
+      local kill = process.kill
+      process.kill = function(self, ...)
+        kill(self, ...)
+        error("fixture kill diagnostic")
+      end
+    end
+    return process
+  end
+  original_system = vim.system
+
+  local ts = require("nvim-treesitter")
+  local install = ts.install
+  ts.install = function(...)
+    local task = install(...)
+    local pwait = task.pwait
+    task.pwait = function(self, timeout)
+      local seen = vim.fs.dirname(marker) .. "/http-seen/"
+      assert(
+        vim.wait(2000, function()
+          return uv.fs_stat(seen .. "bash") ~= nil and uv.fs_stat(seen .. "go") ~= nil
+        end, 10),
+        "real parser requests did not reach the local server"
+      )
+      if scenario == "curl_real_error" or scenario == "curl_real_cleanup_failure" then
+        error("fixture waiter failed with active downloads")
+      end
+      -- 只缩短夹具中的等待；真实任务的 pwait/close 和生产下载策略保持原样。
+      return pwait(self, math.min(timeout, 90))
+    end
+    return task
+  end
 end
 
 dofile(entrypoint)

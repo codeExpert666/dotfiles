@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """bootstrap 的离线行为测试：安装编排、应用准备与资源发布。"""
 import errno
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
 import io
 import json
 import os
+import re
 import select
 import shlex
 from pathlib import Path
@@ -15,6 +17,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -1213,6 +1216,7 @@ class Preparation(unittest.TestCase):
                     self.assertIn('RUN: Neovim / Treesitter / ' + phase, stdout)
                     self.assertIn('READY: Neovim / Treesitter / ' + phase, stdout)
                 self.assertIn('PARSER: Neovim / Treesitter / verify / bash; action=load', stdout)
+                self.assertNotIn('DOWNLOAD:', stdout)
                 self.assertEqual((config / 'lazy-lock.json').read_bytes(), lock)
 
         # 旧 parser.so 仍在时使修订记录过期；真实 update 必须尝试工作，并转发下载器原始错误。
@@ -1230,6 +1234,8 @@ class Preparation(unittest.TestCase):
                 self.assertIn('PARSER: Neovim / Treesitter / update / bash;', child.stdout)
                 self.assertIn('PARSER FAIL: Neovim / Treesitter / update / bash;', child.stdout)
                 self.assertIn('Error during download: unexpected network request', child.stdout)
+                self.assertIn('DOWNLOAD: Neovim / Treesitter / update / bash; request=1; event=start;', child.stdout)
+                self.assertRegex(child.stdout, r'event=finish;[^\n]*exit=90;[^\n]*http=unavailable;')
                 self.assertNotIn('READY: Neovim / Treesitter / update', child.stdout)
                 self.assertEqual((parser.stat().st_size, parser.stat().st_mtime_ns), before_parser)
                 self.assertEqual((config / 'lazy-lock.json').read_bytes(), lock)
@@ -1262,13 +1268,27 @@ class NeovimProgress(unittest.TestCase):
                         XDG_DATA_HOME=str(self.root / '.local/share'), XDG_STATE_HOME=str(self.root / '.local/state'),
                         XDG_CACHE_HOME=str(self.root / '.cache'), NVIM_LOG_FILE=str(self.root / 'nvim.log'))
 
-    def execute(self, scenario, waiting_for=None):
+    def execute(self, scenario, waiting_for=None, persist=False):
         marker = self.root / (scenario + '.release')
         command = [REAL_TOOLS['nvim'], '--headless', '-u', 'NONE', '-n', '-i', 'NONE', '-l',
                    str(REPO / 'tests/bootstrap/nvim-progress.lua'), str(REPO / 'scripts/bootstrap/nvim.lua'),
                    scenario, str(marker)]
+        if persist:
+            self.log_path = self.root / 'run.local-http'
+            self.env['DOTFILES_TEST_LOG_PATH'] = str(self.log_path)
+            command = [BASH, '-c', '"$@" 2>&1 | tee -a "$DOTFILES_TEST_LOG_PATH"; exit "${PIPESTATUS[0]}"',
+                       'bootstrap-log-fixture', *command]
         process = subprocess.Popen(command, env=self.env, cwd=self.root, stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, start_new_session=True)
+
+        def stop_process_group():
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+        # 保留退出后的子进程供断言检查；即使用例失败，也只清理本次创建的进程组。
+        self.addCleanup(stop_process_group)
         prefix = b''
         try:
             if waiting_for:
@@ -1282,20 +1302,229 @@ class NeovimProgress(unittest.TestCase):
                         self.assertTrue(chunk, prefix.decode(errors='replace'))
                         prefix += chunk
                     self.assertIsNone(process.poll(), prefix.decode(errors='replace'))
-                ready = waiting_for.replace('WAIT: ', 'READY: ', 1).rstrip(';')
-                self.assertNotIn(ready, prefix.decode(errors='replace'))
-                marker.touch()
+                if waiting_for.startswith('WAIT: '):
+                    ready = waiting_for.replace('WAIT: ', 'READY: ', 1).rstrip(';')
+                    self.assertNotIn(ready, prefix.decode(errors='replace'))
+                    marker.touch()
+                else:
+                    self.assertIsNone(process.poll(), prefix.decode(errors='replace'))
             output, _ = process.communicate(timeout=8)
         finally:
             if process.poll() is None:
-                os.killpg(process.pid, signal.SIGKILL)
+                stop_process_group()
                 process.communicate()
         text = (prefix + output).decode(errors='replace')
         timers = json.loads((self.root / (scenario + '.release.timers')).read_text())
         self.assertEqual(timers['started'], timers['stopped'], text)
         self.assertEqual(timers['started'], timers['closed'], text)
         self.assertTrue(timers['notify_restored'], text)
+        self.assertTrue(timers['system_restored'], text)
         return process.returncode, text, timers
+
+    def local_http(self, scenario):
+        requests = {}
+        lock = threading.Lock()
+        release = threading.Event()
+        seen = self.root / 'http-seen'
+        seen.mkdir(exist_ok=True)
+        for name in ('bash', 'go'):
+            (seen / name).unlink(missing_ok=True)
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                with lock:
+                    requests[self.path] = requests.get(self.path, 0) + 1
+                    attempt = requests[self.path]
+                for name in ('bash', 'go'):
+                    if self.path.startswith('/repo/' + name + '/'):
+                        (seen / name).touch()
+                if scenario == 'curl_cancel' or scenario.startswith('curl_real_'):
+                    release.wait(5)
+                if scenario == 'curl_http_failure' or (scenario == 'curl_parallel' and
+                                                       self.path.startswith('/repo/go/')):
+                    status, body = 404, b'missing parser'
+                elif self.path.startswith('/repo/bash/') and scenario in ('curl_retry', 'curl_parallel'):
+                    status, body = (503, b'temporary outage') if attempt == 1 else (302, b'')
+                else:
+                    status, body = 200, b'parser archive'
+                self.send_response(status)
+                if status == 302:
+                    self.send_header('Location', '/payload/bash?access_token=redirect-secret')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                try:
+                    self.wfile.write(body)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
+            def log_message(self, *_):
+                pass
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        server.daemon_threads = True
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.addCleanup(release.set)
+        # 本地故障注入始终直连回环地址，不继承使用者的网络代理。
+        for name in ('http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY'):
+            self.env.pop(name, None)
+        self.env.update(no_proxy='127.0.0.1,localhost,::1', NO_PROXY='127.0.0.1,localhost,::1')
+        self.env['DOTFILES_TEST_CURL_BASE'] = f'http://user:password@127.0.0.1:{server.server_port}'
+        return requests
+
+    @unittest.skipUnless(shutil.which('curl'), 'real curl is required for local HTTP download tests')
+    def test_local_http_download_ignores_inherited_proxy(self):
+        proxy_requests = self.local_http('proxy')
+        proxy = self.env['DOTFILES_TEST_CURL_BASE']
+        self.env.update({name: proxy for name in ('http_proxy', 'https_proxy', 'all_proxy',
+                                                  'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY')})
+        self.env.update(no_proxy='', NO_PROXY='')
+        requests = self.local_http('curl_ok')
+        code, output, _ = self.execute('curl_ok')
+        self.assertEqual(code, 0, output)
+        self.assertEqual(requests.get('/repo/bash/archive/test-revision.tar.gz', 0), 1, output)
+        self.assertEqual(proxy_requests, {}, 'local HTTP fixture used an inherited proxy')
+
+    @unittest.skipUnless(os.environ.get('DOTFILES_TEST_PREPARED_HOME') and shutil.which('curl'),
+                         'set DOTFILES_TEST_PREPARED_HOME for real Treesitter cancellation tests')
+    def test_real_treesitter_reaps_downloads_after_timeout_and_exception(self):
+        source = Path(os.environ['DOTFILES_TEST_PREPARED_HOME']) / '.local/share/nvim/lazy/nvim-treesitter'
+        locked = json.loads((REPO / 'nvim/.config/nvim/lazy-lock.json').read_text())['nvim-treesitter']['commit']
+        actual = run([REAL_TOOLS['git'], '-C', str(source), 'rev-parse', 'HEAD'], check=True).stdout.strip()
+        self.assertEqual(actual, locked, 'real installer fixture must match the locked plugin')
+        plugin = self.root / 'real-treesitter'
+        shutil.copytree(source, plugin, symlinks=True)
+        self.env['DOTFILES_TEST_TREESITTER'] = str(plugin)
+        for scenario, reason in (('curl_real_cancel', 'Treesitter install timed out'),
+                                 ('curl_real_error', 'fixture waiter failed with active downloads'),
+                                 ('curl_real_cleanup_failure', 'fixture waiter failed with active downloads')):
+            with self.subTest(scenario=scenario):
+                requests = self.local_http(scenario)
+                code, output, timers = self.execute(scenario)
+                self.assertEqual(code, 1, output)
+                self.assertIn(reason, output)
+                self.assertEqual(output.count('event=cancel;'), 2, output)
+                self.assertNotIn('event=finish;', output)
+                self.assertNotIn('READY: Neovim / Treesitter / install;', output)
+                self.assertEqual(timers['real_curl_exits'], 2, output)
+                failure = output.index('FAIL: Neovim preparation:')
+                self.assertNotIn('DOWNLOAD:', output[failure:])
+                self.assertIn(reason, output[failure:])
+                if scenario == 'curl_real_cleanup_failure':
+                    self.assertIn('FAIL: Neovim / Treesitter / download cleanup;', output)
+                    self.assertIn('fixture kill diagnostic', output)
+                    self.assertNotIn('fixture kill diagnostic', output[failure:])
+                for name in ('bash', 'go'):
+                    self.assertEqual(requests.get('/repo/' + name + '/archive/test-revision.tar.gz', 0), 1)
+                    pid = int((self.root / (scenario + '.release.' + name + '.pid')).read_text())
+                    with self.assertRaises(ProcessLookupError, msg=output):
+                        os.kill(pid, 0)
+
+    @unittest.skipUnless(shutil.which('curl'), 'real curl is required for local HTTP download tests')
+    def test_real_curl_direct_success_reports_final_transfer(self):
+        requests = self.local_http('curl_ok')
+        code, output, timers = self.execute('curl_ok')
+        self.assertEqual(code, 0, output)
+        self.assertEqual(requests['/repo/bash/archive/test-revision.tar.gz'], 1)
+        self.assertIn('event=finish;', output)
+        self.assertIn('exit=0; retry_notices=0;', output)
+        self.assertIn('http=200; bytes=14;', output)
+        self.assertNotIn('event=retry;', output)
+        self.assertNotIn('PARSER FAIL:', output)
+        self.assertEqual(timers['curl_callbacks'], 1)
+
+    @unittest.skipUnless(shutil.which('curl'), 'real curl is required for local HTTP download tests')
+    def test_real_curl_retry_succeeds_with_live_reason_and_redirect_summary(self):
+        requests = self.local_http('curl_retry')
+        code, output, timers = self.execute('curl_retry', 'event=retry', persist=True)
+        self.assertEqual(code, 0, output)
+        self.assertEqual(requests['/repo/bash/archive/test-revision.tar.gz'], 2)
+        self.assertIn('event=retry;', output)
+        self.assertLess(output.index('event=retry;'), output.index('event=finish;'))
+        self.assertIn('http=200; bytes=14;', output)
+        self.assertIn('final_url=http://127.0.0.1:', output)
+        self.assertIn('/payload/bash?<redacted>', output)
+        self.assertIn('retry_notices=1;', output)
+        self.assertNotIn('PARSER FAIL:', output)
+        self.assertNotIn('password', output)
+        self.assertNotIn('redirect-secret', output)
+        self.assertEqual(timers['curl_callbacks'], 1)
+        self.assertIn('DOWNLOAD: Neovim / Treesitter / install / bash;', self.log_path.read_text())
+        self.assertIn('event=retry;', self.log_path.read_text())
+        finish = next(line for line in output.splitlines() if 'event=finish;' in line)
+        wall = float(re.search(r'wall_elapsed=([\d.]+)s', finish).group(1))
+        curl_total = float(re.search(r'curl_total=([\d.]+)', finish).group(1))
+        self.assertGreaterEqual(wall, 0.8)
+        self.assertLess(curl_total, wall)
+
+    @unittest.skipUnless(shutil.which('curl'), 'real curl is required for local HTTP download tests')
+    def test_real_curl_nonretryable_http_error_fails_with_original_reason(self):
+        requests = self.local_http('curl_http_failure')
+        code, output, timers = self.execute('curl_http_failure')
+        self.assertEqual(code, 1, output)
+        self.assertEqual(requests['/repo/bash/archive/test-revision.tar.gz'], 1)
+        self.assertRegex(output, r'event=finish;[^\n]*exit=22;')
+        self.assertIn('http=404;', output)
+        self.assertIn('curl: (22) The requested URL returned error: 404', output)
+        self.assertIn('PARSER FAIL: Neovim / Treesitter / install / bash;', output)
+        self.assertNotIn('READY: Neovim / Treesitter / install;', output)
+        self.assertEqual(timers['curl_callbacks'], 1)
+
+    @unittest.skipUnless(shutil.which('curl'), 'real curl is required for local HTTP download tests')
+    def test_real_curl_slow_response_reports_wait_and_kills_cancelled_request(self):
+        self.local_http('curl_cancel')
+        code, output, timers = self.execute('curl_cancel', 'WAIT: Neovim / Treesitter / install;')
+        self.assertEqual(code, 1, output)
+        self.assertIn('event=cancel;', output)
+        self.assertNotIn('event=finish;', output)
+        self.assertNotIn('READY: Neovim / Treesitter / install;', output)
+        self.assertEqual(timers['task_closed'], 1)
+        self.assertNotIn('curl_callbacks', timers)
+        pid = int((self.root / 'curl_cancel.release.bash.pid').read_text())
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+
+    @unittest.skipUnless(shutil.which('curl'), 'real curl is required for local HTTP download tests')
+    def test_real_curl_parallel_requests_keep_parser_and_error_attribution(self):
+        requests = self.local_http('curl_parallel')
+        code, output, timers = self.execute('curl_parallel', 'event=retry')
+        self.assertEqual(code, 1, output)
+        self.assertEqual(requests['/repo/bash/archive/test-revision.tar.gz'], 2)
+        self.assertEqual(requests['/repo/go/archive/test-revision.tar.gz'], 1)
+        starts = re.findall(r'DOWNLOAD: Neovim / Treesitter / install / (\w+); request=(\d+); event=start;', output)
+        self.assertEqual(len(starts), 2, output)
+        self.assertEqual({name for name, _ in starts}, {'bash', 'go'})
+        self.assertEqual(len({request for _, request in starts}), 2)
+        self.assertRegex(output, r'DOWNLOAD: Neovim / Treesitter / install / bash; request=\d+; event=finish;[^\n]*http=200;')
+        self.assertRegex(output, r'DOWNLOAD: Neovim / Treesitter / install / go; request=\d+; event=finish;[^\n]*http=404;')
+        self.assertRegex(output, r'DOWNLOAD: Neovim / Treesitter / install / bash; request=\d+; event=stderr;[^\n]*error: 503')
+        self.assertRegex(output, r'DOWNLOAD: Neovim / Treesitter / install / go; request=\d+; event=stderr;[^\n]*error: 404')
+        self.assertRegex(output, r'downloads=bash \(request=\d+ retry \(Warning: Problem : HTTP error')
+        self.assertIn('PARSER FAIL: Neovim / Treesitter / install / go;', output)
+        self.assertNotIn('PARSER FAIL: Neovim / Treesitter / install / bash;', output)
+        self.assertEqual(timers['curl_callbacks'], 2)
+
+    def test_missing_curl_writeout_fields_keep_success_and_redact_error(self):
+        bindir = self.root / 'bin'
+        bindir.mkdir()
+        curl = bindir / 'curl'
+        curl.write_text('#!/bin/sh\nif [ "$1" = --version ]; then echo "curl 7.88.0"; exit 0; fi\n'
+                        'printf "Warning: reconnecting https://user:password@example.test/token/path-secret?token=private\\n" >&2\n'
+                        'exit 0\n')
+        curl.chmod(0o755)
+        self.env['PATH'] = str(bindir) + ':' + self.env['PATH']
+        code, output, timers = self.execute('curl_no_stats')
+        self.assertEqual(code, 0, output)
+        self.assertIn('http=unavailable; bytes=unavailable; final_url=unavailable;', output)
+        self.assertIn('retries=unavailable', output)
+        self.assertNotIn('password', output)
+        self.assertNotIn('private', output)
+        self.assertNotIn('path-secret', output)
+        self.assertEqual(timers['curl_callbacks'], 1)
+        self.assertTrue(timers['non_target_original'])
+        self.assertTrue(timers['unrelated_curl_original'])
 
     def test_cache_reuse_and_distinct_treesitter_phases(self):
         code, output, _ = self.execute('reuse')
@@ -1305,6 +1534,7 @@ class NeovimProgress(unittest.TestCase):
             self.assertIn('READY: Neovim / Treesitter / ' + phase, output)
         self.assertNotIn('PARSER: Neovim / Treesitter / install /', output)
         self.assertNotIn('PARSER: Neovim / Treesitter / update /', output)
+        self.assertNotIn('DOWNLOAD:', output)
         self.assertIn('PARSER: Neovim / Treesitter / verify / bash; action=load', output)
 
     def test_slow_install_and_existing_parser_update_report_real_task_events(self):

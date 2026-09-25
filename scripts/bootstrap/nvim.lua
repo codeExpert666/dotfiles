@@ -210,12 +210,294 @@ local function prepare_mason()
   end
 end
 
+-- curl 的计时是最终传输的累计检查点；重试和退避另由单调时钟计入 wall_elapsed。
+-- 不记录 URL 的用户信息、查询参数或片段，也不转发 curl 的原始 stderr 到日志。
+local function safe_url(url)
+  local scheme, rest = tostring(url or ""):match("^([Hh][Tt][Tt][Pp][Ss]?://)(.+)$")
+  if not scheme then
+    return "unavailable"
+  end
+  local authority, suffix = rest:match("^([^/?#]+)(.*)$")
+  if not authority then
+    return "unavailable"
+  end
+  authority = authority:match("@(.+)$") or authority
+  local path = suffix:match("^[^?#]*") or ""
+  local parts, redact_next = vim.split(path, "/", { plain = true }), false
+  for index, part in ipairs(parts) do
+    local lower = part:lower()
+    if redact_next or lower:match("^gh[pousr]_[%w_]+$") then
+      parts[index] = "<redacted>"
+    end
+    redact_next = lower == "token"
+      or lower == "secret"
+      or lower == "password"
+      or lower == "apikey"
+      or lower == "api_key"
+  end
+  path = table.concat(parts, "/")
+  return scheme .. authority .. path .. (suffix:find("?", 1, true) and "?<redacted>" or "")
+end
+
+local function safe_error(message)
+  local line = vim.trim(tostring(message):gsub("%c", " "))
+  line = line:gsub("[Hh][Tt][Tt][Pp][Ss]?://[^%s<>\"']+", safe_url)
+  line = line:gsub("([Bb]earer%s+)[^%s]+", "%1<redacted>")
+  return line:gsub("([%w_-]+)=([^%s&]+)", function(key, value)
+    if key:lower():find("token") or key:lower():find("secret") or key:lower():find("key") then
+      return key .. "=<redacted>"
+    end
+    return key .. "=" .. value
+  end)
+end
+
+local curl_fields = {
+  "http",
+  "bytes",
+  "final_url",
+  "redirects",
+  "dns_at",
+  "connect_at",
+  "tls_at",
+  "first_byte_at",
+  "curl_total",
+  "redirect_total",
+}
+
+local function curl_write_out(has_retries)
+  local variables = {
+    "http_code",
+    "size_download",
+    "url_effective",
+    "num_redirects",
+    "time_namelookup",
+    "time_connect",
+    "time_appconnect",
+    "time_starttransfer",
+    "time_total",
+    "time_redirect",
+  }
+  if has_retries then
+    variables[#variables + 1] = "num_retries"
+  end
+  local format = "DOTFILES_CURL"
+  for _, variable in ipairs(variables) do
+    format = format .. "\\t%{" .. variable .. "}"
+  end
+  return format .. "\\n"
+end
+
+local function curl_summary(stdout, has_retries)
+  local values = vim.split((stdout or ""):match("DOTFILES_CURL\t([^\r\n]*)") or "", "\t", { plain = true })
+  local summary = {}
+  for index, field in ipairs(curl_fields) do
+    local value = values[index]
+    if field == "final_url" then
+      value = value and safe_url(value)
+    elseif field == "http" and tonumber(value) == 0 then
+      value = "unavailable"
+    elseif not value or not tonumber(value) then
+      value = "unavailable"
+    end
+    summary[#summary + 1] = field .. "=" .. (value or "unavailable")
+  end
+  local retries = has_retries and tonumber(values[#curl_fields + 1]) or nil
+  summary[#summary + 1] = "retries=" .. (retries and tostring(retries) or "unavailable")
+  return table.concat(summary, "; ")
+end
+
 -- 锁定的 nvim-treesitter 在 install.lua 中为每个实际任务创建 install/<lang>
--- logger。只转发这些 logger 的真实事件；旧 parser.so 不能代表 update 已完成。
+-- logger；异步调度器随后调用 vim.system(curl)。事件、目标 URL 和输出文件共同确定请求归属。
+-- 只转发这些 logger 的真实事件；旧 parser.so 不能代表 update 已完成。
 local function treesitter_events()
   local log = require("nvim-treesitter.log")
-  local original_new = log.new
-  local state = { phase = nil, started = nil, active = {}, errors = {} }
+  local original_new, original_system = log.new, vim.system
+  local state = { phase = nil, started = nil, active = {}, errors = {}, latest = {}, pending = {}, next_request = 0 }
+  local requests, closing = {}, false
+  local version_ok, curl_version = pcall(function()
+    return original_system({ "curl", "--version" }, { text = true }):wait(2000)
+  end)
+  local major, minor = (version_ok and curl_version and curl_version.stdout or ""):match("^curl (%d+)%.(%d+)")
+  local has_retries = major and (tonumber(major) > 8 or tonumber(major) == 8 and tonumber(minor) >= 9)
+
+  local function request_line(request, event, details)
+    if not state.phase then
+      return
+    end
+    local prefix = "DOWNLOAD: Neovim / Treesitter / " .. request.phase .. " / " .. request.lang
+    report(
+      prefix
+        .. "; request="
+        .. request.id
+        .. "; event="
+        .. event
+        .. "; at="
+        .. os.date("!%Y-%m-%dT%H:%M:%SZ")
+        .. "; wall_elapsed="
+        .. elapsed(request.started)
+        .. "; "
+        .. details
+    )
+    state.latest[request.lang] = "request=" .. request.id .. " " .. event
+  end
+
+  local function matches_download(cmd, opts, callback)
+    if state.phase == nil or opts ~= nil or type(callback) ~= "function" or type(cmd) ~= "table" or #cmd ~= 10 then
+      return nil
+    end
+    if
+      cmd[1] ~= "curl"
+      or cmd[2] ~= "--silent"
+      or cmd[3] ~= "--fail"
+      or cmd[4] ~= "--show-error"
+      or cmd[5] ~= "--retry"
+      or cmd[6] ~= "7"
+      or cmd[7] ~= "-L"
+      or cmd[9] ~= "--output"
+    then
+      return nil
+    end
+    local parsers = require("nvim-treesitter.parsers")
+    for lang in pairs(state.pending) do
+      local info = parsers[lang]
+      info = info and info.install_info
+      if info and info.url and not info.path then
+        local target = info.url:gsub(".git$", "")
+          .. "/archive/"
+          .. (info.revision or info.branch or "main")
+          .. ".tar.gz"
+        local output = vim.fs.joinpath(vim.fn.stdpath("cache"), "tree-sitter-" .. lang .. ".tar.gz")
+        if cmd[8] == target and cmd[10] == output then
+          return lang
+        end
+      end
+    end
+  end
+
+  vim.system = function(cmd, opts, callback)
+    local lang = matches_download(cmd, opts, callback)
+    if not lang then
+      return original_system(cmd, opts, callback)
+    end
+    assert(not closing, "Treesitter download requested during cleanup")
+    state.pending[lang] = nil
+
+    state.next_request = state.next_request + 1
+    local request =
+      { id = tostring(state.next_request), phase = state.phase, lang = lang, started = uv.hrtime(), retries_seen = 0 }
+    request_line(request, "start", "url=" .. safe_url(cmd[8]))
+    local args = vim.deepcopy(cmd)
+    args[2] = "--no-progress-meter"
+    args[#args + 1] = "--write-out"
+    args[#args + 1] = curl_write_out(has_retries)
+
+    local stderr_parts, pending = {}, ""
+    local finished, cancelled, close_callbacks = false, false, {}
+    local process
+    local function emit(line)
+      line = safe_error(line)
+      if line == "" then
+        return
+      end
+      local lower = line:lower()
+      local event = lower:match("^warning:") and (lower:find("will retry", 1, true) or lower:find("retrying", 1, true))
+      event = event and "retry" or "stderr"
+      if event == "retry" then
+        request.retries_seen = request.retries_seen + 1
+      end
+      request_line(request, event, "detail=" .. line)
+      state.latest[lang] = "request=" .. request.id .. " " .. event .. " (" .. line .. ")"
+    end
+    local function flush_lines()
+      while true do
+        local newline = pending:find("\n", 1, true)
+        if not newline then
+          break
+        end
+        emit(pending:sub(1, newline - 1))
+        pending = pending:sub(newline + 1)
+      end
+    end
+    local function on_stderr(err, data)
+      if err then
+        emit("stderr read: " .. tostring(err))
+      end
+      if data then
+        stderr_parts[#stderr_parts + 1] = data
+        pending = pending .. data
+        flush_lines()
+      end
+    end
+    local function on_exit(result)
+      finished = true
+      requests[request.id] = nil
+      if pending ~= "" then
+        emit(pending)
+        pending = ""
+      end
+      if cancelled then
+        request_line(request, "cancel", "exit=" .. tostring(result.code))
+        for _, done in ipairs(close_callbacks) do
+          done()
+        end
+        return
+      end
+      local stderr = table.concat(stderr_parts)
+      result.stderr = safe_error(stderr)
+      local summary = curl_summary(result.stdout, has_retries)
+      result.stdout = "" -- 原插件将响应写入 --output，未要求 stdout。
+      request_line(
+        request,
+        "finish",
+        "exit="
+          .. tostring(result.code)
+          .. "; retry_notices="
+          .. request.retries_seen
+          .. "; original_url="
+          .. safe_url(cmd[8])
+          .. "; "
+          .. summary
+      )
+      callback(result)
+    end
+    local ok, spawned = pcall(original_system, args, { stderr = on_stderr }, on_exit)
+    if not ok then
+      request_line(request, "spawn_fail", "reason=" .. safe_error(spawned))
+      error(spawned, 0)
+    end
+    process = spawned
+    -- 单个异步任务可关闭此句柄，但插件的并发 join 不会级联关闭所有任务；
+    -- 同时登记下载进程，由本次准备的退出路径统一取消并等待回收。
+    local handle = setmetatable({
+      close = function(_, done)
+        if finished then
+          if done then
+            done()
+          end
+        else
+          if done then
+            close_callbacks[#close_callbacks + 1] = done
+          end
+          if not cancelled then
+            cancelled = true
+            process:kill(9)
+          end
+        end
+      end,
+    }, {
+      __index = function(_, key)
+        local value = process[key]
+        if type(value) == "function" then
+          return function(_, ...)
+            return value(process, ...)
+          end
+        end
+        return value
+      end,
+    })
+    requests[request.id] = handle
+    return handle
+  end
   log.new = function(context)
     local logger = original_new(context)
     local lang = context and context:match("^install/(.+)$")
@@ -227,8 +509,15 @@ local function treesitter_events()
       local formatted = message:format(...)
       local result = original_info(self, message, ...)
       if state.phase then
+        if formatted == "Downloading tree-sitter-" .. lang .. "..." then
+          state.pending[lang] = true
+        else
+          state.pending[lang] = nil
+          state.latest[lang] = nil
+        end
         if formatted == "Language installed" then
           state.active[lang] = nil
+          state.latest[lang] = nil
         else
           state.active[lang] = formatted
         end
@@ -251,8 +540,10 @@ local function treesitter_events()
       local formatted = message:format(...)
       local result = original_error(self, message, ...)
       if state.phase then
+        state.pending[lang] = nil
         state.errors[#state.errors + 1] = lang .. ": " .. formatted
         state.active[lang] = nil
+        state.latest[lang] = nil
         report(
           "PARSER FAIL: Neovim / Treesitter / "
             .. state.phase
@@ -270,9 +561,32 @@ local function treesitter_events()
     end
     return logger
   end
-  return state, function()
-    log.new = original_new
-  end
+  return state,
+    function()
+      closing = true
+      local errors = {}
+      for _, handle in ipairs(vim.tbl_values(requests)) do
+        local ok, err = pcall(handle.close, handle)
+        if not ok then
+          errors[#errors + 1] = safe_error(err)
+        end
+      end
+      if next(requests) then
+        local ok, drained = pcall(vim.wait, 2000, function()
+          return next(requests) == nil
+        end, 10)
+        if not ok then
+          errors[#errors + 1] = safe_error(drained)
+        elseif not drained then
+          errors[#errors + 1] = "curl processes did not exit within the 2s cleanup limit"
+        end
+      end
+      -- 清理失败也恢复覆盖；主调用方保留原始故障，并补充清理诊断。
+      state.phase = nil
+      log.new = original_new
+      vim.system = original_system
+      assert(#errors == 0, table.concat(errors, "; "))
+    end
 end
 
 local function wait_treesitter(task, remaining, state)
@@ -307,27 +621,39 @@ local function prepare_treesitter()
   assert(type(parsers) == "table" and #parsers > 0, "no configured Treesitter parser set")
   -- 补装缺失的解析器，并将已有解析器更新到锁定插件声明的修订；
   -- nvim-treesitter 会跳过已经匹配的修订。
-  local state, restore_log = treesitter_events()
+  local state, cleanup_events = treesitter_events()
   local function active_parsers()
     local entries = {}
     for name, action in pairs(state.active) do
       entries[#entries + 1] = name .. " (" .. action .. ")"
     end
     table.sort(entries)
-    return #entries > 0 and "; active=" .. table.concat(entries, ", ") or "; waiting for nvim-treesitter task"
+    local downloads = {}
+    for name, latest in pairs(state.latest) do
+      downloads[#downloads + 1] = name .. " (" .. latest .. ")"
+    end
+    table.sort(downloads)
+    local suffix = #downloads > 0 and "; downloads=" .. table.concat(downloads, ", ") or ""
+    return (#entries > 0 and "; active=" .. table.concat(entries, ", ") or "; waiting for nvim-treesitter task")
+      .. suffix
   end
   local ok, err = pcall(function()
     for _, phase in ipairs({ "install", "update" }) do
-      state.phase, state.started, state.active, state.errors = phase, uv.hrtime(), {}, {}
+      state.phase, state.started, state.active, state.errors, state.latest, state.pending =
+        phase, uv.hrtime(), {}, {}, {}, {}
       step("Neovim / Treesitter / " .. phase, 600000, function(remaining)
         wait_treesitter(ts[phase](parsers), remaining, state)
       end, active_parsers)
     end
   end)
-  restore_log()
+  local cleaned, cleanup_error = pcall(cleanup_events)
+  if not cleaned then
+    report("FAIL: Neovim / Treesitter / download cleanup; reason=" .. tostring(cleanup_error))
+  end
   if not ok then
     error(err, 0)
   end
+  assert(cleaned, cleanup_error)
   -- 首次安装前目录尚不存在，lazy.nvim 加载插件时可能将其从 runtimepath 移除；
   -- 安装完成后补回实际目录，让本次会话能发现新安装的解析器及查询文件。
   step("Neovim / Treesitter / verify", nil, function()
