@@ -317,6 +317,7 @@ class Orchestration(unittest.TestCase):
         self.assertIn('PLAN: nvim', output.stderr)
         self.assertIn('compile bundled Ghostty 1.3.1 text with tic -x', output.stderr)
         self.assertIn('dry run completed', output.stderr)
+        self.assertIn('WARNING: in simulation mode so not modifying filesystem.', output.stderr)
         self.assertEqual(snapshot(self.home), before)
         self.assertEqual(self.events(), [])
 
@@ -573,7 +574,15 @@ class Orchestration(unittest.TestCase):
     def test_full_apply_deploys_and_rerun_reuses_tools(self):
         self.env['BOOTSTRAP_TEST_OLD'] = 'shfmt'
         original = snapshot(self.repo / 'nvim')
-        self.invoke('--apply', '--profile', 'server')
+        output = self.invoke('--apply', '--profile', 'server').stderr
+        notice = 'WARNING: in simulation mode so not modifying filesystem.'
+        self.assertNotIn(notice, output)
+        self.assertIn('RUN: deployment preflight (dry-run); timeout=120s', output)
+        self.assertLess(output.index('READY: deployment preflight (dry-run);'),
+                        output.index('RUN: configuration deployment;'))
+        log = next((self.home / '.local/state/dotfiles-bootstrap').glob('run.*')).read_text()
+        self.assertIn(notice, log)
+        self.assertLess(log.index(notice), log.index('RUN: configuration deployment;'))
         self.assertTrue((self.home / '.config/nvim/init.lua').is_symlink())
         self.assertIn(['apt-get', 'install', '-y', '--no-install-recommends', 'shfmt'], self.events())
         self.assertTrue(any(e[0] == 'doctor' and '--runtime' in e for e in self.events()))
@@ -1102,17 +1111,17 @@ class Orchestration(unittest.TestCase):
     def test_logging_failure_is_not_command_success(self):
         # Fail the deployment receiver explicitly, not whichever earlier
         # preparation action happens to emit output first.
-        self.mock_shell('awk', 'case " $* " in\n*" source=deploy "*) cat >/dev/null; exit 73 ;;\n'
+        self.mock_shell('awk', 'case " $* " in\n*" source=deploy-preview "*) cat >/dev/null; exit 73 ;;\n'
                         '*) exec ' + shlex.quote(REAL_TOOLS['awk']) + ' "$@" ;;\nesac\n')
         output = self.invoke('--apply', '--profile', 'server', success=1).stderr
         self.assertIn('FAIL logging:', output)
-        self.assertIn('deployment preflight failed (exit 73)', output)
+        self.assertIn('deployment preflight (dry-run) failed (exit 73)', output)
         self.assertNotIn('Bootstrap complete.', output)
         self.assertEqual(list(self.scratch.iterdir()), [])
         # 部署和日志接收器同时失败时，保留部署的退出码。
         (self.home / '.gitconfig').write_text('# 与部署冲突的个人配置入口。\n')
         output = self.invoke('--apply', '--profile', 'server', success=1).stderr
-        self.assertIn('deployment preflight failed (exit 1)', output)
+        self.assertIn('deployment preflight (dry-run) failed (exit 1)', output)
         self.assertNotIn('Bootstrap complete.', output)
         self.assertEqual(list(self.scratch.iterdir()), [])
 
@@ -1487,15 +1496,44 @@ forward_output
         self.assertNotIn('STACK:', result.stderr)
         self.assertIn('STACK: full diagnostic', self.log.read_text())
 
+    def test_simulation_notice_is_detail_only_for_deployment_preflight(self):
+        notice = 'WARNING: in simulation mode so not modifying filesystem.'
+        warning = notice + ' Unexpected additional diagnostic.'
+        program = f'print({notice!r});print("  ordinary detail");print({warning!r})'
+        for source in ('deploy-preview', 'deploy', 'native', 'legacy'):
+            for stream in (False, True):
+                with self.subTest(source=source, stream=stream):
+                    self.work.mkdir(exist_ok=True)
+                    self.log.unlink(missing_ok=True)
+                    self.env['DOTFILES_BOOTSTRAP_STREAM'] = '1' if stream else '0'
+                    result = run(self.command(program, source=source), env=self.env, cwd=self.root)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, '')
+                    lines = result.stderr.splitlines()
+                    event = '@@DOTFILES/1 EVENT ' if stream else ''
+                    if source == 'deploy-preview':
+                        self.assertNotIn(event + notice, lines)
+                        self.assertNotIn(event + '  ordinary detail', lines)
+                        if stream:
+                            self.assertIn('@@DOTFILES/1 DETAIL ' + notice, lines)
+                    else:
+                        self.assertIn(event + notice, lines)
+                    self.assertIn(event + warning, lines)
+                    self.assertIn(notice + '\n  ordinary detail\n' + warning, self.log.read_text())
+
     def test_all_deployment_conflicts_remain_visible_beyond_the_fallback_tail(self):
         program = ('print("ordinary deployment detail");'
                    'print("WARNING! stowing fixture would cause conflicts:");'
                    '[print("  * conflicting path", i) for i in range(25)];exit(1)')
-        result = run(self.command(program, source='deploy'), env=self.env, cwd=self.root)
-        self.assertEqual(result.returncode, 1)
-        for index in range(25):
-            self.assertIn('  * conflicting path ' + str(index) + '\n', result.stderr)
-        self.assertNotIn('ordinary deployment detail', result.stderr)
+        for source in ('deploy-preview', 'deploy'):
+            with self.subTest(source=source):
+                self.work.mkdir(exist_ok=True)
+                result = run(self.command(program, source=source), env=self.env, cwd=self.root)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn('WARNING! stowing fixture would cause conflicts:', result.stderr)
+                for index in range(25):
+                    self.assertIn('  * conflicting path ' + str(index) + '\n', result.stderr)
+                self.assertNotIn('ordinary deployment detail', result.stderr)
 
     def test_color_controls_do_not_change_the_terminal_being_checked(self):
         program = ('import os;print(os.environ["TERM"]);'

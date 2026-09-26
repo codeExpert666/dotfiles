@@ -22,12 +22,15 @@ function publish(line,    visible, level) {
         }
     } else if (line ~ /^@@DOTFILES\/1 DETAIL /) {
         line = substr(line, 21)
-    } else if (source == "native" || source == "deploy" || source == "legacy") {
+    } else if (source == "native" || source == "deploy" || source == "deploy-preview" || source == "legacy") {
         # 原生命令没有事件接口，保留其明确的警告/错误及后续 hint。
         # 未知格式失败由调用方显示末尾摘要，完整正文始终写入日志。
         level = line ~ /^(W:|E:|[Ww][Aa][Rr][Nn]([Ii][Nn][Gg])?[:!]|[Ee][Rr][Rr][Oo][Rr]:|[Ff][Aa][Tt][Aa][Ll]:|FAIL[: ]|hint:)/
         # 原生多行诊断的缩进正文属于同一条提醒，例如 Stow 的完整冲突列表。
         visible = level || (attention && line ~ /^[ \t]+[^ \t]/)
+        # 仅部署预检中的 Stow 模拟提示属于正常详情；正式部署和其他警告仍可见。
+        if (source == "deploy-preview" && line == "WARNING: in simulation mode so not modifying filesystem.")
+            visible = 0
         attention = visible
     }
     print line >> log_path

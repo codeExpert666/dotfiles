@@ -195,7 +195,7 @@ phase='terminal definition'
 run 'prepare xterm-ghostty terminfo' 120 python3 -B "$script_dir/bootstrap/terminfo.py"
 
 phase='deployment'
-output_source=deploy run 'deployment preflight' 120 "$BASH" "$script_dir/deploy.sh" --dry-run
+output_source=deploy-preview run 'deployment preflight (dry-run)' 120 "$BASH" "$script_dir/deploy.sh" --dry-run
 output_source=deploy run 'configuration deployment' 120 "$BASH" "$script_dir/deploy.sh" --apply
 
 # ===== 应用与终端资源 =====

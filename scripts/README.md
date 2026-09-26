@@ -206,7 +206,7 @@ HOME/XDG、日志、临时文件和工作目录。Git/Stow 未达标时，部署
 | 阶段       | `--apply` 执行内容                                                                                                                                          |
 | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 软件与能力 | 准备平台软件及所需 Go/JDK/Maven，探测 npm、C、Java/Maven 能力，然后准备并验证 `xterm-ghostty` |
-| 部署       | 运行 deploy 预检，再部署配置                                                                                                                                |
+| 部署       | 先运行 `deploy.sh --dry-run` 检查冲突，再运行 `deploy.sh --apply` 部署配置                                                                                     |
 | 插件与资源 | 准备 Zsh、Neovim 插件和工具；desktop 另准备桌面软件及字体                                                                                                   |
 | 验收       | 复查工具链能力，运行适用的 doctor 诊断（含受控运行检查），清理后汇总。server 检查 12 个基础模块（自动排除 ghostty 与 terminal），desktop 执行全部 14 个模块 |
 
@@ -305,7 +305,7 @@ TCP 连接及 TLS 握手；连接建立后的响应体传输不受这个连接�
 | 插件与工具       | `~/.local/share/antidote/`、`~/.cache/antidote/`、`~/.local/share/nvim/`                        |
 | 字体             | Linux：`~/.local/share/fonts/dotfiles-bootstrap/`；macOS：`~/Library/Fonts/dotfiles-bootstrap/` |
 
-- **终端与日志**：终端保留阶段、动作、任务摘要、警告/失败及日志位置；apt/Homebrew、lazy.nvim Git 进度、逐文件部署、逐项工具成功、doctor PASS、Treesitter 详细事件进入日志。Neovim 多行通知显示有界的原因与提示，完整正文和堆栈写入日志。内嵌 doctor 的 WARN/FAIL/SKIP 及 hint 和准确的总计仍然可见；独立 doctor、deploy 和显式 dry-run 保留完整报告。
+- **终端与日志**：终端保留阶段、动作、任务摘要、警告/失败及日志位置；apt/Homebrew、lazy.nvim Git 进度、逐文件部署、逐项工具成功、doctor PASS、Treesitter 详细事件进入日志。部署预检标为 `deployment preflight (dry-run)`，其中 Stow 的正常 `simulation mode` 提示只写入详情日志，真实冲突警告及其列表仍显示。Neovim 多行通知显示有界的原因与提示，完整正文和堆栈写入日志。内嵌 doctor 的 WARN/FAIL/SKIP 及 hint 和准确的总计仍然可见；独立 doctor、deploy 和显式 dry-run 保留完整报告。
 - **长任务与中断**：通用长任务每约 30 秒显示动作、已耗时及上限；Neovim 使用自己的动作心跳。命令、日志转发或必要清理失败都会阻止总体成功；主体错误或中断退出码优先保留，清理错误另行报告。捕获中断信号（HUP/INT/TERM）时自动回收本次任务的进程组并释放排他锁。
 - **诊断内容**：优先关闭工具颜色，日志接收器清理 ANSI；回车/退格覆盖转成分行记录，未换行的尾部在命令结束或中断排空时补齐换行。UTF-8 正文保持完整，摘要裁剪不会拆开中文或 emoji，也不会改变安装命令的 locale。资源助手另存被捕获命令的 stdout/stderr（包括成功警告、失败、超时及中断前正文），返回给解析器的数据不混入日志标记。未知格式错误显示有限的尾部摘要，完整证据仍在日志中；必要清理的原生错误也会记录。首次安装的日志接收器只用 Bash 和系统 awk，不提前依赖 Python；使用 mawk 时启用行式输入，避免小批量进度滞留在缓冲中。
 - **日志位置**：成功、失败和可捕获中断都会报告本次 `run.*`；预检或预览未建立持久化记录时明确显示 `Log: none`。可在另一终端用 `tail -f <run.*路径>` 查看详情。
