@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from urllib.parse import urlsplit
 import uuid
 
@@ -47,6 +48,7 @@ STAGE_DESCRIPTIONS = {
     "bootstrap": "Apply the guest server bootstrap",
     "finalize": "Apply guest account settings",
     "verified": "Verify the configured development machine",
+    "destroy": "Verify ownership and retire the managed instance",
 }
 PROGRESS_INTERVAL = 30
 CONNECT_RETRY_SECONDS = 120
@@ -56,11 +58,25 @@ SERVER_MODULES = ("environment", "deployment", "dependencies", "zsh", "git", "la
                   "nvim", "starship", "atuin", "shuck", "vim", "state")
 
 
+def clean_output(text):
+    """保留终端覆盖前后的正文，移除装饰性 CSI/OSC 与其他控制符。"""
+    text = re.sub(r"\x1b\].*?(?:\x07|\x1b\\)", "", text, flags=re.DOTALL)
+    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-_]", "", text)
+    text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\b", "\n")
+    return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
+
+
+def brief(value, limit=400):
+    return " ".join(clean_output(str(value)).split())[:limit]
+
+
 class Runner:
     def __init__(self):
         self.log = None
         self.active = None
         self.on_wait = None
+        self.output_mode = "native"
+        self.last_log = None
 
     def __call__(self, argv, *, timeout=15, check=True, stream=False, heartbeat=None,
                  on_wait=None, show_output=True):
@@ -68,82 +84,153 @@ class Runner:
         if heartbeat is None and timeout >= 60:
             heartbeat = PROGRESS_INTERVAL
         on_wait = on_wait or self.on_wait
+        failure_events = deque(maxlen=3)
         if stream or heartbeat:
-            # 长命令由读取线程持续写日志，主线程负责超时、进度提示和信号处理。
             process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                       text=True, bufsize=1, start_new_session=True)
+                                       text=True, bufsize=1, start_new_session=True,
+                                       env={**os.environ, "NO_COLOR": "1", "CLICOLOR": "0",
+                                            "HOMEBREW_NO_COLOR": "1"})
             self.active = process
             output = deque(maxlen=200) if stream else []
-            last_output = [time.monotonic()]
+            last_visible = [time.monotonic()]
+            event_driven = [False]
             forwarding_errors = []
 
             def forward():
+                log = None
                 try:
-                    with process.stdout, (open(self.log, "a") if self.log else open(os.devnull, "w")) as log:
-                        for line in process.stdout:
-                            output.append(line)
-                            log.write(line)
-                            log.flush()
-                            last_output[0] = time.monotonic()
-                            if stream and show_output:
-                                print(line, end="", file=sys.stderr, flush=True)
+                    if self.log:
+                        log = open(self.log, "a")
+                except OSError as exc:
+                    forwarding_errors.append(exc)
+                try:
+                    with process.stdout:
+                        for raw in process.stdout:
+                            if not stream:
+                                output.append(raw)
+                            for line in clean_output(raw).splitlines():
+                                visible = stream and show_output
+                                if line.startswith("@@DOTFILES/1 DETAIL "):
+                                    line = line[len("@@DOTFILES/1 DETAIL "):]
+                                    visible = False
+                                elif line.startswith("@@DOTFILES/1 EVENT "):
+                                    line = line[len("@@DOTFILES/1 EVENT "):]
+                                    event_driven[0] = True
+                                    if line.startswith(("FAIL:", "FAIL ", "FAILED phase:")):
+                                        failure_events.append(line)
+                                elif self.output_mode == "quiet":
+                                    visible = bool(re.match(r"(?:Warning:|WARN[: ]|Error:|FAIL[: ])", line))
+                                if stream:
+                                    output.append(line + "\n")
+                                if log:
+                                    try:
+                                        log.write(line + "\n")
+                                        log.flush()
+                                    except OSError as exc:
+                                        forwarding_errors.append(exc)
+                                        try:
+                                            log.close()
+                                        except OSError as close_error:
+                                            forwarding_errors.append(close_error)
+                                        log = None
+                                if visible:
+                                    try:
+                                        print(line[:800], file=sys.stderr, flush=True)
+                                        last_visible[0] = time.monotonic()
+                                    except OSError as exc:
+                                        forwarding_errors.append(exc)
                 except Exception as exc:
                     forwarding_errors.append(exc)
+                finally:
+                    if log:
+                        try:
+                            log.close()
+                        except OSError as exc:
+                            forwarding_errors.append(exc)
 
             worker = threading.Thread(target=forward, daemon=True)
             worker.start()
             started = time.monotonic()
+            primary = None
             try:
                 while True:
                     remaining = timeout - (time.monotonic() - started)
                     if remaining <= 0:
                         raise subprocess.TimeoutExpired(argv, timeout)
+                    # 给已采用事件协议的客户机心跳留少量传输余量，避免在同一秒双重提醒。
+                    quiet_limit = heartbeat + min(2, heartbeat / 10) if heartbeat and event_driven[0] else heartbeat
+                    wait_for = max(.01, quiet_limit - (time.monotonic() - last_visible[0])) if quiet_limit and on_wait else remaining
                     try:
-                        code = process.wait(timeout=min(remaining, heartbeat or remaining))
+                        code = process.wait(timeout=min(remaining, wait_for))
                         break
                     except subprocess.TimeoutExpired:
-                        if heartbeat and on_wait and (not stream or not show_output or
-                                                      time.monotonic() - last_output[0] >= heartbeat):
+                        if (heartbeat and on_wait and process.poll() is None and
+                                time.monotonic() - last_visible[0] >= quiet_limit):
                             on_wait(time.monotonic() - started, timeout)
+                            last_visible[0] = time.monotonic()
             except subprocess.TimeoutExpired:
-                self.stop()
-                worker.join(timeout=5)
-                raise CommandFailure(argv, 124, "command timed out")
-            except BaseException:
-                self.stop()
-                worker.join(timeout=5)
-                raise
+                primary = CommandFailure(argv, 124, "command timed out")
+            except BaseException as exc:
+                primary = exc
             finally:
+                # 回收组内后代后再排空日志，包括 EOF 前没有换行的正文。
+                self.stop()
+                worker.join(timeout=5)
                 self.active = None
-            worker.join(timeout=5)
-            if worker.is_alive() or forwarding_errors:
-                raise Failure(f"command output could not be saved to {self.log}: "
-                              f"{forwarding_errors[0] if forwarding_errors else 'forwarder did not finish'}")
+            if worker.is_alive():
+                forwarding_errors.append(RuntimeError("forwarder did not finish"))
+            if forwarding_errors:
+                message = f"command output could not be saved/forwarded to {self.log}: {forwarding_errors[0]}"
+                try:
+                    print("FAIL logging: " + brief(message), file=sys.stderr)
+                except OSError:
+                    pass
+                if primary is None and code == 0:
+                    primary = Failure(message)
+            if primary:
+                raise primary
             result = subprocess.CompletedProcess(argv, code, "".join(output), "")
         else:
             try:
                 result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
-            except subprocess.TimeoutExpired:
-                raise CommandFailure(argv, 124, "command timed out")
-            if self.log:
-                with open(self.log, "a") as log:
-                    log.write(result.stdout)
-                    log.write(result.stderr)
+            except subprocess.TimeoutExpired as exc:
+                try:
+                    for data in (exc.stdout, exc.stderr):
+                        if data:
+                            self.save_output(data.decode(errors="replace") if isinstance(data, bytes) else data)
+                except OSError as log_error:
+                    print(f"FAIL logging: {brief(log_error)}", file=sys.stderr)
+                raise CommandFailure(argv, 124, "command timed out") from None
+            try:
+                self.save_output(result.stdout)
+                self.save_output(result.stderr)
+            except OSError:
+                if not result.returncode:
+                    raise
+                print("FAIL logging: command diagnostics could not be saved", file=sys.stderr)
         if check and result.returncode:
-            raise CommandFailure(argv, result.returncode, result.stdout + result.stderr)
+            raise CommandFailure(argv, result.returncode, result.stdout + result.stderr,
+                                 summary="\n".join(failure_events) if failure_events else None)
         return result
 
+    def save_output(self, text):
+        if self.log and text:
+            with open(self.log, "a") as log:
+                log.write(clean_output(text).rstrip("\n") + "\n")
+
     def stop(self):
-        if self.active and self.active.poll() is None:
-            # 长命令单独建立会话；停止整个进程组，避免留下安装器等子进程。
+        if self.active:
             try:
                 os.killpg(self.active.pid, signal.SIGTERM)
                 self.active.wait(timeout=5)
             except (ProcessLookupError, subprocess.TimeoutExpired):
+                pass
+            finally:
                 try:
                     os.killpg(self.active.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+                self.active.wait()
 
 
 def parser():
@@ -459,8 +546,14 @@ def lock(path):
         (path / "pid").write_text(f"{os.getpid()}\n")
         yield held
     finally:
-        (held.path / "pid").unlink(missing_ok=True)
-        held.path.rmdir()
+        primary = sys.exc_info()[1]
+        try:
+            (held.path / "pid").unlink(missing_ok=True)
+            held.path.rmdir()
+        except OSError as exc:
+            if primary is not None:
+                raise primary from exc
+            raise
 
 
 @contextmanager
@@ -494,6 +587,8 @@ class Machine:
         self.attempt_row = None
         self.current_stage = None
         self.current_step = None
+        self.operation_log = None
+        self.observation = None
 
     def reboot_operation(self):
         operation = self.receipt.get("reboot_operation")
@@ -547,31 +642,119 @@ class Machine:
                           "automatic same-name rebuilding is not supported")
 
     @contextmanager
-    def attempt(self, action):
+    def apply_lock(self, action):
+        guard = lock(self.path / "lock")
+        held = guard.__enter__()
+        released = False
+
+        def release():
+            nonlocal released
+            if released:
+                return
+            released = True
+            primary = sys.exc_info()[0] is not None
+            try:
+                guard.__exit__(None, None, None)
+            except Exception as exc:
+                exc.progress_path = "cleanup/lock"
+                self.record_error(exc, exc.progress_path)
+                if not primary:
+                    raise
+
+        try:
+            if load_json(self.declaration_file) != self.declaration or \
+                    (load_json(self.receipt_file) or {"schema": 1, "stages": {}}) != self.receipt:
+                raise Failure("instance state changed during preflight; rerun after inspecting the other run")
+            with self.attempt(action, cleanup=release):
+                yield held
+        finally:
+            release()
+
+    @contextmanager
+    def attempt(self, action, cleanup=None):
         row = {"id": f"{time.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:12]}",
                "action": action, "started": time.time(), "status": "running", "stages": []}
+        previous_ref = self.receipt.get("last_successful_ref")
         self.receipt.setdefault("attempts", []).append(row)
         self.attempt_row = row
-        save_json(self.receipt_file, self.receipt)
+        log_dir = self.path / "logs" / row["id"]
+        safe_directory(log_dir, create=True)
+        self.operation_log = log_dir / "operation.log"
+        self.runner.log = self.operation_log
+        self.runner.last_log = self.operation_log
+        row["log"] = str(self.operation_log)
         try:
-            yield
-        except Exception as exc:
-            row.update(status="failed", ended=time.time(), error=str(exc))
-            if getattr(exc, "progress_path", None):
-                row["failed_at"] = exc.progress_path
+            self.emit(f"RUN: {action} {self.name}; host logs: {log_dir}")
             save_json(self.receipt_file, self.receipt)
-            raise
-        else:
+            yield
+            # 持锁发布最终业务结果；释放锁失败会回写 failed，且不会显示总体成功。
             row.update(status="ok", ended=time.time())
             save_json(self.receipt_file, self.receipt)
+            if cleanup:
+                cleanup()
+            self.emit(f"RETIRED: {self.name}; archived state: {self.path}" if action == "destroy" else
+                      f"READY: {self.name}; SSH alias: ssh {self.name}")
+        except Exception as exc:
+            if previous_ref is None:
+                self.receipt.pop("last_successful_ref", None)
+            else:
+                self.receipt["last_successful_ref"] = previous_ref
+            row.update(status="failed", ended=time.time(), error=str(exc))
+            row["failed_at"] = getattr(exc, "progress_path", "operation")
+            self.record_error(exc, row["failed_at"], visible=not getattr(exc, "reported", False))
+            try:
+                save_json(self.receipt_file, self.receipt)
+            except OSError as record_error:
+                self.record_error(record_error, "receipt")
+            raise
         finally:
+            if cleanup:
+                cleanup()
+            try:
+                print(f"Host logs: {self.operation_log.parent}", file=sys.stderr)
+            except OSError:
+                pass  # 转发失败已决定结果，不能覆盖正在传播的主错误。
+            self.runner.last_log = self.operation_log
+            self.runner.log = None
             self.attempt_row = None
 
-    def emit(self, line):
-        print(line, file=sys.stderr, flush=True)
+    def emit(self, line, visible=True):
+        self.runner.save_output(line)
+        if visible:
+            print(clean_output(line), file=sys.stderr, flush=True)
+
+    def record_error(self, exc, location, visible=True):
+        try:
+            self.runner.save_output("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+            self.emit(f"FAIL [{location}]: {brief(exc)}", visible=visible)
+            if visible:
+                exc.reported = True
+        except OSError as log_error:
+            try:
+                print(f"FAIL logging: {brief(log_error)}; original: {brief(exc)}", file=sys.stderr)
+            except OSError:
+                pass
+
+    def relocate(self, archive):
+        old = self.path
+        self.path = archive
+        self.declaration_file = archive / "declaration.json"
+        self.receipt_file = archive / "receipt.json"
+        self.operation_log = archive / self.operation_log.relative_to(old)
         if self.runner.log:
-            with open(self.runner.log, "a") as log:
-                log.write(line + "\n")
+            self.runner.log = archive / self.runner.log.relative_to(old)
+        def moved(value):
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    if key == "log" and isinstance(item, str) and item.startswith(str(old) + "/"):
+                        value[key] = str(archive / Path(item).relative_to(old))
+                    else:
+                        moved(item)
+            elif isinstance(value, list):
+                for item in value:
+                    moved(item)
+        moved(self.receipt)
+        save_json(self.receipt_file, self.receipt)
 
     @contextmanager
     def stage(self, label):
@@ -582,6 +765,8 @@ class Machine:
         log_dir = logs / self.attempt_row["id"]
         safe_directory(log_dir, create=True)
         self.runner.log = log_dir / f"{label}.log"
+        previous_output_mode = self.runner.output_mode
+        self.runner.output_mode = "native" if label == "bootstrap" else "quiet"
         row = {"id": label, "started": time.time(), "status": "running",
                "log": str(self.runner.log), "steps": []}
         # stages 保存各阶段最新结果；attempts 另行保留每次执行的完整历史。
@@ -591,7 +776,7 @@ class Machine:
         previous_wait_callback = self.runner.on_wait
         self.runner.on_wait = self.wait_update
         started = time.monotonic()
-        self.emit(f"STAGE RUN  [{label}] {STAGE_DESCRIPTIONS[label]}; log={self.runner.log}")
+        self.emit(f"STAGE RUN  [{label}] {STAGE_DESCRIPTIONS[label]}")
         save_json(self.receipt_file, self.receipt)
         try:
             yield
@@ -602,9 +787,13 @@ class Machine:
             exit_code = exc.returncode if isinstance(exc, CommandFailure) else None
             row.update(status="failed", ended=time.time(), elapsed_seconds=round(time.monotonic() - started, 1),
                        error=str(exc), command=command, exit_code=exit_code)
-            self.emit(f"STAGE FAIL [{label}] step={row.get('current_step', 'none')}; "
-                      f"elapsed={row['elapsed_seconds']}s; log={self.runner.log}")
-            save_json(self.receipt_file, self.receipt)
+            self.record_error(exc, getattr(exc, "progress_path", label), visible=False)
+            try:
+                self.emit(f"STAGE FAIL [{label}] step={row.get('current_step', 'none')}; "
+                          f"elapsed={row['elapsed_seconds']}s")
+                save_json(self.receipt_file, self.receipt)
+            except OSError as log_error:
+                self.record_error(log_error, f"{label}/failure-record")
             raise
         else:
             row.update(status="ok", ended=time.time(), elapsed_seconds=round(time.monotonic() - started, 1))
@@ -615,7 +804,8 @@ class Machine:
             self.current_stage = None
             self.current_step = None
             self.runner.on_wait = previous_wait_callback
-            self.runner.log = None
+            self.runner.log = self.operation_log
+            self.runner.output_mode = previous_output_mode
 
     @contextmanager
     def step(self, label, description, timeout=None):
@@ -631,7 +821,7 @@ class Machine:
         self.current_step = label
         started = time.monotonic()
         self.emit(f"  STEP RUN  [{name}] {description}" +
-                  (f"; timeout={timeout}s" if timeout is not None else ""))
+                  (f"; timeout={timeout:.0f}s" if timeout is not None else ""))
         try:
             yield
         except Exception as exc:
@@ -641,9 +831,13 @@ class Machine:
             exit_code = exc.returncode if isinstance(exc, CommandFailure) else None
             row.update(status="failed", ended=time.time(), elapsed_seconds=round(time.monotonic() - started, 1),
                        error=str(exc), command=command, exit_code=exit_code)
-            self.emit(f"  STEP FAIL [{name}] {description}; elapsed={row['elapsed_seconds']}s")
-            if stage:
-                save_json(self.receipt_file, self.receipt)
+            try:
+                self.emit(f"  STEP FAIL [{name}] {description}; elapsed={row['elapsed_seconds']}s; reason={brief(exc)}")
+                exc.reported = True
+                if stage:
+                    save_json(self.receipt_file, self.receipt)
+            except OSError as log_error:
+                self.record_error(log_error, f"{name}/failure-record")
             raise
         else:
             row.update(status="ok", ended=time.time(), elapsed_seconds=round(time.monotonic() - started, 1))
@@ -656,7 +850,7 @@ class Machine:
     def wait_update(self, elapsed, timeout):
         name = (f"{self.current_stage}/{self.current_step}" if self.current_step and self.current_stage
                 else self.current_stage or self.current_step or "command")
-        self.emit(f"  STEP WAIT [{name}] command still running; elapsed={int(elapsed)}s; timeout={timeout}s")
+        self.emit(f"  STEP WAIT [{name}] command still running; elapsed={elapsed:.0f}s; timeout={timeout:.0f}s")
 
     def m(self, *args, timeout=15, stream=False, check=True, heartbeat=None, show_output=True):
         return self.runner([self.host.cli, *args], timeout=timeout, stream=stream, check=check,
@@ -690,7 +884,7 @@ class Machine:
                 save_json(self.receipt_file, self.receipt)
                 self.helper = None
                 self.emit(f"CLEANUP DEFER [{self.current_stage or 'guest-helper'}] "
-                          "Temporary guest helper retained; retry after management recovery")
+                          f"Temporary guest helper retained; retry after management recovery; reason={brief(exc)}")
                 raise Failure(f"temporary guest helper cleanup deferred: {exc}") from exc
             self.helper = None
             self.receipt.pop("pending_helper_cleanup", None)
@@ -701,12 +895,15 @@ class Machine:
             return
         primary_error = sys.exc_info()[0] is not None
         label = self.current_stage or "guest-helper"
-        self.emit(f"CLEANUP RUN  [{label}] Remove temporary guest helper")
         try:
+            self.emit(f"CLEANUP RUN  [{label}] Remove temporary guest helper")
             self.cleanup_helper()
         except Exception as exc:
-            if not self.receipt.get("pending_helper_cleanup"):
-                self.emit(f"CLEANUP FAIL [{label}] {exc}")
+            self.record_error(exc, f"cleanup/{label}")
+            try:
+                self.emit(f"CLEANUP FAIL [{label}] {brief(exc)}")
+            except OSError as log_error:
+                self.record_error(log_error, f"cleanup/{label}/failure-record")
             if not primary_error:
                 raise
         else:
@@ -804,8 +1001,12 @@ class Machine:
         data = parse_json_output(result.stdout, "multipass list")
         entry = next((row for row in data.get("list", []) if row.get("name") == self.name), None)
         state = entry.get("state") if isinstance(entry, dict) else None
+        now = time.monotonic()
+        visible = not self.observation or self.observation[0] != state or now - self.observation[1] >= PROGRESS_INTERVAL
         self.emit(f"  STEP OBSERVE [{self.current_stage or 'cloud-init'}/"
-                  f"{self.current_step or 'reboot'}] instance={self.name} state={state or 'missing'}")
+                  f"{self.current_step or 'reboot'}] instance={self.name} state={state or 'missing'}", visible=visible)
+        if visible:
+            self.observation = (state, now)
         return state
 
     def wait_management_state(self, expected, budget, seconds):
@@ -1078,21 +1279,21 @@ class Machine:
                     save_json(self.receipt_file, self.receipt)
             with self.stage("bootstrap-preview"):
                 with self.step("child", "Run guest bootstrap --dry-run --profile server", timeout=1200):
-                    self.emit("    CHILD BEGIN [bootstrap-preview] Guest bootstrap output follows unchanged")
+                    self.emit("    CHILD BEGIN [bootstrap-preview] Preview details saved in host stage log; guest preview is read-only")
                     try:
                         self.guest("bootstrap", "preview", timeout=1200, stream=True,
                                    heartbeat=PROGRESS_INTERVAL)
                     finally:
-                        self.emit("    CHILD END   [bootstrap-preview] See guest bootstrap log for details")
+                        self.emit("    CHILD END   [bootstrap-preview] Guest bootstrap command ended; overall verification follows")
             with self.stage("bootstrap"):
                 limit = DEFAULTS["timeouts"]["bootstrap"]
                 with self.step("child", "Run guest bootstrap --apply --profile server", timeout=limit):
-                    self.emit("    CHILD BEGIN [bootstrap] Guest bootstrap output follows unchanged")
+                    self.emit("    CHILD BEGIN [bootstrap] Guest bootstrap summary; full diagnostics saved on both machines")
                     try:
                         self.guest("bootstrap", "apply", timeout=limit, stream=True,
                                    heartbeat=PROGRESS_INTERVAL)
                     finally:
-                        self.emit("    CHILD END   [bootstrap] See guest bootstrap log for details")
+                        self.emit("    CHILD END   [bootstrap] Guest bootstrap command ended; overall verification follows")
             with self.stage("finalize"):
                 with self.step("account", "Set guest login shell and optional Git identity", timeout=120):
                     self.guest("finalize", git_identity.get("name", ""), git_identity.get("email", ""),
@@ -1223,7 +1424,7 @@ def create_or_provision(args, config, home, runner):
     else:
         print("PLAN: leave guest Git identity unchanged (unset on a new instance)", file=sys.stderr)
     if not args.apply:
-        print("Preview complete; no files or instances changed. DEFER: image availability and guest checks.",
+        print("Preview complete; no files or instances changed. Log: none (read-only preview). DEFER: image availability and guest checks.",
               file=sys.stderr)
         return
     # 预检只读；从此处才创建状态目录，并在实例锁内复核预检期间的并发变化。
@@ -1236,75 +1437,69 @@ def create_or_provision(args, config, home, runner):
             raise Failure("instance state appeared during preflight; refusing to register another run")
     else:
         safe_directory(machine.path, create=True)
-    with lock(machine.path / "lock"):
-        # 其他调用可能在预检和获取锁之间完成，不能沿用过期的状态快照。
-        if load_json(machine.declaration_file) != saved or \
-                (load_json(machine.receipt_file) or {"schema": 1, "stages": {}}) != machine.receipt:
-            raise Failure("instance state changed during preflight; rerun after inspecting the other run")
+    with machine.apply_lock(args.action):
         machine.declaration = requested
         save_json(machine.declaration_file, requested)
         machine.receipt["target_ref"] = requested["target_ref"]
         save_json(machine.receipt_file, machine.receipt)
         if creation_record is not None:
             record_creation(creation_record, requested)
-        with machine.attempt(args.action):
-            with machine.stage("host"):
-                with lock(machine.base / "host-install.lock"):
-                    observed = machine.host.ensure(observed)
-                with machine.step("instances", "Read current Multipass instances"):
-                    existing = machine.host.instances()
-                    if name in existing:
-                        require_create_state(machine, args.action, existing[name].get("state"))
-                machine.receipt["host"] = {"macos": platform.mac_ver()[0],
-                                           "multipass": observed, "source": machine.host.source,
-                                           "runtime_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
-                save_json(machine.receipt_file, machine.receipt)
-            if args.action == "create":
-                if name not in existing:
-                    with machine.stage("launch"):
-                        with machine.step("image", f"Confirm Ubuntu {requested['image']} image availability"):
-                            machine.refuse_missing_guest(existing)
-                            machine.host.image(requested["image"])
-                        with machine.step("user-data", "Write cloud-init user-data for this instance"):
-                            cloud = machine.path / "user-data.yaml"
-                            atomic(cloud, render_cloud(requested, canonical).encode())
-                            machine.receipt["instances_before_launch"] = sorted(existing)
-                            save_json(machine.receipt_file, machine.receipt)
-                        limit = DEFAULTS["timeouts"]["cloud_init"] + 60
-                        with machine.step("create", "Wait for Multipass launch and first boot", timeout=limit):
-                            machine.m("launch", requested["image"], "--name", name,
-                                      "--cpus", str(requested["cpus"]), "--memory", requested["memory"],
-                                      "--disk", requested["disk"], "--cloud-init", str(cloud),
-                                      "--timeout", str(DEFAULTS["timeouts"]["cloud_init"]),
-                                      timeout=limit, stream=True, heartbeat=PROGRESS_INTERVAL,
-                                      show_output=False)
-                else:
-                    machine.emit(f"STAGE SKIP [launch] Reuse existing managed instance {name}")
-                if machine.receipt["stages"].get("cloud-init", {}).get("status") != "ok":
-                    with machine.stage("cloud-init"):
-                        try:
-                            if machine.pending_stop_start():
-                                machine.emit("  STEP RESUME [cloud-init/reboot] Reconcile saved stop/start "
-                                             "operation before guest commands")
-                                machine.reboot_if_required(None)
-                            else:
-                                with machine.step("status", "Wait for cloud-init to complete cleanly",
-                                                  timeout=DEFAULTS["timeouts"]["cloud_init"]):
-                                    machine.cloud_wait()
-                                with machine.step("helper", "Transfer the temporary guest helper", timeout=120):
-                                    machine.transfer_helper()
-                                with machine.step("identity", "Verify guest marker, OS and VM resources"):
-                                    probe = machine.verify_guest()
-                                machine.reboot_if_required(probe)
-                            with machine.step("helper-cleanup", "Remove the temporary guest helper"):
-                                machine.cleanup_helper()
-                        finally:
-                            machine.cleanup_helper_on_exit()
-                else:
-                    machine.emit("STAGE SKIP [cloud-init] First-boot checks already succeeded; "
-                                 "guest identity will be rechecked")
-            machine.provision(requested["target_ref"], git_identity)
-    print(f"READY: {name}; SSH alias: ssh {name}", file=sys.stderr)
+        with machine.stage("host"):
+            with lock(machine.base / "host-install.lock"):
+                observed = machine.host.ensure(observed)
+            with machine.step("instances", "Read current Multipass instances"):
+                existing = machine.host.instances()
+                if name in existing:
+                    require_create_state(machine, args.action, existing[name].get("state"))
+            machine.receipt["host"] = {"macos": platform.mac_ver()[0],
+                                       "multipass": observed, "source": machine.host.source,
+                                       "runtime_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
+            save_json(machine.receipt_file, machine.receipt)
+        if args.action == "create":
+            if name not in existing:
+                with machine.stage("launch"):
+                    with machine.step("image", f"Confirm Ubuntu {requested['image']} image availability"):
+                        machine.refuse_missing_guest(existing)
+                        machine.host.image(requested["image"])
+                    with machine.step("user-data", "Write cloud-init user-data for this instance"):
+                        cloud = machine.path / "user-data.yaml"
+                        atomic(cloud, render_cloud(requested, canonical).encode())
+                        machine.receipt["instances_before_launch"] = sorted(existing)
+                        save_json(machine.receipt_file, machine.receipt)
+                    limit = DEFAULTS["timeouts"]["cloud_init"] + 60
+                    with machine.step("create", "Wait for Multipass launch and first boot", timeout=limit):
+                        machine.m("launch", requested["image"], "--name", name,
+                                  "--cpus", str(requested["cpus"]), "--memory", requested["memory"],
+                                  "--disk", requested["disk"], "--cloud-init", str(cloud),
+                                  "--timeout", str(DEFAULTS["timeouts"]["cloud_init"]),
+                                  timeout=limit, stream=True, heartbeat=PROGRESS_INTERVAL,
+                                  show_output=False)
+            else:
+                machine.emit(f"STAGE SKIP [launch] Reuse existing managed instance {name}")
+            if machine.receipt["stages"].get("cloud-init", {}).get("status") != "ok":
+                with machine.stage("cloud-init"):
+                    try:
+                        if machine.pending_stop_start():
+                            machine.emit("  STEP RESUME [cloud-init/reboot] Reconcile saved stop/start "
+                                         "operation before guest commands")
+                            machine.reboot_if_required(None)
+                        else:
+                            with machine.step("status", "Wait for cloud-init to complete cleanly",
+                                              timeout=DEFAULTS["timeouts"]["cloud_init"]):
+                                machine.cloud_wait()
+                            with machine.step("helper", "Transfer the temporary guest helper", timeout=120):
+                                machine.transfer_helper()
+                            with machine.step("identity", "Verify guest marker, OS and VM resources"):
+                                probe = machine.verify_guest()
+                            machine.reboot_if_required(probe)
+                        with machine.step("helper-cleanup", "Remove the temporary guest helper"):
+                            machine.cleanup_helper()
+                    finally:
+                        machine.cleanup_helper_on_exit()
+            else:
+                machine.emit("STAGE SKIP [cloud-init] First-boot checks already succeeded; "
+                             "guest identity will be rechecked")
+        machine.provision(requested["target_ref"], git_identity)
 
 
 def destroy(args, config, home, runner):
@@ -1357,15 +1552,12 @@ def destroy(args, config, home, runner):
           file=sys.stderr)
     if not args.apply:
         print("Preview complete; no files or instances changed. "
-              "DEFER: guest identity check until --apply if the VM exists.", file=sys.stderr)
+              "Log: none (read-only preview). DEFER: guest identity check until --apply if the VM exists.", file=sys.stderr)
         return
 
-    with lock(machine.path / "lock") as held:
-        if load_json(machine.declaration_file) != saved or \
-                (load_json(machine.receipt_file) or {"schema": 1, "stages": {}}) != machine.receipt:
-            raise Failure("instance state changed during preflight; rerun after inspecting the other run")
-        with preflight_progress("STAGE", "destroy", "Verify ownership and retire the managed instance"):
-            with preflight_progress("STEP", "destroy/instance", "Verify and permanently remove the VM if present"):
+    with machine.apply_lock("destroy") as held:
+        with machine.stage("destroy"):
+            with machine.step("instance", "Verify and permanently remove the VM if present"):
                 machine.host.verify_service()
                 current = machine.host.instances().get(name)
                 if current:
@@ -1394,10 +1586,10 @@ def destroy(args, config, home, runner):
                         raise Failure(f"Multipass still lists {name} after delete --purge")
                 else:
                     state = "absent"
-            with preflight_progress("STEP", "destroy/ssh", "Remove only this instance's managed SSH files"):
+            with machine.step("ssh", "Remove only this instance's managed SSH files"):
                 with lock(machine.base / "ssh.lock"):
                     setting.remove(machine.receipt.get("ssh_files"))
-            with preflight_progress("STEP", "destroy/archive", "Archive the old declaration and receipt"):
+            with machine.step("archive", "Archive the old declaration and receipt"):
                 safe_directory(archive_dir, create=True)
                 if archive.exists() or archive.is_symlink():
                     raise Failure(f"retired state destination appeared during destroy: {archive}")
@@ -1406,7 +1598,7 @@ def destroy(args, config, home, runner):
                                                                "vm_state_before_apply": state})
                 os.rename(machine.path, archive)
                 held.path = archive / "lock"
-    print(f"RETIRED: {name}; archived state: {archive}", file=sys.stderr)
+                machine.relocate(archive)
 
 
 def check(args, config, home, runner):
@@ -1468,9 +1660,6 @@ def main():
     os.umask(0o077)
     args = parser().parse_args()
     home = Path(os.environ.get("HOME", ""))
-    require_default_layout(home)
-    config_path = args.config or home / ".config/dotfiles-multipass/config.json"
-    config = read_config(config_path)
     runner = Runner()
 
     def interrupted(signum, _frame):
@@ -1479,27 +1668,44 @@ def main():
 
     for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
         signal.signal(signum, interrupted)
-    if args.action in ("create", "provision"):
-        create_or_provision(args, config, home, runner)
-    elif args.action == "destroy":
-        destroy(args, config, home, runner)
-    elif args.action == "check":
-        check(args, config, home, runner)
-    else:
-        ssh(args, config, home, runner)
+    try:
+        require_default_layout(home)
+        config_path = args.config or home / ".config/dotfiles-multipass/config.json"
+        config = read_config(config_path)
+        if args.action in ("create", "provision"):
+            create_or_provision(args, config, home, runner)
+        elif args.action == "destroy":
+            destroy(args, config, home, runner)
+        elif args.action == "check":
+            check(args, config, home, runner)
+        else:
+            ssh(args, config, home, runner)
+
+    except Exception as exc:
+        if runner.last_log:
+            runner.log = runner.last_log
+            try:
+                runner.save_output(failure_line(exc))
+            except OSError:
+                pass
+        else:
+            print("Log: none (read-only check or preflight; no persistent attempt started).", file=sys.stderr)
+        raise
 
 
 def failure_line(exc):
     location = getattr(exc, "progress_path", None)
-    return f"FAIL [{location}]: {exc}" if location else f"FAIL: {exc}"
+    return f"FAIL [{location}]: {brief(exc)}" if location else f"FAIL: {brief(exc)}"
 
 
 if __name__ == "__main__":
     try:
         main()
     except Failure as exc:
-        print(failure_line(exc), file=sys.stderr)
+        if not getattr(exc, "reported", False):
+            print(failure_line(exc), file=sys.stderr)
         raise SystemExit(exc.code)
-    except (OSError, ValueError, subprocess.SubprocessError) as exc:
-        print(failure_line(exc), file=sys.stderr)
+    except Exception as exc:
+        if not getattr(exc, "reported", False):
+            print(failure_line(exc), file=sys.stderr)
         raise SystemExit(1)

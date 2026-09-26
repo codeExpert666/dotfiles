@@ -143,8 +143,13 @@ def repository(url, ref):
 def bootstrap(mode):
     bootstrap_idle()
     ensure_owned_directory(REPO)
+    environment = clean_env()
+    # 新 bootstrap 同时转发摘要与详情；旧提交忽略此变量，沿用原始完整输出。
+    # 由宿主解码，客户机 run.* 始终保留未裁剪的诊断正文。
+    if mode == "apply":
+        environment["DOTFILES_BOOTSTRAP_STREAM"] = "1"
     command(["bash", "scripts/bootstrap.sh", "--dry-run" if mode == "preview" else "--apply",
-             "--profile", "server"], cwd=REPO, env=clean_env())
+             "--profile", "server"], cwd=REPO, env=environment)
 
 
 def packages_ready():

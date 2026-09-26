@@ -84,7 +84,7 @@ done
 [[ -n $profile ]] || argument_error '--profile is required'
 mode="${mode:-dry-run}"
 # ===== 初始化与预览 =====
-phase=preflight scratch='' probe_home='' log_file='' owns_lock=no completed=no active_pid='' timer_pid=''
+phase=preflight scratch='' probe_home='' log_file='' owns_lock=no completed=no active_pid='' timer_pid='' forward_pid='' forward_status=0
 registering=no interrupted_status=0
 script_parent="${BASH_SOURCE[0]%/*}"
 [[ $script_parent != "${BASH_SOURCE[0]}" ]] || script_parent=.
@@ -164,7 +164,12 @@ log_file=$(
 registering=no
 [[ $interrupted_status == 0 ]] || exit "$interrupted_status"
 printf 'Repository: %s\nPlatform: %s %s %s\nProfile: %s\n' "$repo_root" "$platform" "$os_version" "$arch" "$profile" >> "$log_file"
-say "Apply log: $log_file"
+start_entry_logging
+if [[ ${DOTFILES_BOOTSTRAP_STREAM-} == 1 ]]; then
+	say "Guest bootstrap log: $log_file"
+else
+	say "Apply log: $log_file"
+fi
 phase='software installation'
 prepare_platform
 install_software
@@ -178,8 +183,8 @@ verify_build_tools
 verify_java_build_tools
 
 phase='deployment'
-run 'deployment preflight' 120 "$BASH" "$script_dir/deploy.sh" --dry-run
-run 'configuration deployment' 120 "$BASH" "$script_dir/deploy.sh" --apply
+output_source=deploy run 'deployment preflight' 120 "$BASH" "$script_dir/deploy.sh" --dry-run
+output_source=deploy run 'configuration deployment' 120 "$BASH" "$script_dir/deploy.sh" --apply
 
 # ===== 应用与终端资源 =====
 phase='Zsh plugins'
@@ -191,7 +196,7 @@ run 'Zsh plugin preparation' 900 python3 -B "$script_dir/bootstrap/without_tty.p
 
 phase='Neovim plugins'
 run 'stage Neovim configuration and locked managers' 900 python3 -B "$script_dir/bootstrap/resources.py" stage-nvim "$repo_root" "$scratch/config"
-run 'Neovim plugins, tools and parsers' 2400 env XDG_CONFIG_HOME="$scratch/config" NVIM_LOG_FILE="$scratch/nvim.log" nvim --headless -u NONE -n -i NONE -l "$script_dir/bootstrap/nvim.lua"
+output_source=nvim run 'Neovim plugins, tools and parsers' 2400 env XDG_CONFIG_HOME="$scratch/config" NVIM_LOG_FILE="$scratch/nvim.log" nvim --headless -u NONE -n -i NONE -l "$script_dir/bootstrap/nvim.lua"
 
 phase='terminal resources'
 if [[ $profile == desktop ]]; then
@@ -214,5 +219,5 @@ if [[ $profile == server ]]; then
 		doctor_args+=(--only "$module")
 	done
 fi
-run 'doctor checks' 600 "$BASH" "$script_dir/doctor.sh" "${doctor_args[@]}"
+output_source=doctor run 'doctor checks' 600 "$BASH" "$script_dir/doctor.sh" "${doctor_args[@]}"
 completed=yes

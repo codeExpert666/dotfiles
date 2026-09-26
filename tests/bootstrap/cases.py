@@ -857,7 +857,7 @@ class Orchestration(unittest.TestCase):
         while 'NATIVE CHECKPOINT' not in log.read_text():
             self.assertLess(time.monotonic(), deadline, log.read_text())
             time.sleep(0.02)
-        self.assertIn('NATIVE CHECKPOINT', (self.root / 'live.log').read_text())
+        self.assertNotIn('NATIVE CHECKPOINT', (self.root / 'live.log').read_text())
         self.assertIsNone(process.poll())
         process.send_signal(signal.SIGTERM)
         self.assertEqual(process.wait(timeout=10), 143)
@@ -973,13 +973,13 @@ class Orchestration(unittest.TestCase):
                 self.assertEqual(list(self.scratch.iterdir()), [])
 
     def test_logging_failure_is_not_command_success(self):
-        self.mock_shell('tee', 'cat >/dev/null\nexit 73\n')
+        self.mock_shell('awk', 'cat >/dev/null\nexit 73\n')
         output = self.invoke('--apply', '--profile', 'server', success=1).stderr
         self.assertIn('FAIL logging:', output)
         self.assertIn('deployment preflight failed (exit 73)', output)
         self.assertNotIn('Bootstrap complete.', output)
         self.assertEqual(list(self.scratch.iterdir()), [])
-        # 部署和 tee 同时失败时，保留部署的退出码。
+        # 部署和日志接收器同时失败时，保留部署的退出码。
         (self.home / '.gitconfig').write_text('# 与部署冲突的个人配置入口。\n')
         output = self.invoke('--apply', '--profile', 'server', success=1).stderr
         self.assertIn('deployment preflight failed (exit 1)', output)
@@ -1118,6 +1118,310 @@ execute "$@"
         self.assertFalse(marker.exists())
 
 
+class Output(unittest.TestCase):
+    """真实 Bash/awk 输出边界，不依赖包管理器或现有用户环境。"""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix='bootstrap-output-')
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+        self.common = self.root / 'common.bash'
+        text = (REPO / 'scripts/bootstrap/common.bash').read_text()
+        # 仅缩短私有副本的心跳间隔，超时预算和生产命令仍用真实时钟。
+        self.common.write_text(text.replace('while sleep 30;', 'while sleep 1;'))
+        shutil.copyfile(REPO / 'scripts/bootstrap/output.awk', self.root / 'output.awk')
+        self.work = self.root / 'work'
+        self.work.mkdir()
+        self.log = self.root / 'run.test'
+        self.env = {'HOME': str(self.root), 'PATH': '/usr/bin:/bin', 'LC_ALL': 'C', 'TMPDIR': str(self.root),
+                    'TERM': 'xterm-256color'}
+
+    def command(self, program, *, seconds=10, source='native'):
+        driver = '''set -e
+source "$1"
+scratch="$2/work" log_file="$2/run.test" active_pid='' timer_pid='' forward_pid=''
+registering=no interrupted_status=0 owns_lock=no completed=no mode=apply phase=fixture
+output_source="$3"
+shift 3
+trap 'finish_bootstrap "$?"' EXIT
+trap 'interrupt_bootstrap 143' TERM
+run 'fixture action' "$@"
+completed=yes
+'''
+        return [BASH, '-c', driver, 'output-fixture', str(self.common), str(self.root), source,
+                str(seconds), sys.executable, '-B', '-u', '-c', program]
+
+    def test_fast_success_separates_events_details_and_control_sequences(self):
+        program = r'''import sys
+sys.stdout.write('\x1b[31mprogress one\x1b[0m\rprogress two\bend\n'.encode().decode('unicode_escape'))
+print('@@DOTFILES/1 EVENT WARN: inspect this')
+print('@@DOTFILES/1 DETAIL DOWNLOAD: request=7; http=200')
+sys.stdout.write('unterminated diagnostic')
+'''
+        result = run(self.command(program), env=self.env, cwd=self.root)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, '')
+        log = self.log.read_text()
+        for text in ('progress one', 'progress two', 'end', 'DOWNLOAD: request=7; http=200',
+                     'unterminated diagnostic\nREADY: fixture action'):
+            self.assertIn(text, log)
+        self.assertNotIn('DOWNLOAD:', result.stderr)
+        self.assertNotIn('progress one', result.stderr)
+        self.assertIn('WARN: inspect this', result.stderr)
+        self.assertNotIn('\x1b', log)
+        self.assertNotIn('\r', log)
+        self.assertNotIn('\b', log)
+        self.assertNotIn('WAIT:', result.stderr)
+        self.assertEqual(result.stderr.count('Bootstrap complete.'), 1)
+
+    def test_silent_and_busy_logs_both_get_visible_waits_without_late_heartbeat(self):
+        for busy in (False, True):
+            with self.subTest(busy=busy):
+                self.work.mkdir(exist_ok=True)
+                program = ('import time\nfor i in range(25):\n'
+                           + (' print("diagnostic", i, flush=True)\n' if busy else '')
+                           + ' time.sleep(.1)\n')
+                result = run(self.command(program), env=self.env, cwd=self.root)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('WAIT: fixture action; elapsed=', result.stderr)
+                self.assertIn('timeout=10s', result.stderr)
+                self.assertNotIn('WAIT:', result.stderr.split('READY: fixture action')[1])
+                self.assertNotIn('diagnostic', result.stderr)
+                if busy:
+                    self.assertIn('diagnostic 24', self.log.read_text())
+
+    def test_utf8_locale_preserves_details_and_bounds_visible_warnings(self):
+        self.env['LC_ALL'] = 'en_US.UTF-8' if sys.platform == 'darwin' else 'C.UTF-8'
+        detail = '中文 🍺 café: ' + 'é汉🍺' * 100
+        warning = 'WARN: X' + 'é汉🍺' * 200
+        program = (f'import os;print({detail!r});print({warning!r});'
+                   'print("child locale="+os.environ["LC_ALL"])')
+        result = run(self.command(program), env=self.env, cwd=self.root)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, '')
+        saved = self.log.read_text()
+        self.assertIn(detail, saved)
+        self.assertIn(warning, saved)
+        self.assertIn('child locale=' + self.env['LC_ALL'], saved)
+        self.assertNotIn(detail, result.stderr)
+        visible = next(line for line in result.stderr.splitlines() if line.startswith('WARN: '))
+        self.assertTrue(warning.startswith(visible))
+        self.assertLessEqual(len(visible.encode('utf-8')), 800)
+        self.assertNotIn('\ufffd', result.stderr)
+        self.assertIn('Bootstrap complete.', result.stderr)
+
+    def test_failure_excerpt_keeps_utf8_boundaries_and_original_error(self):
+        self.env['DOTFILES_BOOTSTRAP_STREAM'] = '1'
+        detail = 'X' + '汉' * 100 + '🍺'
+        result = run(self.command(f'print({detail!r});exit(37)'), env=self.env, cwd=self.root)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn(detail, self.log.read_text())
+        prefix = '@@DOTFILES/1 EVENT   | '
+        excerpt = next(line[len(prefix):] for line in result.stderr.splitlines() if line.startswith(prefix))
+        self.assertTrue(detail.startswith(excerpt))
+        self.assertLessEqual(len(excerpt.encode('utf-8')), 240)
+        self.assertIn('fixture action failed (exit 37)', result.stderr)
+        self.assertNotIn('FAIL logging:', result.stderr)
+        self.assertNotIn('\ufffd', result.stderr)
+
+    def test_available_awk_receivers_publish_small_events_before_eof(self):
+        # Linux 通常还提供 mawk；按实际可用实现验证，不能用 EOF 后的结果代替实时性。
+        interpreters = {Path(binary).resolve() for name in ('awk', 'mawk', 'gawk')
+                        if (binary := shutil.which(name))}
+        binary_dir = self.root / 'bin'
+        binary_dir.mkdir()
+        self.env['PATH'] = str(binary_dir) + ':/usr/bin:/bin'
+        self.env['LC_ALL'] = 'en_US.UTF-8' if sys.platform == 'darwin' else 'C.UTF-8'
+        driver = '''source "$1"
+scratch="$2/work" log_file="$2/run.test" output_source=nvim
+forward_output
+'''
+        for interpreter in sorted(interpreters):
+            with self.subTest(awk=str(interpreter)):
+                (binary_dir / 'awk').unlink(missing_ok=True)
+                (binary_dir / 'awk').symlink_to(interpreter)
+                self.log.unlink(missing_ok=True)
+                with Process([BASH, '-c', driver, 'receiver-fixture', str(self.common), str(self.root)],
+                             env=self.env, cwd=self.root, stdin=subprocess.PIPE,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+                    event = 'WARN: live progress'
+                    detail = 'small diagnostic'
+                    process.stdin.write((f'@@DOTFILES/1 EVENT {event}\n@@DOTFILES/1 DETAIL {detail}\n').encode())
+                    process.stdin.flush()
+                    received = b''
+                    deadline = time.monotonic() + 3
+                    while event.encode() not in received or not self.log.exists() or detail not in self.log.read_text():
+                        self.assertIsNone(process.poll(), received.decode(errors='replace'))
+                        self.assertLess(time.monotonic(), deadline, received.decode(errors='replace'))
+                        if select.select([process.stderr], [], [], .05)[0]:
+                            received += os.read(process.stderr.fileno(), 4096)
+                    self.assertIsNone(process.poll(), 'the receiver must publish while input remains open')
+                    process.stdin.close()
+                    process.child.stdin = None
+                    stdout, stderr = process.communicate(timeout=5)
+                    self.assertEqual(process.returncode, 0, (received + stderr).decode())
+                    self.assertEqual(stdout, b'')
+                    self.assertEqual((received + stderr).decode(), event + '\n')
+                    self.assertEqual(self.log.read_text(), event + '\n' + detail + '\n')
+
+    def test_long_capability_probe_gets_a_named_heartbeat_without_polluting_data(self):
+        command = self.command('import time;time.sleep(2.2);print("parseable-result")')
+        command[2] = command[2].replace('run \'fixture action\' "$@"',
+            'probe_home="$PWD"\nshift\nrun_label="offline Maven validation" execute 60 probe "$@"\n'
+            'cp "$scratch/probe.log" "$PWD/probe-result"')
+        result = run(command, env=self.env, cwd=self.root)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('WAIT: offline Maven validation;', result.stderr)
+        self.assertEqual((self.root / 'probe-result').read_text(), 'parseable-result\n')
+        self.assertEqual(result.stdout, '')
+        self.assertNotIn('parseable-result', result.stderr)
+
+    def test_unknown_error_and_timeout_keep_complete_evidence(self):
+        for timeout in (False, True):
+            with self.subTest(timeout=timeout):
+                self.work.mkdir(exist_ok=True)
+                program = ('import sys,time\nprint("FIRST EVIDENCE")\n'
+                           'print("x"*9000)\nsys.stderr.write("unusual format: native reason")\n'
+                           + ('time.sleep(10)\n' if timeout else 'sys.exit(37)\n'))
+                result = run(self.command(program, seconds=1 if timeout else 10), env=self.env, cwd=self.root)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn('unusual format: native reason', result.stderr)
+                self.assertIn('failed (exit ' + ('124' if timeout else '37') + ')', result.stderr)
+                self.assertIn('FIRST EVIDENCE\n' + 'x'*9000, self.log.read_text())
+                self.assertNotIn('Bootstrap complete.', result.stderr)
+                self.assertLess(len(result.stderr), 2200)
+
+    def test_real_doctor_counts_and_attention_hints_survive_summary_mode(self):
+        program = ('import subprocess,sys,os\nsys.exit(subprocess.call(' + repr(
+            [BASH, str(REPO / 'scripts/doctor.sh'), '--only', 'environment', '--only', 'nvim', '--only', 'state']) + '))')
+        result = run(self.command(program, source='doctor'), env=self.env, cwd=self.root)
+        log = self.log.read_text()
+        summary = re.search(r'result: PASS=(\d+) WARN=(\d+) FAIL=(\d+) SKIP=(\d+)', log)
+        self.assertIsNotNone(summary, log)
+        self.assertIn(summary.group(), result.stderr)
+        counts = [len(re.findall('^' + level + r'\s', log, re.M)) for level in ('PASS', 'WARN', 'FAIL', 'SKIP')]
+        self.assertEqual(list(map(int, summary.groups())), counts)
+        self.assertGreater(counts[0], 0)
+        self.assertNotRegex(result.stderr, r'(?m)^PASS\s')
+        for line in log.splitlines():
+            if re.match(r'^(WARN |FAIL |SKIP |     hint:)', line):
+                self.assertIn(line, result.stderr)
+
+    def test_resource_capture_keeps_stdout_data_and_all_stderr_on_success_and_failure(self):
+        for code in (0, 39):
+            with self.subTest(code=code), patch.dict(os.environ, DOTFILES_OUTPUT_EVENTS='1'):
+                diagnostic = io.StringIO()
+                command = [sys.executable, '-u', '-c',
+                           'import sys;print("{\\\"data\\\": 42}");'
+                           'sys.stderr.write("Warning: recoverable\\nFIRST\\n"+"e"*9000+"\\nLAST");'
+                           f'sys.exit({code})']
+                with patch('sys.stderr', diagnostic):
+                    if code:
+                        with self.assertRaisesRegex(RuntimeError, 'exited 39'):
+                            resources.run(command)
+                    else:
+                        self.assertEqual(json.loads(resources.run(command)), {'data': 42})
+                saved = diagnostic.getvalue()
+                self.assertIn('@@DOTFILES/1 EVENT', saved)
+                self.assertIn('FIRST', saved)
+                self.assertIn('e'*9000, saved)
+                self.assertIn('LAST', saved)
+                self.assertIn('{"data": 42}', saved)
+
+    def test_resource_timeout_retains_both_partial_streams(self):
+        diagnostic = io.StringIO()
+        with patch('sys.stderr', diagnostic), self.assertRaisesRegex(RuntimeError, 'timed out'):
+            resources.run([sys.executable, '-u', '-c',
+                           'import sys,time;sys.stdout.write("partial stdout");'
+                           'sys.stderr.write("partial stderr");sys.stderr.flush();time.sleep(10)'], timeout=.1)
+        self.assertIn('partial stdout', diagnostic.getvalue())
+        self.assertIn('partial stderr', diagnostic.getvalue())
+
+    def test_resource_redaction_handles_malformed_urls_without_changing_parsed_data(self):
+        payload = ('https://name:secret@example.invalid/path?token=secret#fragment '
+                   'https://[broken secret_token=hidden Bearer private-value')
+        diagnostic = io.StringIO()
+        with patch('sys.stderr', diagnostic):
+            output = resources.run([sys.executable, '-c', f'print({payload!r})'])
+        self.assertEqual(output, payload + '\n')
+        self.assertIn('<unparseable-url>', diagnostic.getvalue())
+        for value in ('name:secret', 'token=secret', 'secret_token=hidden', 'private-value', '#fragment'):
+            self.assertNotIn(value, diagnostic.getvalue())
+
+    def test_reported_failure_does_not_replay_a_stack_but_keeps_it_in_log(self):
+        result = run(self.command('print("@@DOTFILES/1 EVENT FAIL: parser fixture: compiler failed");'
+                                  'print("@@DOTFILES/1 DETAIL STACK: full diagnostic");exit(1)', source='nvim'),
+                     env=self.env, cwd=self.root)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr.count('parser fixture: compiler failed'), 1)
+        self.assertNotIn('STACK:', result.stderr)
+        self.assertIn('STACK: full diagnostic', self.log.read_text())
+
+    def test_all_deployment_conflicts_remain_visible_beyond_the_fallback_tail(self):
+        program = ('print("ordinary deployment detail");'
+                   'print("WARNING! stowing fixture would cause conflicts:");'
+                   '[print("  * conflicting path", i) for i in range(25)];exit(1)')
+        result = run(self.command(program, source='deploy'), env=self.env, cwd=self.root)
+        self.assertEqual(result.returncode, 1)
+        for index in range(25):
+            self.assertIn('  * conflicting path ' + str(index) + '\n', result.stderr)
+        self.assertNotIn('ordinary deployment detail', result.stderr)
+
+    def test_color_controls_do_not_change_the_terminal_being_checked(self):
+        program = ('import os;print(os.environ["TERM"]);'
+                   'print(os.environ["NO_COLOR"],os.environ["CLICOLOR"],os.environ["HOMEBREW_NO_COLOR"])')
+        result = run(self.command(program), env=self.env, cwd=self.root)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('xterm-256color\n1 0 1\n', self.log.read_text())
+
+    def test_entry_native_stderr_and_actual_log_write_failure_block_success(self):
+        command = self.command('pass')
+        command[2] = command[2].replace('run \'fixture action\' "$@"',
+                                       'start_entry_logging\nprintf "entry-native-reason" >&2\nfalse')
+        result = run(command, env=self.env, cwd=self.root)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('entry-native-reason\nFAILED phase:', self.log.read_text())
+        self.assertNotIn('Bootstrap complete.', result.stderr)
+        self.work.mkdir()
+        program = f'from pathlib import Path;p=Path({str(self.log)!r});p.unlink();p.mkdir();print("evidence")'
+        result = run(self.command(program), env=self.env, cwd=self.root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('FAIL logging:', result.stderr)
+        self.assertNotIn('READY: fixture action', result.stderr)
+        self.assertNotIn('Bootstrap complete.', result.stderr)
+
+    def test_resource_interrupt_drains_partial_output_and_reaps_the_task(self):
+        marker = self.root / 'ready'
+        child = ('import sys,time;from pathlib import Path;'
+                 'sys.stdout.write("partial-out");sys.stdout.flush();'
+                 'sys.stderr.write("partial-err");sys.stderr.flush();'
+                 f'Path({str(marker)!r}).touch();time.sleep(30)')
+        program = ('import sys,signal;'
+                   f'sys.path.insert(0,{str(REPO / "scripts/bootstrap")!r});import resources;'
+                   'signal.signal(signal.SIGTERM,lambda sig,frame:sys.exit(128+sig));'
+                   f'resources.run([sys.executable,"-u","-c",{child!r}])')
+        with Process(self.command(program), env=self.env, cwd=self.root,
+                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as process:
+            deadline = time.monotonic() + 5
+            while not marker.exists():
+                self.assertIsNone(process.poll())
+                self.assertLess(time.monotonic(), deadline)
+                process.groups()
+                time.sleep(.02)
+            process.send_signal(signal.SIGTERM)
+            stdout, stderr = process.communicate(timeout=10)
+            self.assertEqual(process.returncode, 143, stderr)
+            self.assertEqual(stdout, '')
+            self.assertNotIn('Bootstrap complete.', stderr)
+            self.assertIn('Log: ' + str(self.log), stderr)
+            self.assertEqual(process.groups(), set())
+        saved = self.log.read_text()
+        self.assertIn('partial-out', saved)
+        self.assertIn('partial-err', saved)
+        self.assertIn('SystemExit', saved)
+        self.assertIn('exit 143', saved)
+
+
 class Preparation(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix='bootstrap-native-test-')
@@ -1250,7 +1554,7 @@ class Preparation(unittest.TestCase):
             child = run(command + [str(REPO / 'tests/bootstrap/nvim-cached-offline.lua'), entrypoint],
                         env=self.env, cwd=self.root, timeout=90)
             self.assertEqual(child.returncode, 1, child.stdout + child.stderr)
-            self.assertIn('Treesitter parser cannot be loaded: bash: No parser for language "bash"', child.stderr)
+            self.assertIn('Treesitter parser cannot be loaded: bash: No parser for language "bash"', child.stdout)
             self.assertNotIn('READY: configured Treesitter', child.stdout)
             self.assertNotIn('READY: completion resources', child.stdout)
             self.assertEqual((config / 'lazy-lock.json').read_bytes(), lock)
@@ -1275,28 +1579,30 @@ class NeovimProgress(unittest.TestCase):
         command = [REAL_TOOLS['nvim'], '--headless', '-u', 'NONE', '-n', '-i', 'NONE', '-l',
                    str(REPO / 'tests/bootstrap/nvim-progress.lua'), str(REPO / 'scripts/bootstrap/nvim.lua'),
                    scenario, str(marker)]
-        if persist:
-            self.log_path = self.root / 'run.local-http'
-            self.env['DOTFILES_TEST_LOG_PATH'] = str(self.log_path)
-            command = [BASH, '-c', '"$@" 2>&1 | tee -a "$DOTFILES_TEST_LOG_PATH"; exit "${PIPESTATUS[0]}"',
-                       'bootstrap-log-fixture', *command]
-        process = subprocess.Popen(command, env=self.env, cwd=self.root, stdout=subprocess.PIPE,
-                                   stderr=subprocess.STDOUT, start_new_session=True)
-
-        def stop_process_group():
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-
-        # 保留退出后的子进程供断言检查；即使用例失败，也只清理本次创建的进程组。
-        self.addCleanup(stop_process_group)
+        # 所有旧的详细诊断断言都检查生产日志接收器写出的持久化记录；
+        # 终端单独捕获，不能用空的或错误的输出对象满足否定断言。
+        self.log_path = self.root / 'run.nvim'
+        self.log_path.unlink(missing_ok=True)
+        driver = """source "$1"
+scratch="$2" log_file="$2/run.nvim" active_pid='' timer_pid=''
+registering=no interrupted_status=0 output_source=nvim
+shift 2
+trap 'stop_children' EXIT
+trap 'interrupt_bootstrap 130' INT
+trap 'interrupt_bootstrap 143' TERM
+execute 60 log "$@"
+"""
+        command = [BASH, '-c', driver, 'nvim-output-fixture',
+                   str(REPO / 'scripts/bootstrap/common.bash'), str(self.root), *command]
+        process = Process(command, env=self.env, cwd=self.root, stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT)
+        self.addCleanup(process.close)
         prefix = b''
         try:
             if waiting_for:
                 deadline = time.monotonic() + 8
                 expected = waiting_for.encode()
-                while expected not in prefix:
+                while expected not in (self.log_path.read_bytes() if self.log_path.exists() else b''):
                     self.assertLess(time.monotonic(), deadline, prefix.decode(errors='replace'))
                     readable, _, _ = select.select([process.stdout], [], [], 0.1)
                     if readable:
@@ -1313,15 +1619,30 @@ class NeovimProgress(unittest.TestCase):
             output, _ = process.communicate(timeout=8)
         finally:
             if process.poll() is None:
-                stop_process_group()
-                process.communicate()
-        text = (prefix + output).decode(errors='replace')
+                process.close()
+        self.terminal_output = (prefix + output).decode('utf-8')
+        text = self.log_path.read_text()
+        self.assertNotIn('DOWNLOAD:', self.terminal_output)
+        self.assertNotRegex(self.terminal_output, r'(?m)^PARSER:')
+        self.assertNotIn('stack traceback:', self.terminal_output)
+        self.assertNotIn('# stacktrace:', self.terminal_output)
         timers = json.loads((self.root / (scenario + '.release.timers')).read_text())
         self.assertEqual(timers['started'], timers['stopped'], text)
         self.assertEqual(timers['started'], timers['closed'], text)
         self.assertTrue(timers['notify_restored'], text)
         self.assertTrue(timers['system_restored'], text)
         return process.returncode, text, timers
+
+    def test_treesitter_summary_counts_actual_task_kinds_without_a_config_denominator(self):
+        code, output, _timers = self.execute('task_mix')
+        self.assertEqual(code, 0, output)
+        self.assertIn('configured parsers=1;', self.terminal_output)
+        self.assertIn('completed tasks: configured=1, dependency=1, query_only=1, unknown=1; downloads=0',
+                      self.terminal_output)
+        self.assertIn('completed tasks: configured=0, dependency=0, query_only=0, unknown=0; downloads=0',
+                      self.terminal_output)
+        self.assertNotIn('cache hit', self.terminal_output)
+        self.assertIn('TASK: Treesitter / install / queries; kind=query_only', output)
 
     def local_http(self, scenario):
         requests = {}
@@ -1667,7 +1988,7 @@ class NeovimProgress(unittest.TestCase):
         self.assertRegex(output, r'DOWNLOAD: Neovim / Treesitter / install / go; request=\d+; event=finish;[^\n]*http=404;')
         self.assertRegex(output, r'DOWNLOAD: Neovim / Treesitter / install / bash; request=\d+; event=stderr;[^\n]*error: 503')
         self.assertRegex(output, r'DOWNLOAD: Neovim / Treesitter / install / go; request=\d+; event=stderr;[^\n]*error: 404')
-        self.assertRegex(output, r'downloads=bash \(request=\d+ retry \(Warning: Problem : HTTP error')
+        self.assertRegex(output, r'bash \(request=\d+ retry \(Warning: Problem : HTTP error')
         self.assertIn('PARSER FAIL: Neovim / Treesitter / install / go;', output)
         self.assertNotIn('PARSER FAIL: Neovim / Treesitter / install / bash;', output)
         self.assertEqual(timers['curl_callbacks'], 2)
@@ -1715,7 +2036,7 @@ class NeovimProgress(unittest.TestCase):
             with self.subTest(scenario=scenario):
                 code, output, _ = self.execute(scenario, 'WAIT: Neovim / Treesitter / ' + phase + ';')
                 self.assertEqual(code, 0, output)
-                self.assertIn('timeout=600s; active=bash (Downloading tree-sitter-bash...)', output)
+                self.assertIn('timeout=600s; active_tasks=1; bash (Downloading tree-sitter-bash...)', output)
                 self.assertIn('PARSER: Neovim / Treesitter / ' + phase + ' / bash;', output)
                 self.assertIn('action=Compiling parser', output)
                 self.assertIn('action=Installing parser', output)
@@ -1751,6 +2072,29 @@ class NeovimProgress(unittest.TestCase):
         self.assertEqual(code, 0, output)
         self.assertIn('fixture config warning: nvim-treesitter', output)
         self.assertNotIn('FAIL: Neovim preparation:', output)
+
+    def test_multiline_notifications_keep_reason_and_hint_but_log_stack_only(self):
+        self.env['LC_ALL'] = 'C'  # 与系统 awk 的 locale 兼容性用例分离，直接检查通知分类。
+        for severity, expected_code in (('error', 1), ('warning', 0)):
+            with self.subTest(severity=severity):
+                code, output, _ = self.execute('treesitter_notify_multiline_' + severity)
+                self.assertEqual(code, expected_code, output)
+                for message in ('fixture plugin notice', '原因：配置无效', 'hint: inspect local config'):
+                    self.assertIn(message, self.terminal_output)
+                self.assertNotIn('TRACE_FRAME_', self.terminal_output)
+                for index in range(40):
+                    self.assertIn(f'TRACE_FRAME_{index:02d}', output)
+
+    def test_unicode_error_summaries_remain_valid_utf8(self):
+        self.env['LC_ALL'] = 'C'
+        for scenario in ('unicode_failure', 'unicode_failure_shift'):
+            with self.subTest(scenario=scenario):
+                code, output, _ = self.execute(scenario)
+                self.assertEqual(code, 1, output)
+                self.assertIn('é汉🍺' * 150, output)
+                self.assertIn('FAIL: Neovim / plugins / setup;', self.terminal_output)
+                self.assertNotIn('\ufffd', self.terminal_output)
+                self.assertNotIn('READY: Neovim / plugins / setup;', self.terminal_output)
 
     def test_parser_failure_and_timeout_keep_reason_and_clear_timer(self):
         code, output, _ = self.execute('install_failure', 'WAIT: Neovim / Treesitter / install;')

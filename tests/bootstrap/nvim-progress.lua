@@ -50,6 +50,8 @@ local lazy = {
   setup = function()
     if scenario == "setup_failure" then
       error("fixture plugin setup failed")
+    elseif scenario:match("^unicode_failure") then
+      error((scenario == "unicode_failure_shift" and "X" or "") .. string.rep("é汉🍺", 150))
     end
   end,
   restore = function() end,
@@ -65,6 +67,12 @@ local lazy = {
       vim.notify("fixture config failed: " .. plugin, vim.log.levels.ERROR)
     elseif scenario == "treesitter_notify_warning" and plugin == "nvim-treesitter" then
       vim.notify("fixture config warning: " .. plugin, vim.log.levels.WARN)
+    elseif scenario:match("^treesitter_notify_multiline_") and plugin == "nvim-treesitter" then
+      local message = "fixture plugin notice\n\n原因：配置无效\nhint: inspect local config\n\n# stacktrace:\n"
+      for index = 0, 39 do
+        message = message .. string.format("TRACE_FRAME_%02d: internal detail\n", index)
+      end
+      vim.notify(message, scenario:match("_error$") and vim.log.levels.ERROR or vim.log.levels.WARN)
     end
   end,
 }
@@ -174,6 +182,7 @@ package.preload["nvim-treesitter.parsers"] = function()
   return {
     bash = { install_info = { url = base .. "/repo/bash", revision = "test-revision" } },
     go = { install_info = { url = base .. "/repo/go", revision = "test-revision" } },
+    queries = {},
   }
 end
 
@@ -292,6 +301,17 @@ local function curl_task(phase)
 end
 
 local function task(phase)
+  if scenario == "task_mix" and phase == "install" then
+    return {
+      pwait = function()
+        for _, name in ipairs({ "bash", "go", "queries", "unknown", "bash" }) do
+          local log = require("nvim-treesitter.log").new("install/" .. name)
+          log:info("Language installed")
+        end
+        return true, true
+      end,
+    }
+  end
   if scenario:match("^curl_") then
     return curl_task(phase)
   end

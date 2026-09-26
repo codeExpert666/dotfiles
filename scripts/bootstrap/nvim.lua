@@ -1,7 +1,19 @@
 -- 无界面准备使用仓库配置的副本，并将插件写入用户实际的 Neovim 数据目录。
 -- 锁文件保持不变；安装、恢复或构建失败均终止准备。
-local function report(message)
-  io.stdout:write(message .. "\n")
+local output_events = vim.env.DOTFILES_OUTPUT_EVENTS == "1"
+local function shorten(message, limit)
+  -- Lua string.sub 按字节裁剪，会把 UTF-8 摘要截成宿主无法解码的数据。
+  return vim.fn.strcharpart(tostring(message), 0, limit)
+end
+
+local function report(message, detail)
+  local prefix = ""
+  if output_events then
+    -- 先结束外部工具可能没有换行的尾部，避免 READY 与检出正文拼接。
+    prefix = "\n@@DOTFILES/1 " .. (detail and "DETAIL " or "EVENT ")
+    message = tostring(message):gsub("\n", "\n@@DOTFILES/1 " .. (detail and "DETAIL " or "EVENT "))
+  end
+  io.stdout:write(prefix .. message .. "\n")
   io.stdout:flush()
 end
 
@@ -12,7 +24,7 @@ local function elapsed(started)
 end
 
 -- vim.wait() 会处理 libuv 事件；心跳使用独立定时器，等待始终使用同一个截止时间。
-local function step(label, timeout_ms, work, detail)
+local function step(label, timeout_ms, work, detail, summary)
   local started = uv.hrtime()
   local limit = timeout_ms and (timeout_ms / 1000 .. "s") or "none (caller controls the total command)"
   report("RUN: " .. label .. "; timeout=" .. limit)
@@ -37,10 +49,18 @@ local function step(label, timeout_ms, work, detail)
   timer:stop()
   timer:close()
   if not ok then
-    report("FAIL: " .. label .. "; elapsed=" .. elapsed(started) .. "; reason=" .. tostring(result))
+    report(
+      "FAIL: "
+        .. label
+        .. "; elapsed="
+        .. elapsed(started)
+        .. "; reason="
+        .. shorten(tostring(result):gsub("%c", " "), 300)
+    )
+    report(tostring(result), true)
     error(result, 0)
   end
-  report("READY: " .. label .. "; elapsed=" .. elapsed(started))
+  report("READY: " .. label .. "; elapsed=" .. elapsed(started) .. (summary and summary() or ""))
   return result
 end
 
@@ -66,6 +86,7 @@ local function prepare_plugins(config_dir, lock_path, lock)
   require("lazy.manage.lock").update = function() end
   lazy.setup = function(opts)
     opts.lockfile = lock_path
+    opts.headless = { process = true, log = true, task = true, colors = false }
     opts.checker = { enabled = false }
     opts.change_detection = { enabled = false }
     opts.local_spec = false
@@ -309,12 +330,13 @@ end
 -- 锁定的 nvim-treesitter 在 install.lua 中为每个实际任务创建 install/<lang>
 -- logger；异步调度器随后调用 vim.system(curl)。事件、目标 URL 和输出文件共同确定请求归属。
 -- 只转发这些 logger 的真实事件；旧 parser.so 不能代表 update 已完成。
-local function treesitter_events()
+local function treesitter_events(configured)
   local connect_timeout_seconds = 20
   local log = require("nvim-treesitter.log")
   local original_new, original_system = log.new, vim.system
   local state = { phase = nil, started = nil, active = {}, errors = {}, latest = {}, pending = {}, next_request = 0 }
   local requests, closing = {}, false
+  state.completed, state.kinds, state.downloads = {}, {}, 0
   local version_ok, curl_version = pcall(function()
     return original_system({ "curl", "--version" }, { text = true }):wait(2000)
   end)
@@ -337,7 +359,8 @@ local function treesitter_events()
         .. "; wall_elapsed="
         .. elapsed(request.started)
         .. "; "
-        .. details
+        .. details,
+      true
     )
     state.latest[request.lang] = "request=" .. request.id .. " " .. event
   end
@@ -384,6 +407,7 @@ local function treesitter_events()
     state.pending[lang] = nil
 
     state.next_request = state.next_request + 1
+    state.downloads = state.downloads + 1
     local request =
       { id = tostring(state.next_request), phase = state.phase, lang = lang, started = uv.hrtime(), retries_seen = 0 }
     request_line(request, "start", "url=" .. safe_url(cmd[8]) .. "; connect_timeout=" .. connect_timeout_seconds .. "s")
@@ -407,6 +431,11 @@ local function treesitter_events()
       event = event and "retry" or "stderr"
       if event == "retry" then
         request.retries_seen = request.retries_seen + 1
+        local now = uv.hrtime()
+        if not state.last_retry or now - state.last_retry >= 30e9 then
+          report("WARN: Treesitter / " .. state.phase .. " / " .. lang .. "; retry; " .. shorten(line, 180))
+          state.last_retry = now
+        end
       end
       request_line(request, event, "detail=" .. line)
       state.latest[lang] = "request=" .. request.id .. " " .. event .. " (" .. line .. ")"
@@ -512,6 +541,13 @@ local function treesitter_events()
       local formatted = message:format(...)
       local result = original_info(self, message, ...)
       if state.phase then
+        if not state.kinds[lang] then
+          local info = require("nvim-treesitter.parsers")[lang]
+          state.kinds[lang] = info
+              and (info.install_info and (configured[lang] and "configured" or "dependency") or "query_only")
+            or "unknown"
+          report("TASK: Treesitter / " .. state.phase .. " / " .. lang .. "; kind=" .. state.kinds[lang], true)
+        end
         if formatted == "Downloading tree-sitter-" .. lang .. "..." then
           state.pending[lang] = true
         else
@@ -519,6 +555,7 @@ local function treesitter_events()
           state.latest[lang] = nil
         end
         if formatted == "Language installed" then
+          state.completed[lang] = true
           state.active[lang] = nil
           state.latest[lang] = nil
         else
@@ -534,7 +571,8 @@ local function treesitter_events()
             .. "; elapsed="
             .. elapsed(state.started)
             .. "; action="
-            .. formatted
+            .. formatted,
+          true
         )
       end
       return result
@@ -545,6 +583,7 @@ local function treesitter_events()
       if state.phase then
         state.pending[lang] = nil
         state.errors[#state.errors + 1] = lang .. ": " .. formatted
+        report("FAIL: Treesitter / " .. state.phase .. " / " .. lang .. "; " .. shorten(safe_error(formatted), 240))
         state.active[lang] = nil
         state.latest[lang] = nil
         report(
@@ -557,7 +596,8 @@ local function treesitter_events()
             .. "; elapsed="
             .. elapsed(state.started)
             .. "; reason="
-            .. formatted
+            .. formatted,
+          true
         )
       end
       return result
@@ -622,31 +662,56 @@ local function prepare_treesitter()
   local ts = require("nvim-treesitter")
   local parsers = LazyVim.opts("nvim-treesitter").ensure_installed
   assert(type(parsers) == "table" and #parsers > 0, "no configured Treesitter parser set")
+  report("RUN: Treesitter configured parsers=" .. #parsers .. "; dependency and query tasks are logged separately")
   -- 补装缺失的解析器，并将已有解析器更新到锁定插件声明的修订；
   -- nvim-treesitter 会跳过已经匹配的修订。
-  local state, cleanup_events = treesitter_events()
+  local configured = {}
+  for _, name in ipairs(parsers) do
+    configured[name] = true
+  end
+  local state, cleanup_events = treesitter_events(configured)
   local function active_parsers()
+    local names = vim.tbl_keys(state.active)
+    table.sort(names)
     local entries = {}
-    for name, action in pairs(state.active) do
-      entries[#entries + 1] = name .. " (" .. action .. ")"
+    for index = 1, math.min(#names, 4) do
+      local name = names[index]
+      entries[#entries + 1] = name .. " (" .. shorten(safe_error(state.latest[name] or state.active[name]), 100) .. ")"
     end
-    table.sort(entries)
-    local downloads = {}
-    for name, latest in pairs(state.latest) do
-      downloads[#downloads + 1] = name .. " (" .. latest .. ")"
-    end
-    table.sort(downloads)
-    local suffix = #downloads > 0 and "; downloads=" .. table.concat(downloads, ", ") or ""
-    return (#entries > 0 and "; active=" .. table.concat(entries, ", ") or "; waiting for nvim-treesitter task")
-      .. suffix
+    return #names > 0
+        and "; active_tasks=" .. #names .. "; " .. table.concat(entries, ", ") .. (#names > 4 and ", ..." or "")
+      or "; waiting for nvim-treesitter task"
   end
   local ok, err = pcall(function()
     for _, phase in ipairs({ "install", "update" }) do
       state.phase, state.started, state.active, state.errors, state.latest, state.pending =
         phase, uv.hrtime(), {}, {}, {}, {}
-      step("Neovim / Treesitter / " .. phase, 600000, function(remaining)
-        wait_treesitter(ts[phase](parsers), remaining, state)
-      end, active_parsers)
+      state.completed, state.kinds, state.downloads = {}, {}, 0
+      step(
+        "Neovim / Treesitter / " .. phase,
+        600000,
+        function(remaining)
+          wait_treesitter(ts[phase](parsers), remaining, state)
+        end,
+        active_parsers,
+        function()
+          local counts = { configured = 0, dependency = 0, query_only = 0, unknown = 0 }
+          for name in pairs(state.completed) do
+            local kind = state.kinds[name] or "unknown"
+            counts[kind] = counts[kind] + 1
+          end
+          return "; completed tasks: configured="
+            .. counts.configured
+            .. ", dependency="
+            .. counts.dependency
+            .. ", query_only="
+            .. counts.query_only
+            .. ", unknown="
+            .. counts.unknown
+            .. "; downloads="
+            .. state.downloads
+        end
+      )
     end
   end)
   local cleaned, cleanup_error = pcall(cleanup_events)
@@ -664,7 +729,7 @@ local function prepare_treesitter()
     local installed = ts.get_installed()
     for _, name in ipairs(parsers) do
       assert(vim.tbl_contains(installed, name), "Treesitter parser missing: " .. name)
-      report("PARSER: Neovim / Treesitter / verify / " .. name .. "; action=load")
+      report("PARSER: Neovim / Treesitter / verify / " .. name .. "; action=load", true)
       local loaded, load_error = vim.treesitter.language.add(name)
       assert(loaded, "Treesitter parser cannot be loaded: " .. name .. ": " .. tostring(load_error))
     end
@@ -715,19 +780,44 @@ end
 
 -- lazy.nvim 可仅通过 ERROR 通知报告配置异常；收集必须覆盖后续惰性加载与异步准备。
 -- 整体成功或异常退出都在同一处恢复通知接口。
+local function notification_summary(message)
+  local lines = {}
+  for line in message:gmatch("[^\r\n]+") do
+    line = vim.trim(line)
+    local lower = line:lower()
+    if lower:match("^#?%s*stacktrace:") or lower:match("^stack traceback:") then
+      break
+    end
+    if line ~= "" then
+      lines[#lines + 1] = line
+      if #lines == 3 then
+        break
+      end
+    end
+  end
+  return #lines > 0 and shorten(table.concat(lines, "; "):gsub("%c", " "), 300)
+    or "Neovim notification; see log for details"
+end
+
 local original_notify, notifications = vim.notify, {}
 vim.notify = function(message, level)
+  message = tostring(message)
   if level == vim.log.levels.ERROR then
-    notifications[#notifications + 1] = tostring(message)
+    notifications[#notifications + 1] = message
   end
-  report(tostring(message))
+  local severity = level == vim.log.levels.ERROR and "FAIL: " or level == vim.log.levels.WARN and "WARN: " or ""
+  if severity ~= "" then
+    report(severity .. notification_summary(message))
+  end
+  report(message, true)
 end
 local ok, err = xpcall(function()
   main(notifications)
 end, debug.traceback)
 vim.notify = original_notify
 if not ok then
-  io.stderr:write("FAIL: Neovim preparation: " .. tostring(err) .. "\n")
+  report("FAIL: Neovim preparation: " .. shorten(tostring(err):match("[^\n]*"), 300))
+  report(tostring(err), true)
   vim.cmd("cquit 1")
 end
 vim.cmd("qa!")

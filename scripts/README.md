@@ -245,12 +245,13 @@ Neovim 准备会立即输出各动作的 `RUN`，完成时输出带耗时的 `RE
 `timeout` 是该动作适用的本地上限。Mason registry 和补全资源各为 300 秒，单个 Mason
 工具与 Treesitter 的 install、update 各为 600 秒。标为 `none (caller controls the total
 command)` 的动作没有单独上限；由 `bootstrap.sh` 的 Neovim 命令总上限 2400 秒保护。
-通过 Multipass 调用时，宿主的 `STEP WAIT [bootstrap/child]` 另计整个客户机 bootstrap
-命令的耗时和 7200 秒上限，不代表当前解析器的耗时。
+通过 Multipass 调用时，客户机已有可见进度就不再重复显示宿主心跳；终端持续安静约 30 秒时，
+宿主的 `STEP WAIT [bootstrap/child]` 显示整个客户机 bootstrap 命令的耗时和 7200 秒上限。
+详细日志持续增长不会抑制这个心跳，它也不代表当前解析器的耗时。
 
-Treesitter 的 `PARSER` 行来自锁定插件实际创建的解析器任务，带 UTC 时间、当前动作累计耗时、
-解析器名及下载、编译、安装等插件事件；`WAIT` 中的 `active` 只列出已发出事件且尚未报告
-安装完成的解析器。若插件尚未发出解析器事件，会明确写出仍在等待插件任务。更新已有解析器时，
+详细日志中的 Treesitter `PARSER` 行来自锁定插件实际创建的解析器任务，带 UTC 时间、当前动作累计耗时、
+解析器名及下载、编译、安装等插件事件；`WAIT` 中的 `active_tasks` 只统计已发出事件且尚未报告
+安装完成的任务，最多列出 4 项，每项说明限制为 100 字符。若插件尚未发出解析器事件，会明确写出仍在等待插件任务。更新已有解析器时，
 旧 `parser.so` 的存在不代表修订对齐完成；只有插件 update 任务结束后才会输出该阶段的
 `READY`。插件报告的下载器或编译器错误会出现在 `PARSER FAIL` 和阶段 `FAIL` 中。
 仅实际启动的 Treesitter curl 请求另有 `DOWNLOAD` 行，以阶段、解析器和 `request` 区分并发请求。
@@ -261,8 +262,8 @@ TCP 连接及 TLS 握手；连接建立后的响应体传输不受这个连接�
 上限保护。此设置只缩短失败连接的等待，不判定或修复底层网络故障。连接上限的含义见
 [curl 的 connect-timeout 文档](https://curl.se/docs/manpage.html#--connect-timeout)。
 
-运行中的 `stderr`、`retry` 保留 curl 的错误和重试提示；`WAIT` 的
-`downloads` 显示最近一条真实事件。`finish` 包含退出码、最终 HTTP 状态、最终响应字节数、
+日志中的 `stderr`、`retry` 保留 curl 的错误和重试提示；终端重试提醒约 30 秒内至多一次，
+最终失败立即显示相关解析器和简短原因。`WAIT` 的活动项采用最近一条真实事件。`finish` 包含退出码、最终 HTTP 状态、最终响应字节数、
 原始及重定向后的 URL。URL 的用户信息、查询参数和片段会隐去。`retry_notices` 只计实际看到的
 重试提示；`retries` 仅在 curl 8.9.0+ 可读，其他版本为 `unavailable`，不从耗时推断次数。
 `dns_at`、`connect_at`、`tls_at`、`first_byte_at` 是 curl 对最终传输报告的累计时间检查点，
@@ -272,8 +273,10 @@ TCP 连接及 TLS 握手；连接建立后的响应体传输不受这个连接�
 `cancel` 而非 `finish`。准备退出时会显式取消仍在运行的下载，并最多等待 2 秒回收进程；
 清理失败会单独报告，同时保留原始故障。字段含义详见
 [curl 的 write-out 文档](https://curl.se/docs/manpage.html#-w)。
-这些行同样进入下方的 bootstrap `run.*` 日志；通过 Multipass 运行时，客户机输出也会原样
-进入宿主对应尝试的 `bootstrap.log`。排查慢下载时先按 `request` 找到运行中的重试/错误事件，
+这些详细事件进入下方的 bootstrap `run.*` 日志；通过当前 Multipass 宿主入口运行时，
+详情同时转发并保存到宿主对应尝试的 `bootstrap.log`，终端只展示摘要。
+阶段结果区分实际完成的配置解析器、依赖解析器、仅查询规则及无法归类的任务；
+下载数只计实际启动的请求。配置数不作为这些不同任务的共同分母，零事件也不被解释为缓存命中。排查慢下载时先按 `request` 找到运行中的重试/错误事件，
 再比较 `wall_elapsed`、`curl_total` 和 `redirect_total`；无法据此单独断定网络慢速的根因。
 若还没有下载器事件，`WAIT` 不判断请求正处于连接还是传输。
 
@@ -290,7 +293,10 @@ TCP 连接及 TLS 握手；连接建立后的响应体传输不受这个连接�
 | 插件与工具       | `~/.local/share/antidote/`、`~/.cache/antidote/`、`~/.local/share/nvim/`                        |
 | 字体             | Linux：`~/.local/share/fonts/dotfiles-bootstrap/`；macOS：`~/Library/Fonts/dotfiles-bootstrap/` |
 
-- **长任务与中断**：长任务输出同时进入终端与日志。命令、日志转发或必要清理失败都会阻止总体成功；主体错误或中断退出码优先保留，清理错误另行报告。捕获中断信号（HUP/INT/TERM）时自动回收本次任务的进程组并释放排他锁。
+- **终端与日志**：终端保留阶段、动作、任务摘要、警告/失败及日志位置；apt/Homebrew、lazy.nvim Git 进度、逐文件部署、逐项工具成功、doctor PASS、Treesitter 详细事件进入日志。Neovim 多行通知显示有界的原因与提示，完整正文和堆栈写入日志。内嵌 doctor 的 WARN/FAIL/SKIP 及 hint 和准确的总计仍然可见；独立 doctor、deploy 和显式 dry-run 保留完整报告。
+- **长任务与中断**：通用长任务每约 30 秒显示动作、已耗时及上限；Neovim 使用自己的动作心跳。命令、日志转发或必要清理失败都会阻止总体成功；主体错误或中断退出码优先保留，清理错误另行报告。捕获中断信号（HUP/INT/TERM）时自动回收本次任务的进程组并释放排他锁。
+- **诊断内容**：优先关闭工具颜色，日志接收器清理 ANSI；回车/退格覆盖转成分行记录，未换行的尾部在命令结束或中断排空时补齐换行。UTF-8 正文保持完整，摘要裁剪不会拆开中文或 emoji，也不会改变安装命令的 locale。资源助手另存被捕获命令的 stdout/stderr（包括成功警告、失败、超时及中断前正文），返回给解析器的数据不混入日志标记。未知格式错误显示有限的尾部摘要，完整证据仍在日志中；必要清理的原生错误也会记录。首次安装的日志接收器只用 Bash 和系统 awk，不提前依赖 Python；使用 mawk 时启用行式输入，避免小批量进度滞留在缓冲中。
+- **日志位置**：成功、失败和可捕获中断都会报告本次 `run.*`；预检或预览未建立持久化记录时明确显示 `Log: none`。可在另一终端用 `tail -f <run.*路径>` 查看详情。
 - **并发锁与异常恢复**：`~/.local/state/dotfiles-bootstrap/lock` 为原子目录锁。若因进程被外部强行终止（如 `kill -9`）导致遗留孤儿锁，重跑会拒绝并报错。此时先确认 `lock/pid` 记录的 PID 进程已不在运行，再手动执行 `rm -rf ~/.local/state/dotfiles-bootstrap/lock` 即可解除锁定。
 - **失败与幂等重试**：失败不整体回滚。排除报错原因（如网络故障、命令入口冲突或脏插件分支）后重跑同一命令，已达标步骤会自动跳过并复用；成功时仍应核对 doctor 的 WARN/SKIP。
 - **个人收尾**：Git 身份、登录 Shell 和 Atuin 历史属于[个人收尾操作](../README.md#个人配置)。
@@ -351,7 +357,7 @@ Python 标准库负责文件操作、PTY 和 Multipass 编排，Lua/Zsh 负责�
 | [requirements.tsv](bootstrap/requirements.tsv)、[releases.json](bootstrap/releases.json)                                                | 最低要求与固定归档；最低版本 `0` 表示先检查可执行文件                 |
 | [macOS](bootstrap/macos/)、[Ubuntu](bootstrap/ubuntu/)                                                                                  | 平台安装器、包清单及 desktop 增量                                     |
 | [resources.py](bootstrap/resources.py)                                                                                                  | 按需解析 Go/JDK/Maven、资源校验和发布                                 |
-| [common.bash](bootstrap/common.bash)、[without_tty.py](bootstrap/without_tty.py)                                                        | 准备流程、探针、进程与终端隔离                                        |
+| [common.bash](bootstrap/common.bash)、[output.awk](bootstrap/output.awk)、[without_tty.py](bootstrap/without_tty.py)                                                        | 准备流程、探针、进程与终端隔离                                        |
 | [zsh.zsh](bootstrap/zsh.zsh)、[nvim.lua](bootstrap/nvim.lua)                                                                            | 准备 Zsh 插件 bundle 缓存与 Neovim 锁文件插件、Mason 工具、Treesitter |
 | [doctor/](doctor/)                                                                                                                      | 配置检查、受控会话、超时与后代进程清理                                |
 | [multipass/](multipass/)                                                                                                                | 宿主编排、客户机助手、SSH 发布与地址解析                              |

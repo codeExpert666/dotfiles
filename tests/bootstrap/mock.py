@@ -148,6 +148,9 @@ elif name == 'brew':
     else:
         raise RuntimeError('unexpected brew invocation: ' + repr(args))
 elif name == 'apt-get':
+    while args[:1] == ['-o']:
+        assert args[1] in ('APT::Color=0', 'Dpkg::Use-Pty=0')
+        args = args[2:]
     event(name, args)
     if os.environ.get('BOOTSTRAP_TEST_FAIL') == name:
         sys.exit(42)
@@ -211,8 +214,8 @@ elif name == 'resources-fixture':
 elif name == 'nvim' and '--headless' in args:
     event('nvim', args)
     if os.environ.get('BOOTSTRAP_TEST_NVM_PROGRESS'):
-        print('RUN: Neovim / Treesitter / install; timeout=600s', flush=True)
-        print('WAIT: Neovim / Treesitter / install; elapsed=30s; timeout=600s; active=bash (Compiling parser)',
+        print('@@DOTFILES/1 EVENT RUN: Neovim / Treesitter / install; timeout=600s', flush=True)
+        print('@@DOTFILES/1 EVENT WAIT: Neovim / Treesitter / install; elapsed=30s; timeout=600s; active=bash (Compiling parser)',
               flush=True)
     if os.environ.get('BOOTSTRAP_TEST_FAIL') == 'nvim':
         sys.exit(44)

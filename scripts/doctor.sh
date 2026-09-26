@@ -118,8 +118,13 @@ report() {
 			exit 2
 			;;
 	esac
-	printf '%-4s %s: %s\n' "$level" "$id" "$message" >&2
-	[[ -z $hint ]] || printf '     hint: %s\n' "$hint" >&2
+	local prefix=''
+	if [[ ${DOTFILES_OUTPUT_EVENTS-} == 1 ]]; then
+		prefix='@@DOTFILES/1 EVENT '
+		[[ $level != PASS ]] || prefix='@@DOTFILES/1 DETAIL '
+	fi
+	printf '%s%-4s %s: %s\n' "$prefix" "$level" "$id" "$message" >&2
+	[[ -z $hint ]] || printf '%s     hint: %s\n' "$prefix" "$hint" >&2
 }
 
 # shellcheck disable=SC2317 # 由信号 trap 调用。
@@ -156,7 +161,9 @@ finish_doctor() {
 		fi
 	fi
 	if [[ $summary_ready == yes ]]; then
-		printf '\nresult: PASS=%s WARN=%s FAIL=%s SKIP=%s\n' "$pass_count" "$warn_count" "$fail_count" "$skip_count" >&2
+		printf '\n' >&2
+		[[ ${DOTFILES_OUTPUT_EVENTS-} != 1 ]] || printf '@@DOTFILES/1 EVENT ' >&2
+		printf 'result: PASS=%s WARN=%s FAIL=%s SKIP=%s\n' "$pass_count" "$warn_count" "$fail_count" "$skip_count" >&2
 	fi
 	if [[ $status -ge 128 ]]; then printf 'doctor: interrupted (exit %s)\n' "$status" >&2; fi
 	exit "$status"
@@ -230,7 +237,16 @@ native_error() {
 }
 
 native_details() {
-	local line count=0
+	local line count=0 file
+	if [[ ${DOTFILES_OUTPUT_EVENTS-} == 1 ]]; then
+		for file in "$probe_stdout" "$probe_stderr"; do
+			[[ -r $file ]] || continue
+			while IFS= read -r line || [[ -n $line ]]; do
+				printf '@@DOTFILES/1 DETAIL      native: %s\n' "$line" >&2
+			done < "$file"
+		done
+		return
+	fi
 	if [[ $verbose == yes && -r $probe_stderr ]]; then
 		while IFS= read -r line && ((count < 12)); do
 			printf '     native: %s\n' "$line" >&2

@@ -61,6 +61,14 @@ bash tests/multipass.sh Inputs.test_missing_ssh_key
 
 通过包管理器替身、本地预置归档和受控时钟，验证 profile 配置（server/desktop）、安装阶段顺序、sudo 权限请求、部署前置预检、日志与文件锁、资源复用与失败重试逻辑。针对 Go/JDK/Maven 验证版本选择、归档校验和、缓存损坏恢复及安装失败时保留旧版本；针对字体验证族名匹配与延迟发现；针对 Zsh 验证终端隔离及被中断时子进程树的安全回收。
 
+输出用例分别捕获 stdout、stderr 和持久化日志，覆盖快速完成、静默/持续写日志的长任务心跳、
+ANSI/回车/退格/无末尾换行、未知错误格式、日志接收失败、清理失败及中断排空。
+UTF-8 locale 下另测中文/emoji、摘要截断与宿主串联后的原故障保留；对本机可用的 awk、mawk、
+gawk 验证小批量事件在输入关闭前已经可见且落盘。Neovim 多行通知分别验证终端提示与完整堆栈日志。
+资源助手验证解析数据不受诊断污染，成功警告、超时和非零退出均保留 stdout/stderr。
+Neovim 的完整下载、重试、并发、超时和解析器错误断言读取真实日志接收器的输出，
+另行断言终端只含阶段摘要和必要提醒。HTTP/TLS 场景使用本地服务；真实插件取消验证可用下方缓存模式。
+
 ### config-loading
 
 先由 deploy 准备好已部署的配置夹具，再启动原生应用验证其真实发现并加载配置：包括 Git 别名与合并配置覆盖、Zsh 配置文件加载顺序、JDK/Maven 路径选择、代码格式化、TUI 界面渲染、编辑器传参及已安装工具的个性化设置。常规 Neovim 检查不发起联网插件安装；Ghostty 验证配置语法解析，不代表着色器图形渲染通过。本套件专注于应用实际加载行为，不重复验证部署链接结构，也不以 doctor 的静态判定替代应用自身断言。
@@ -71,7 +79,8 @@ bash tests/multipass.sh Inputs.test_missing_ssh_key
 
 - **输入与身份**：参数解析、镜像与资源分配、公钥与 agent 身份核验、提交 SHA 固定、SSH 信任关系；遇到同名冲突、脏仓库或锁被占用时安全保留现场。
 - **失败与续跑**：元数据记录先于 launch 创建，持久化保存失败历史与实例 UUID；首次必要重启按 stop → `Stopped` → start → `Running` 核对状态，覆盖命令非零但目标已达成、中断续跑、旧收据边界、身份与 boot ID、cloud-init、helper 清理和共享超时预算；禁止借 provision 跳过首次启动。异常状态下 helper 清理和在线诊断不得隐式启动实例，未完成的清理保留待办标记。
-- **退役与归属**：严禁凭旧回执同名重建；验证 destroy 预览、定向删除实例、宿主状态迁移至 `retired/` 以及共享 SSH 配置的安全保留。
+- **退役与归属**：严禁凭旧回执同名重建；验证 destroy 预览、定向删除实例、宿主状态迁移至 `retired/`、日志路径迁移和旧历史保留，以及共享 SSH 配置的安全保留。
+- **输出证据**：实际 Bash bootstrap 输出接收器与宿主 Python Runner 串联，分别核对终端 stdout/stderr、客户机 `run.*`、宿主 `bootstrap.log` 和 receipt。另测持续详情不抑制心跳、已有摘要不重复心跳、旧输出兼容、日志转发故障及 Python 校验错误的归属。
 
 ## 验证范围与证据边界
 
@@ -98,6 +107,9 @@ DOTFILES_TEST_PREPARED_HOME=/path/to/prepared-home bash tests/all.sh
 ```
 
 测试用例会将缓存复制到临时夹具中并校验来源完整性。Neovim 准备步骤会主动屏蔽 Git/curl/wget 外部下载，通过缓存解析器验证首次安装目录创建、重跑幂等性与加载失败恢复；Zsh 与 Neovim 其余调用均执行真实插件 API。该模式不是独立的第六套测试，而是对离线套件的增强集成模式。
+
+macOS 默认临时目录较长，Neovim 将完整路径编码为缓存文件名时可能报 `ENAMETOOLONG`。
+遇到该错误可加 `TMPDIR=/tmp` 重跑上述命令，仍使用隔离夹具并保留全部断言。
 
 ### 真实 Multipass 虚拟机验收
 

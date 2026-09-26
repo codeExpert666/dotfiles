@@ -5,6 +5,7 @@
 目录和各链接分别发布；后续失败保留已发布内容，修复问题后可重试。
 """
 
+import codecs
 import gzip
 import hashlib
 import json
@@ -19,6 +20,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 import urllib.parse
 import zipfile
@@ -33,12 +35,85 @@ MAVEN_METADATA_URL = 'https://repo.maven.apache.org/maven2/org/apache/maven/apac
 
 # ===== 命令执行、路径检查与归档解压 =====
 
+
+def safe_diagnostic(text):
+    def url(match):
+        try:
+            parsed = urllib.parse.urlsplit(match.group())
+        except ValueError:
+            # 外部诊断可能包含不完整的 URL；不能让脱敏器中断日志或回显凭据。
+            return '<unparseable-url>'
+        host = parsed.netloc.rsplit('@', 1)[-1]
+        path = re.sub(r'(?i)(/(?:token|secret|password|apikey|api_key)/)[^/]+',
+                      r'\1<redacted>', parsed.path)
+        return urllib.parse.urlunsplit((parsed.scheme, host, path,
+                                      '<redacted>' if parsed.query else '', ''))
+    text = re.sub(r'https?://[^\s<>"\']+', url, text)
+    text = re.sub(r'(?i)(bearer\s+)\S+', r'\1<redacted>', text)
+    return re.sub(r'(?i)((?:[\w-]*(?:token|secret|password|api_key))[\w-]*=)[^\s&]+',
+                  r'\1<redacted>', text)
+
 def run(args, *, env=None, cwd=None, timeout=600, input=None):
-    result = subprocess.run(args, env=env, cwd=cwd, input=input, text=True,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
-    if result.returncode:
-        raise RuntimeError(f"{args[0]} exited {result.returncode}: {result.stderr[-6000:]}")
-    return result.stdout
+    # 解析结果与诊断分离。临时普通文件避免后代持有管道阻碍中断时排空；
+    # 本进程仍属于 bootstrap 的任务组，由外层执行器负责回收后代。
+    name = Path(args[0]).name
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        stopped = threading.Event()
+        forwarding_errors = []
+
+        def forward():
+            positions = [0, 0]
+            limits = None
+            pending = ['', '']
+            decoders = [codecs.getincrementaldecoder("utf-8")("replace") for _ in range(2)]
+            try:
+                while True:
+                    done = stopped.is_set()
+                    if done and limits is None:
+                        limits = [os.fstat(stream.fileno()).st_size for stream in (stdout, stderr)]
+                    for index, stream in enumerate((stdout, stderr)):
+                        data = os.pread(stream.fileno(), min(65536, limits[index] - positions[index]) if done else 65536, positions[index])
+                        positions[index] += len(data)
+                        pending[index] += decoders[index].decode(data, final=done and positions[index] == limits[index])
+                        lines = pending[index].split('\n')
+                        pending[index] = lines.pop()
+                        if done and not data and pending[index]:
+                            lines.append(pending[index])
+                            pending[index] = ''
+                        for line in lines:
+                            line = safe_diagnostic(line)
+                            warning = index == 1 and re.match(r'(?i)^(warning:|warn[: ])', line)
+                            role = 'EVENT' if warning else 'DETAIL'
+                            prefix = '@@DOTFILES/1 ' + role + ' ' if os.environ.get('DOTFILES_OUTPUT_EVENTS') == '1' else ''
+                            print(prefix + f'[{name} {"stderr" if index else "stdout"}] ' + line,
+                                  file=sys.stderr, flush=True)
+                    if done and positions == limits and not any(pending):
+                        break
+                    stopped.wait(.05) if not done else time.sleep(.001)
+            except Exception as exc:
+                forwarding_errors.append(exc)
+
+        worker = threading.Thread(target=forward, daemon=True)
+        worker.start()
+        try:
+            result = subprocess.run(args, env=env, cwd=cwd, input=input, text=True,
+                                    stdout=stdout, stderr=stderr, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f'{name} timed out after {timeout}s; see command stdout/stderr above') from None
+        except BaseException as exc:
+            print(f'FAIL: resource command {name}: {type(exc).__name__}; limit={timeout}s',
+                  file=sys.stderr, flush=True)
+            raise
+        finally:
+            stopped.set()
+            worker.join()
+        stdout.seek(0)
+        output = stdout.read().decode(errors='replace')
+        if result.returncode:
+            raise RuntimeError(f'{name} exited {result.returncode}; see command stdout/stderr above')
+        if forwarding_errors:
+            raise RuntimeError(f'{name} diagnostics could not be forwarded: {forwarding_errors[0]}')
+        return output
 
 
 def real_directory(path):
@@ -282,7 +357,7 @@ class Resources:
             return cached
         with tempfile.TemporaryDirectory(prefix='.download-', dir=self.cache) as temporary:
             path = Path(temporary) / 'asset'
-            print(f"Downloading {name}: {item['url']}", file=sys.stderr, flush=True)
+            print(f"Downloading {name}: {safe_diagnostic(item['url'])}", file=sys.stderr, flush=True)
             run(['curl', '--fail', '--silent', '--show-error', '--location', '--proto', '=https',
                  '--proto-redir', '=https', '--retry', '2', '--connect-timeout', '15', '--max-time', '900',
                  '--output', str(path), item['url']], timeout=1000)
@@ -557,5 +632,5 @@ if __name__ == '__main__':
         main()
     except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError, tarfile.TarError,
             zipfile.BadZipFile, struct.error) as error:
-        print(f"FAIL: {error}", file=sys.stderr)
+        print(f"FAIL: {safe_diagnostic(str(error))}", file=sys.stderr)
         sys.exit(1)

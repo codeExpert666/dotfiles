@@ -59,11 +59,11 @@ ubuntu_package_installed() {
 apt_install() {
 	if [[ $apt_updated != yes ]]; then
 		authorize_sudo
-		run 'refresh apt package index' 600 sudo -n apt-get update
+		run 'refresh apt package index' 600 sudo -n apt-get -o APT::Color=0 -o Dpkg::Use-Pty=0 update
 		apt_updated=yes
 	fi
 	authorize_sudo
-	run "apt install: $*" 1800 sudo -n apt-get install -y --no-install-recommends "$@"
+	run "apt install: $*" 1800 sudo -n apt-get -o APT::Color=0 -o Dpkg::Use-Pty=0 install -y --no-install-recommends "$@"
 }
 
 ubuntu_entry_ready() {

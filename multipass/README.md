@@ -195,8 +195,11 @@ bash scripts/multipass.sh provision --apply --name ubuntu-dev --ref '<新40位SH
 - `STAGE`：标识主要生命周期阶段；
 - `STEP`：标识阶段内部的具体操作步骤；
 - `RUN` / `OK` / `SKIP` / `FAIL`：分别表示步骤的开始、成功完成、条件复用（跳过）及执行失败；
-- `STEP WAIT`：针对耗时操作（如网络下载、包安装），每 30 秒打印已耗时与超时上限，提示后台仍处于活跃状态；
-- `CHILD BEGIN` / `CHILD END`：在此区间内直接原样转发客户机执行 `bootstrap.sh` 的完整输出流。
+- `STEP WAIT`：终端约 30 秒没有可见子任务进度时，打印动作、已耗时与上限；只增长详细日志不会重置计时，已有客户机心跳时不重复输出；
+- `CHILD BEGIN` / `CHILD END`：标明客户机 bootstrap 的调用边界；终端展示摘要，完整输出实时写入宿主阶段日志。子程序结束后仍需执行账号设置、最终核验及必要清理，只有全部成功才输出最终 `READY`。
+
+相同管理状态的重复观察约 30 秒显示一次，状态变化立即显示；所有观察仍保存在日志中。
+`bootstrap-preview` 的详细计划保存在宿主日志，客户机预览保持只读。显式 dry-run 仍展示完整计划。
 
 创建与配置流程包含 10 个标准的生命周期主阶段：
 
@@ -219,13 +222,30 @@ bash scripts/multipass.sh provision --apply --name ubuntu-dev --ref '<新40位SH
 
 | 记录文件 / 字段                                   | 用途与排错价值                                                        |
 | ------------------------------------------------- | --------------------------------------------------------------------- |
-| `receipt.json` 中的 `stages`、`current_step`      | 记录各阶段的最新执行状态（`ok` / `fail`）与当前执行步骤               |
+| `receipt.json` 中的 `stages`、`current_step`      | 记录各阶段的最新执行状态（`running` / `ok` / `failed`）与当前执行步骤               |
 | `receipt.json` 中的 `attempts`、`failed_at`       | 记录各次重试尝试的完整历史、失败时间点与具体步骤                      |
 | `logs/<尝试ID>/<阶段>.log`                        | 对应尝试各阶段命令的完整 stdout/stderr 输出（旧版平铺日志仍保留原位） |
+| `logs/<尝试ID>/operation.log`                    | 本次 create/provision/destroy 的整体结果、阶段外错误和退出清理 |
+| `logs/<尝试ID>/destroy.log`                      | destroy 的身份核验、定向删除、SSH 清理与归档步骤 |
 | `receipt.json` 中的提交、UUID、镜像与 doctor 计数 | 核对目标声明与实际客户机运行环境是否完全一致                          |
 | `receipt.json` 中的 `git_identity_action`         | 本次配置的身份写入进度（`pending` / `applied` / `skipped`）；该字段不含身份值 |
 
 客户机内 bootstrap 的详细安装逻辑与日志排查说明，参见[核心脚本说明](../scripts/README.md#bootstrap-准备完整环境)。
+
+开始和收尾报告本次**宿主日志目录**，不在每个阶段反复输出长路径；客户机 `run.*` 由 bootstrap
+单独报告，并在成功收据的 `development.bootstrap_log` 中记录。两边日志均保留完整诊断正文，
+只去掉显示控制符；Python 校验异常、命令失败及清理失败会记录具体原因，终端摘要可以较短。
+需要查阅客户机日志时须在客户机内打开该路径，不能把 `/home/ubuntu/...` 当作宿主路径。
+
+`destroy --apply` 也会增加 attempt。归档后，日志和 receipt 的路径随状态目录迁入
+`retired/<name>-<uuid>/`，后续清理错误继续写入归档中的操作日志；原有历史不会被覆盖。
+必要清理失败不会输出 `RETIRED` 或总体 `READY`，主体已有错误时保留主错误并附记清理问题。
+未进入应用阶段的预检失败、显式预览及只读检查不新建日志，如实显示没有本次持久化记录。
+
+当前宿主 helper 与新 bootstrap 通过内部摘要/详情事件转发；客户机使用旧提交且不支持事件时，
+宿主沿用其原始输出，可能较冗长，但不会舍弃诊断。应使用当前宿主入口执行此流程；反向使用
+旧宿主调用新 bootstrap 时，旧宿主无法请求详细事件，完整记录仍保存在客户机 `run.*` 中。
+内部环境变量不属于用户配置接口，无需在个人 Shell 配置中设置。
 
 ## 失败处理与恢复边界
 

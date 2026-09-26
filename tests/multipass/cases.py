@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -663,6 +664,243 @@ class HostReadiness(unittest.TestCase):
 
 
 class RunnerProgress(unittest.TestCase):
+    def test_unicode_bootstrap_failure_keeps_host_log_receipt_and_primary_reason(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'scratch').mkdir()
+            machine = runtime.Machine(root, 'test', runtime.Runner())
+            machine.path.mkdir(parents=True)
+            terminal = io.StringIO()
+            script = '''set -e
+export LC_ALL=C DOTFILES_BOOTSTRAP_STREAM=1
+source "$1"
+scratch="$2/scratch" log_file="$2/run.guest" active_pid='' timer_pid='' forward_pid=''
+registering=no interrupted_status=0 completed=no owns_lock=no mode=apply phase=fixture
+shift 2
+trap 'finish_bootstrap "$?"' EXIT
+run 'fixture action' 10 "$@"
+'''
+            diagnostic = 'X' + '汉' * 100 + '🍺'
+            with redirect_stderr(terminal), self.assertRaises(runtime.CommandFailure) as failure:
+                with machine.apply_lock('create'), machine.stage('bootstrap'):
+                    machine.runner([os.environ.get('DOTFILES_TEST_BASH', '/bin/bash'), '-c', script,
+                                    'unicode-fixture', str(REPO / 'scripts/bootstrap/common.bash'), directory,
+                                    sys.executable, '-u', '-c', f'print({diagnostic!r});exit(37)'],
+                                   timeout=15, stream=True)
+            self.assertEqual(failure.exception.returncode, 1)  # run 保留原故障信息，公开 bootstrap 以 1 退出。
+            receipt = json.loads(machine.receipt_file.read_text())
+            reason = 'fixture action failed (exit 37)'
+            for log in ((root / 'run.guest').read_text(), Path(receipt['stages']['bootstrap']['log']).read_text()):
+                self.assertIn(diagnostic, log)
+                self.assertIn(reason, log)
+            self.assertIn(reason, terminal.getvalue())
+            self.assertNotIn('FAIL logging:', terminal.getvalue())
+            self.assertNotIn('READY: test', terminal.getvalue())
+            self.assertEqual(receipt['attempts'][-1]['status'], 'failed')
+            self.assertIn(reason, receipt['attempts'][-1]['error'])
+
+    def test_bootstrap_stream_preserves_guest_host_receipt_and_terminal_separately(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "scratch").mkdir()
+            machine = runtime.Machine(root, "test", runtime.Runner())
+            machine.path.mkdir(parents=True)
+            stdout, stderr = io.StringIO(), io.StringIO()
+            script = '''set -e
+source "$1"
+scratch="$2/scratch" log_file="$2/run.guest" active_pid='' timer_pid=''
+forward_pid='' registering=no interrupted_status=0 completed=no owns_lock=no mode=apply phase=fixture
+export DOTFILES_BOOTSTRAP_STREAM=1
+shift 2
+trap 'finish_bootstrap "$?"' EXIT
+run 'fixture action' 10 "$@"
+completed=yes
+'''
+            program = ("import sys; print('@@DOTFILES/1 EVENT WARN: guest attention');"
+                       "print('@@DOTFILES/1 DETAIL DOWNLOAD: request=4; http=200');"
+                       "sys.stdout.write('\\x1b[31mfirst\\x1b[0m\\rsecond\\bthird')")
+            with redirect_stdout(stdout), redirect_stderr(stderr), machine.apply_lock("create"):
+                with machine.stage("bootstrap"):
+                    machine.runner([os.environ.get('DOTFILES_TEST_BASH', '/bin/bash'), '-c', script,
+                                    'guest-output-fixture', str(REPO / 'scripts/bootstrap/common.bash'),
+                                    directory, sys.executable, '-u', '-c', program], timeout=15, stream=True)
+            receipt = json.loads(machine.receipt_file.read_text())
+            host_log = Path(receipt['stages']['bootstrap']['log']).read_text()
+            guest_log = (root / 'run.guest').read_text()
+            self.assertEqual(stdout.getvalue(), '')
+            self.assertIn('WARN: guest attention', stderr.getvalue())
+            self.assertNotIn('DOWNLOAD:', stderr.getvalue())
+            self.assertNotIn('first', stderr.getvalue())
+            for log in (host_log, guest_log):
+                self.assertIn('DOWNLOAD: request=4; http=200', log)
+                self.assertIn('first\nsecond\nthird\nREADY:', log)
+                self.assertNotIn('\x1b', log)
+                self.assertNotIn('@@DOTFILES', log)
+                self.assertIn('Bootstrap complete.', log)
+            self.assertEqual(receipt['attempts'][-1]['status'], 'ok')
+            self.assertEqual(stderr.getvalue().count('READY: test; SSH alias:'), 1)
+
+    def test_detail_traffic_does_not_suppress_wait_and_events_do(self):
+        for role in ('DETAIL', 'EVENT'):
+            with self.subTest(role=role), tempfile.TemporaryDirectory() as directory:
+                runner = runtime.Runner()
+                runner.log = Path(directory) / 'command.log'
+                waits, terminal = [], io.StringIO()
+                program = ('import time\nfor i in range(12):\n'
+                           f' print("@@DOTFILES/1 {role} progress", i, flush=True)\n time.sleep(.02)\n')
+                with redirect_stderr(terminal):
+                    runner([sys.executable, '-c', program], timeout=2, stream=True, heartbeat=.06,
+                           on_wait=lambda elapsed, limit: waits.append(elapsed))
+                self.assertIn('progress 11', runner.log.read_text())
+                if role == 'DETAIL':
+                    self.assertGreaterEqual(len(waits), 2)
+                    self.assertEqual(terminal.getvalue(), '')
+                else:
+                    self.assertEqual(waits, [])
+                    self.assertIn('progress 11', terminal.getvalue())
+
+    def test_child_heartbeat_has_transport_grace_without_duplicate_host_wait(self):
+        waits = []
+        program = ('import time\nprint("@@DOTFILES/1 EVENT RUN: child", flush=True)\n'
+                   'for i in range(4):\n time.sleep(.06)\n'
+                   ' print("@@DOTFILES/1 EVENT WAIT: child", i, flush=True)\n')
+        with redirect_stderr(io.StringIO()):
+            runtime.Runner()([sys.executable, '-u', '-c', program], timeout=2, stream=True, heartbeat=.06,
+                             on_wait=lambda elapsed, limit: waits.append(elapsed))
+        self.assertEqual(waits, [])
+
+    def test_timeout_and_logging_failure_keep_primary_error_and_partial_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runner = runtime.Runner()
+            runner.log = Path(directory) / 'command.log'
+            with redirect_stderr(io.StringIO()), self.assertRaises(runtime.CommandFailure) as failure:
+                runner([sys.executable, '-u', '-c',
+                        'import sys,time;print("first evidence");sys.stdout.write("unterminated");time.sleep(5)'],
+                       timeout=.12, stream=True)
+            self.assertEqual(failure.exception.returncode, 124)
+            self.assertIn('first evidence\nunterminated\n', runner.log.read_text())
+            for code in (0, 37):
+                runner.log = Path(directory)  # 无法作为日志文件打开，命令仍须被排空/回收。
+                with redirect_stderr(io.StringIO()), self.assertRaises(runtime.Failure) as failure:
+                    runner([sys.executable, '-c', f'print("evidence"*10000);exit({code})'],
+                           timeout=5, stream=True)
+                if code:
+                    self.assertIsInstance(failure.exception, runtime.CommandFailure)
+                    self.assertEqual(failure.exception.returncode, code)
+                else:
+                    self.assertIn('could not be saved/forwarded', str(failure.exception))
+
+    def test_short_timeout_retains_stdout_and_stderr_without_polluting_data(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runner = runtime.Runner()
+            runner.log = Path(directory) / 'command.log'
+            with self.assertRaises(runtime.CommandFailure):
+                runner([sys.executable, '-u', '-c',
+                        'import sys,time;print("early out");sys.stderr.write("early err");time.sleep(5)'], timeout=.1)
+            self.assertIn('early out\nearly err\n', runner.log.read_text())
+            result = runner([sys.executable, '-c', 'print("{\\"answer\\":42}")'])
+            self.assertEqual(json.loads(result.stdout), {'answer': 42})
+
+    def test_pure_python_failure_and_lock_cleanup_are_persisted_without_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            machine = runtime.Machine(Path(directory), 'test', runtime.Runner())
+            machine.path.mkdir(parents=True)
+            terminal = io.StringIO()
+            with redirect_stderr(terminal), self.assertRaisesRegex(ValueError, 'invalid field'):
+                with machine.apply_lock('create'), machine.stage('guest'), machine.step('identity', 'Validate identity'):
+                    raise ValueError('invalid field from Python validator')
+            receipt = json.loads(machine.receipt_file.read_text())
+            self.assertEqual(receipt['attempts'][-1]['failed_at'], 'guest/identity')
+            for path in (receipt['attempts'][-1]['log'], receipt['stages']['guest']['log']):
+                self.assertIn('ValueError: invalid field from Python validator', Path(path).read_text())
+            self.assertNotIn('READY: test', terminal.getvalue())
+            self.assertFalse((machine.path / 'lock').exists())
+
+    def test_old_unframed_bootstrap_remains_visible_and_is_logged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runner = runtime.Runner()
+            runner.log = Path(directory) / 'old.log'
+            terminal = io.StringIO()
+            with redirect_stderr(terminal):
+                runner([sys.executable, '-c', 'print("old native output");print("RUN: old bootstrap")'],
+                       timeout=5, stream=True)
+            self.assertEqual(terminal.getvalue(), runner.log.read_text())
+            self.assertIn('old native output', terminal.getvalue())
+
+    def test_terminal_forwarding_failure_keeps_the_log_and_command_status(self):
+        class BrokenTerminal(io.StringIO):
+            def write(self, _value):
+                raise BrokenPipeError('fixture terminal closed')
+        with tempfile.TemporaryDirectory() as directory:
+            runner = runtime.Runner()
+            runner.log = Path(directory) / 'command.log'
+            for code in (0, 37):
+                with redirect_stderr(BrokenTerminal()), self.assertRaises(runtime.Failure) as failure:
+                    runner([sys.executable, '-c', f'print("full evidence");exit({code})'],
+                           timeout=5, stream=True)
+                if code:
+                    self.assertEqual(failure.exception.returncode, code)
+                else:
+                    self.assertIn('could not be saved/forwarded', str(failure.exception))
+                self.assertIn('full evidence', runner.log.read_text())
+                self.assertIsNone(runner.active)
+
+    def test_structured_error_summary_does_not_replay_detail_stack(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runner = runtime.Runner()
+            runner.log = Path(directory) / 'command.log'
+            program = ('print("@@DOTFILES/1 EVENT FAIL: fixture compiler rejected grammar");'
+                       'print("@@DOTFILES/1 DETAIL STACK: full native traceback");exit(37)')
+            terminal = io.StringIO()
+            # -c 的参数本身可能含正文，异常对象的命令摘要在断言前单独去除。
+            with redirect_stderr(terminal), self.assertRaises(runtime.CommandFailure) as failure:
+                runner([sys.executable, '-c', program], timeout=5, stream=True)
+            summary = str(failure.exception).split('failed (exit 37): ', 1)[1]
+            self.assertIn('compiler rejected grammar', summary)
+            self.assertNotIn('STACK:', summary)
+            self.assertNotIn('STACK:', terminal.getvalue())
+            self.assertIn('STACK:', runner.log.read_text())
+            self.assertIn('STACK:', failure.exception.output)
+
+    def test_recording_and_lock_cleanup_failure_preserve_primary_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            machine = runtime.Machine(Path(directory), 'test', runtime.Runner())
+            machine.path.mkdir(parents=True)
+            terminal = io.StringIO()
+            original_rmdir = Path.rmdir
+            def refuse_lock(path):
+                if path == machine.path / 'lock':
+                    raise OSError('fixture lock cleanup refused')
+                return original_rmdir(path)
+            with redirect_stderr(terminal), mock.patch.object(Path, 'rmdir', refuse_lock), \
+                    self.assertRaises(runtime.CommandFailure) as failure:
+                with machine.apply_lock('create'), machine.stage('guest'), machine.step('identity', 'Validate'):
+                    with mock.patch.object(machine.runner, 'save_output', side_effect=OSError('disk unavailable')):
+                        try:
+                            raise runtime.CommandFailure(['fixture'], 37, 'original command reason')
+                        except runtime.CommandFailure as exc:
+                            machine.record_error(exc, 'guest/identity')
+                            raise
+            self.assertEqual(failure.exception.returncode, 37)
+            receipt = json.loads(machine.receipt_file.read_text())
+            self.assertEqual(receipt['attempts'][-1]['status'], 'failed')
+            saved = Path(receipt['attempts'][-1]['log']).read_text()
+            self.assertIn('fixture lock cleanup refused', saved)
+            self.assertIn('original command reason', saved)
+            self.assertNotIn('READY: test', terminal.getvalue())
+
+    def test_failed_record_writes_do_not_mask_the_active_stage_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            machine = runtime.Machine(Path(directory), 'test', runtime.Runner())
+            machine.path.mkdir(parents=True)
+            with redirect_stderr(io.StringIO()), self.assertRaises(runtime.CommandFailure) as failure:
+                with machine.apply_lock('create'), mock.patch.object(machine.runner, 'save_output') as save:
+                    with machine.stage('guest'), machine.step('identity', 'Validate'):
+                        save.side_effect = OSError('fixture disk failure')
+                        raise runtime.CommandFailure(['fixture'], 41, 'original reason')
+            self.assertEqual(failure.exception.returncode, 41)
+            self.assertEqual(json.loads(machine.receipt_file.read_text())['attempts'][-1]['status'], 'failed')
+
     def test_silent_command_reports_wait_and_keeps_output_in_log(self):
         with tempfile.TemporaryDirectory() as directory:
             runner = runtime.Runner()
@@ -807,6 +1045,11 @@ class Orchestration(unittest.TestCase):
         self.assertIn(("finalize", "", ""), self.events)
         self.assertEqual(self.receipt()["git_identity_action"], "skipped")
         self.assertNotIn("git_identity_configured", self.receipt())
+        for path in self.state.rglob('*'):
+            if path.is_file():
+                saved = path.read_text()
+                for value in ('CLI Name', 'cli@example.invalid', 'Config Name', 'config@example.invalid'):
+                    self.assertNotIn(value, saved, str(path))
 
     def test_creation_record_precedes_launch_and_survives_launch_timeout(self):
         self.fail_launch = True
@@ -1358,6 +1601,16 @@ class Orchestration(unittest.TestCase):
         self.assertIn(("delete", "--purge", "ubuntu-dev"), self.events)
         self.assertEqual(self.instances, {"another-vm": {"state": "Running"}})
         self.assertFalse(self.state.exists())
+        archived = next((self.state.parent.parent / 'retired').iterdir())
+        receipt = json.loads((archived / 'receipt.json').read_text())
+        attempt = receipt['attempts'][-1]
+        self.assertEqual((attempt['action'], attempt['status']), ('destroy', 'ok'))
+        self.assertIn('RETIRED:', Path(attempt['log']).read_text())
+        self.assertIn('STAGE OK   [destroy]', Path(attempt['stages'][0]['log']).read_text())
+        self.assertFalse((archived / 'lock').exists())
+        for history in receipt['attempts']:
+            for stage in history['stages']:
+                self.assertTrue(Path(stage['log']).is_file())
 
     def test_destroy_identity_mismatch_preserves_vm_and_state(self):
         self.apply()
@@ -1375,8 +1628,17 @@ class Orchestration(unittest.TestCase):
         self.assertNotIn(("delete", "--purge", "ubuntu-dev"), self.events)
         self.assertIn("ubuntu-dev", self.instances)
         self.assertEqual(json.loads((self.state / "declaration.json").read_text()), old)
-        self.assertEqual({str(path): path.read_bytes() for path in self.state.rglob("*") if path.is_file()},
-                         before)
+        # apply 的失败操作须增加日志/收据；原声明、历史日志和旧 attempt 保留。
+        for path, content in before.items():
+            if Path(path).name != "receipt.json":
+                self.assertEqual(Path(path).read_bytes(), content)
+        previous = json.loads(before[str(self.state / "receipt.json")])
+        receipt = self.receipt()
+        self.assertEqual(receipt["attempts"][:-1], previous["attempts"])
+        attempt = receipt["attempts"][-1]
+        self.assertEqual(attempt["status"], "failed")
+        self.assertEqual(attempt["failed_at"], "destroy/instance")
+        self.assertIn("marker does not match", Path(attempt["log"]).read_text())
 
     def test_destroy_refuses_unrecorded_ssh_file_before_vm_delete(self):
         self.apply()
@@ -1400,6 +1662,28 @@ class Orchestration(unittest.TestCase):
         self.assertTrue((self.state / "declaration.json").is_file())
         self.assertFalse((self.state / "lock").exists())
         self.destroy(apply=True)
+        self.assertFalse(self.state.exists())
+
+    def test_destroy_archive_keeps_failed_cleanup_log_and_never_reports_retired(self):
+        self.apply()
+        self.instances.clear()
+        original_rmdir = Path.rmdir
+        def refuse_archive_lock(path):
+            if path.name == 'lock' and 'retired' in path.parts:
+                raise OSError('fixture archived lock cleanup refused')
+            return original_rmdir(path)
+        terminal = io.StringIO()
+        with redirect_stderr(terminal), mock.patch.object(Path, 'rmdir', refuse_archive_lock), \
+                self.assertRaisesRegex(OSError, 'archived lock cleanup refused'):
+            self.destroy(apply=True)
+        archive = next((self.state.parent.parent / 'retired').iterdir())
+        receipt = json.loads((archive / 'receipt.json').read_text())
+        attempt = receipt['attempts'][-1]
+        self.assertEqual(attempt['status'], 'failed')
+        self.assertEqual(attempt['failed_at'], 'cleanup/lock')
+        self.assertIn('archived lock cleanup refused', Path(attempt['log']).read_text())
+        self.assertIn(str(archive / 'logs'), terminal.getvalue())
+        self.assertNotIn('RETIRED:', terminal.getvalue())
         self.assertFalse(self.state.exists())
 
     def test_destroy_rejects_recoverable_deleted_instance(self):
@@ -1444,8 +1728,8 @@ class Orchestration(unittest.TestCase):
         self.assertIn("STAGE RUN  [cloud-init] Verify first boot", lines)
         self.assertIn("  STEP RUN  [cloud-init/status] Wait for cloud-init", lines)
         self.assertIn("  STEP SKIP [cloud-init/reboot] guest does not require a reboot", lines)
-        self.assertIn("    CHILD BEGIN [bootstrap] Guest bootstrap output follows unchanged", lines)
-        self.assertIn("    CHILD END   [bootstrap] See guest bootstrap log", lines)
+        self.assertIn("    CHILD BEGIN [bootstrap] Guest bootstrap summary; full diagnostics saved on both machines", lines)
+        self.assertIn("    CHILD END   [bootstrap] Guest bootstrap command ended", lines)
         self.assertIn("STAGE OK   [verified]", lines)
 
     def test_check_keeps_json_stdout_separate_from_progress(self):
@@ -1460,12 +1744,25 @@ class Orchestration(unittest.TestCase):
 
         stdout = io.StringIO()
         stderr = io.StringIO()
+        before = {str(path): path.read_bytes() for path in self.home.rglob('*') if path.is_file()}
         with mock.patch.object(runtime.Machine, "m", command), redirect_stdout(stdout), \
                 redirect_stderr(stderr):
             runtime.check(SimpleNamespace(action="check", name="ubuntu-dev", runtime=False),
                           {}, self.home, runtime.Runner())
         self.assertEqual(json.loads(stdout.getvalue())["current_ref"], REF)
         self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(before, {str(path): path.read_bytes() for path in self.home.rglob('*') if path.is_file()})
+
+    def test_ssh_preserves_exec_interaction_without_logs_or_state_writes(self):
+        with redirect_stderr(io.StringIO()):
+            self.apply()
+        before = {str(path): path.read_bytes() for path in self.home.rglob('*') if path.is_file()}
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr), mock.patch.object(runtime.os, 'execvp') as execute:
+            runtime.ssh(SimpleNamespace(name='ubuntu-dev'), {}, self.home, runtime.Runner())
+        execute.assert_called_once_with('ssh', ['ssh', 'ubuntu-dev'])
+        self.assertEqual((stdout.getvalue(), stderr.getvalue()), ('', ''))
+        self.assertEqual(before, {str(path): path.read_bytes() for path in self.home.rglob('*') if path.is_file()})
 
     def test_running_guest_bootstrap_stops_before_ssh_or_repository(self):
         self.apply()

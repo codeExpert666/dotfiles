@@ -8,8 +8,9 @@ class Failure(Exception):
 
 
 class CommandFailure(Failure):
-    def __init__(self, argv, code, output):
+    def __init__(self, argv, code, output, *, summary=None):
         self.argv = argv
         self.output = output
-        super().__init__(f"{' '.join(map(str, argv[:3]))} failed (exit {code}): {output[-1200:]}")
+        diagnostic = output if summary is None else summary
+        super().__init__(f"{' '.join(map(str, argv[:3]))} failed (exit {code}): {diagnostic[-1200:]}")
         self.returncode = code

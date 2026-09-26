@@ -2,14 +2,83 @@
 
 # 仅供 bootstrap.sh 和平台安装器使用；Bash 3.2+，加载时只定义函数。
 # 入口拥有 phase、scratch、probe_home、log_file、owns_lock、completed；
-# 执行器维护 active_pid、timer_pid、registering、interrupted_status。
+# 执行器维护 active_pid、timer_pid、forward_pid、entry_log_pid 及信号登记状态。
 # 目标检查写 target_dir；平台识别写 platform、arch、os_version；工具查询写 tool_path。
 
 # ===== 报告与生命周期 =====
 # shellcheck disable=SC2154 # 入口脚本初始化并持有共享运行状态。
+terminal_line() {
+	if [[ ${DOTFILES_BOOTSTRAP_STREAM-} == 1 ]]; then
+		printf '@@DOTFILES/1 %s %s\n' "$1" "$2" >&"${terminal_fd:-2}"
+	elif [[ $1 == EVENT ]]; then
+		printf '%s\n' "$2" >&"${terminal_fd:-2}"
+	fi
+}
+
 say() {
-	printf '%s\n' "$*" >&2
-	if [[ -n $log_file ]]; then printf '%s\n' "$*" >> "$log_file"; fi
+	if [[ -n $log_file ]] && ! printf '%s\n' "$*" >> "$log_file"; then
+		printf 'FAIL logging: cannot append to %s\n' "$log_file" >&"${terminal_fd:-2}"
+		return 74
+	fi
+	terminal_line EVENT "$*"
+}
+
+detail() {
+	if [[ -n $log_file ]]; then
+		printf '%s\n' "$*" >> "$log_file" || return 74
+		terminal_line DETAIL "$*"
+	elif [[ $mode == dry-run ]]; then
+		say "$*"
+	fi
+}
+
+output_awk() {
+	local version options=()
+	# 只让接收器按字节识别 ASCII 控制码，不改变安装命令的 locale。
+	# mawk 还需要行式输入；fflush 只刷新输出，无法解除它的管道输入缓冲。
+	version=$(LC_ALL=C awk -W version < /dev/null 2>&1) || :
+	[[ $version != mawk\ * ]] || options=(-W interactive)
+	LC_ALL=C awk "${options[@]}" "$@"
+}
+
+forward_output() {
+	# 不借助尚未安装的 Python/jq；环境变量避免 awk -v 对路径中的反斜线再次解码。
+	DOTFILES_LOG="$log_file" DOTFILES_TASK_LOG="${task_log:-$scratch/task.log}" DOTFILES_TASK_FAILURE="$scratch/reported-failure" \
+		output_awk -v source="${output_source:-native}" -v stream="${DOTFILES_BOOTSTRAP_STREAM-}" \
+		-f "${BASH_SOURCE[0]%/*}/output.awk" >&"${terminal_fd:-2}"
+}
+
+start_entry_logging() {
+	local error
+	# 捕获执行器外的原生 stderr（例如文件写入、sudo 与 Shell 自身的错误）。
+	# 已记录的摘要走保留的终端描述符，避免二次入库；预检/预览不启用此路径。
+	error=$(mkfifo "$scratch/entry.pipe" 2>&1) || die "entry log pipe: $error"
+	registering=yes
+	exec 3>&2
+	terminal_fd=3
+	set -m
+	(
+		set +m
+		trap - EXIT
+		trap '' HUP INT TERM
+		output_source=entry task_log=/dev/null forward_output < "$scratch/entry.pipe"
+	) &
+	entry_log_pid=$!
+	set +m
+	exec 2> "$scratch/entry.pipe"
+	registering=no
+	[[ $interrupted_status == 0 ]] || exit "$interrupted_status"
+}
+
+close_entry_logging() {
+	local status=0
+	if [[ -n ${entry_log_pid-} ]]; then
+		exec 2>&3 3>&-
+		terminal_fd=2
+		wait "$entry_log_pid" || status=$?
+		entry_log_pid=''
+	fi
+	return "$status"
 }
 
 die() {
@@ -28,6 +97,10 @@ stop_children() {
 		wait "$active_pid" 2> /dev/null || :
 	fi
 	active_pid='' timer_pid=''
+	if [[ -n ${forward_pid-} ]]; then
+		wait "$forward_pid" 2> /dev/null || forward_status=$?
+		forward_pid=''
+	fi
 }
 
 # shellcheck disable=SC2317 # trap 入口。
@@ -38,20 +111,31 @@ interrupt_bootstrap() {
 
 # shellcheck disable=SC2317 # trap 入口。
 finish_bootstrap() {
-	local status="$1" cleanup_status=0
+	local status="$1" cleanup_status=0 error log_label=Log
+	[[ ${DOTFILES_BOOTSTRAP_STREAM-} != 1 ]] || log_label='Guest bootstrap log'
 	[[ $BASH_SUBSHELL == 0 ]] || return "$status"
 	trap - EXIT
 	trap '' HUP INT TERM
 	stop_children
-	if [[ -n $scratch ]] && ! rm -rf -- "$scratch"; then
+	if [[ ${forward_status:-0} != 0 ]]; then
+		say "FAIL logging: command output could not be forwarded (exit $forward_status)" || :
+		cleanup_status="$forward_status"
+	fi
+	if [[ -n $scratch ]] && ! error=$(rm -rf -- "$scratch" 2>&1); then
+		[[ -z $error ]] || say "$error" || :
 		say "FAIL cleanup: could not remove temporary directory: $scratch" || :
 		cleanup_status=1
 	fi
 	if [[ $owns_lock == yes ]]; then
-		if ! rm -f -- "$state_dir/lock/pid" || ! rmdir -- "$state_dir/lock"; then
+		if ! error=$(rm -f -- "$state_dir/lock/pid" 2>&1) || ! error=$(rmdir -- "$state_dir/lock" 2>&1); then
+			[[ -z $error ]] || say "$error" || :
 			say "FAIL cleanup: could not release lock: $state_dir/lock" || :
 			cleanup_status=1
 		fi
+	fi
+	if close_entry_logging; then :; else
+		cleanup_status=$?
+		say "FAIL logging: entry diagnostics could not be saved (exit $cleanup_status)" || :
 	fi
 	# 主体失败和中断码优先；仅主体成功时由清理错误决定最终状态。
 	if [[ $status == 0 && $cleanup_status != 0 ]]; then
@@ -68,7 +152,11 @@ finish_bootstrap() {
 			say 'Open a new terminal. Personal follow-up: Git identity, optional login-shell change, and optional Atuin history import/login.'
 		fi
 	fi
-	[[ -z $log_file ]] || printf 'Log: %s\n' "$log_file" >&2
+	if [[ -n $log_file ]]; then
+		terminal_line EVENT "$log_label: $log_file"
+	else
+		terminal_line EVENT 'Log: none (preview or preflight; no persistent run started).'
+	fi
 	exit "$status"
 }
 
@@ -89,17 +177,29 @@ initialize_scratch() {
 # 私有执行器只有两种输出用途：隔离的短查询，或流式记录安装任务。
 # 每次任务和看门狗各有独立进程组；sudo 认证由前台 authorize_sudo 完成。
 execute() {
-	local seconds="$1" output="$2" status=0
+	local seconds="$1" output="$2" status=0 started=$SECONDS elapsed
 	shift 2
-	rm -f -- "$scratch/timed-out" || die 'could not reset command timeout marker'
+	rm -f -- "$scratch/timed-out" "$scratch/reported-failure" || die 'could not reset command markers'
+	forward_status=0
 	registering=yes
 	set -m
+	if [[ $output != probe ]]; then
+		rm -f -- "$scratch/output.pipe"
+		mkfifo "$scratch/output.pipe" || exit 1
+		: > "$scratch/task.log"
+		(
+			set +m
+			# 日志接收器不属于命令进程组；中断后等命令关闭管道，再排空最后一行。
+			trap - EXIT
+			trap '' HUP INT TERM
+			forward_output < "$scratch/output.pipe"
+		) &
+		forward_pid=$!
+	fi
 	(
 		set +m
 		trap - EXIT HUP INT TERM
 		if [[ $output == probe ]]; then
-			# 版本/能力查询也会创建应用状态。选中的二进制来自真实 PATH，
-			# 配置、状态、日志及工作目录全部指向本次私有目录。
 			ulimit -f 2048 || exit 1
 			cd -- "$probe_home" || exit 1
 			exec env -i HOME="$probe_home" PATH="$PATH" TMPDIR="$scratch" LC_ALL=C \
@@ -107,27 +207,32 @@ execute() {
 				XDG_STATE_HOME="$probe_home/.local/state" XDG_CACHE_HOME="$probe_home/.cache" \
 				NVIM_LOG_FILE="$scratch/nvim.log" "$@" > "$scratch/probe.log" 2> "$scratch/probe.err"
 		else
-			# 命令与 tee 同属当前任务组。及时写日志，并分别取得两个退出码；
-			# 命令已经失败时保留它的状态，不能被后续日志转发失败覆盖。
-			"$@" 2>&1 | tee -a "$log_file" >&2
-			pipeline_status=("${PIPESTATUS[@]}")
-			if [[ ${pipeline_status[0]} != 0 ]]; then exit "${pipeline_status[0]}"; fi
-			if [[ ${pipeline_status[1]} != 0 ]]; then
-				printf 'FAIL logging: command output could not be forwarded (exit %s)\n' "${pipeline_status[1]}" >&2
-			fi
-			exit "${pipeline_status[1]}"
+			export NO_COLOR=1 CLICOLOR=0 HOMEBREW_NO_COLOR=1
+			export DOTFILES_OUTPUT_EVENTS=1
+			"$@" > "$scratch/output.pipe" 2>&1
 		fi
 	) < /dev/null &
 	active_pid=$!
 	(
 		set +m
 		trap - EXIT HUP INT TERM
+		if [[ ($output != probe || $seconds -gt 30) && ${output_source-} != nvim ]]; then
+			(
+				while sleep 30; do
+					kill -0 "$active_pid" 2> /dev/null || break
+					elapsed=$((SECONDS - started))
+					((elapsed < seconds)) || break
+					say "WAIT: ${run_label:-command}; elapsed=${elapsed}s; timeout=${seconds}s"
+				done
+			) &
+		fi
+		# 心跳与看门狗在同一独立进程组；保留原来的完整 sleep 预算。
 		sleep "$seconds"
 		: > "$scratch/timed-out"
 		kill -TERM -- "-$active_pid" 2> /dev/null || :
 		sleep 1
 		kill -KILL -- "-$active_pid" 2> /dev/null || :
-	) > /dev/null 2>&1 &
+	) > /dev/null &
 	timer_pid=$!
 	set +m
 	registering=no
@@ -135,18 +240,29 @@ execute() {
 	wait "$active_pid" 2> /dev/null || status=$?
 	stop_children
 	[[ ! -f $scratch/timed-out ]] || status=124
+	if [[ $forward_status != 0 ]]; then
+		say "FAIL logging: command output could not be forwarded (exit $forward_status)" || :
+		[[ $status != 0 ]] || status="$forward_status"
+		forward_status=0
+	fi
 	return "$status"
 }
 
 run() {
-	local label="$1" seconds="$2" status
+	local run_label="$1" seconds="$2" status started=$SECONDS line
 	shift 2
-	say "RUN: $label"
+	say "RUN: $run_label; timeout=${seconds}s"
 	if execute "$seconds" log "$@"; then
-		say "READY: $label"
+		say "READY: $run_label; elapsed=$((SECONDS - started))s"
 	else
 		status=$?
-		die "$label failed (exit $status)"
+		# 未知第三方错误格式也有可见摘要；完整证据已在本次日志中。
+		if [[ -s $scratch/task.log && ! -f $scratch/reported-failure ]]; then
+			while IFS= read -r line; do terminal_line EVENT "  | $line"; done < <(
+				tail -n 12 "$scratch/task.log" | output_awk -v summary_limit=240 -f "${BASH_SOURCE[0]%/*}/output.awk"
+			)
+		fi
+		die "$run_label failed (exit $status)"
 	fi
 }
 
@@ -421,7 +537,8 @@ authorize_sudo() {
 	# 其余环境在前台刷新凭据，下载/插件准备期间过期时可再次认证。
 	say 'Checking sudo authorization for system package installation.'
 	if sudo -n true 2> /dev/null; then return 0; fi
-	sudo -v || die 'sudo authentication failed'
+	# 认证保留前台终端，避免行式日志接收器缓冲无换行的密码提示。
+	sudo -v 2>&"${terminal_fd:-2}" || die 'sudo authentication failed'
 }
 
 requirements_for() {
@@ -462,7 +579,7 @@ preview_requirements() {
 	while IFS=$'\t' read -r name minimum; do
 		if tool_ready "$name" "$minimum"; then
 			# 命令兼容与包管理器安装状态分别判断；FOUND 不承诺跳过 Brewfile。
-			say "FOUND: $name ($tool_path; minimum $minimum)"
+			detail "FOUND: $name ($tool_path; minimum $minimum)"
 		else
 			say "PLAN: $name >= $minimum is required by the selected configuration"
 			if [[ $name == java && -n ${java_problem-} ]]; then say "  Java selection: $java_problem"; fi
@@ -495,11 +612,13 @@ prepare_java_and_maven() {
 }
 
 verify_requirements() {
-	local name minimum
+	local name minimum count=0
 	while IFS=$'\t' read -r name minimum; do
 		tool_ready "$name" "$minimum" || die "$name >= $minimum is still unavailable; check the package source and whether PATH shadows the prepared version"
-		say "READY: $name ($tool_path)"
+		detail "READY: $name ($tool_path)"
+		count=$((count + 1))
 	done < <(requirements_for "$1")
+	say "READY: $1 tool requirements ($count checked)"
 }
 
 verify_build_tools() {
@@ -524,7 +643,6 @@ verify_build_tools() {
 		esac
 		if ! execute "$seconds" probe "$@"; then
 			cat "$scratch/probe.log" "$scratch/probe.err" >&2
-			cat "$scratch/probe.log" "$scratch/probe.err" >> "$log_file"
 			die "required build capability failed: $label"
 		fi
 	done
@@ -567,12 +685,11 @@ XML
 	if ! execute 30 probe env JAVA_HOME="$JAVA_HOME" PATH="$JAVA_HOME/bin:$PATH" javac -d "$classes" "$source" ||
 		! execute 15 probe env JAVA_HOME="$JAVA_HOME" PATH="$JAVA_HOME/bin:$PATH" java -cp "$classes" BootstrapJavaProbe ||
 		! grep -Fxq 'java-bootstrap-ready' "$scratch/probe.log" ||
-		! execute 60 probe env MAVEN_SKIP_RC=1 JAVA_HOME="$JAVA_HOME" PATH="$JAVA_HOME/bin:$PATH" mvn \
+		! run_label='offline Maven validation' execute 60 probe env MAVEN_SKIP_RC=1 JAVA_HOME="$JAVA_HOME" PATH="$JAVA_HOME/bin:$PATH" mvn \
 			--offline --quiet --settings "$user_settings" --global-settings "$global_settings" \
 			--toolchains "$user_toolchains" --global-toolchains "$global_toolchains" \
 			"-Dmaven.repo.local=$repository" --file "$pom" validate; then
 		cat "$scratch/probe.log" "$scratch/probe.err" >&2
-		cat "$scratch/probe.log" "$scratch/probe.err" >> "$log_file"
 		die 'required Java/Javac/Maven capability check failed'
 	fi
 	say "READY: Java compilation/execution and offline Maven validation ($JAVA_HOME)"
