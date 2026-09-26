@@ -25,6 +25,7 @@ import runtime
 import ssh_config
 import ssh_proxy
 import ssh_pty
+import harness
 from terminfo_fixture import tools as terminfo_tools
 
 
@@ -589,6 +590,72 @@ class HostPolicy(unittest.TestCase):
             with self.assertRaisesRegex(runtime.Failure, "lock exists"):
                 with runtime.lock(path):
                     pass
+
+
+class HostTerminal(unittest.TestCase):
+    def exercise(self, root, mode, *, terminal=True):
+        fixture = REPO / "tests/multipass/host_terminal.py"
+        sudo = root / "sudo"
+        sudo.write_text("#!/bin/sh\nexec " + shlex.join(
+            [sys.executable, "-B", str(fixture), "sudo", str(root), mode]) + ' "$@"\n')
+        sudo.chmod(0o755)
+        env = {**os.environ, "PATH": str(root) + os.pathsep + os.environ["PATH"]}
+        command = [sys.executable, "-B", str(fixture), "drive", str(root), mode]
+        sent = False
+
+        def respond(descriptor):
+            nonlocal sent
+            if not sent and (root / "ready").exists() and mode != "timeout":
+                os.write(descriptor, b"\x03" if mode == "interrupt" else b"fixture-password\n")
+                sent = True
+
+        if terminal:
+            output = harness.terminal(command, env=env, timeout=10, observe=respond).decode()
+        else:
+            output = harness.run(command, env=env, timeout=10, check=True).stderr
+        return json.loads((root / "result.json").read_text()), output
+
+    def test_authentication_and_installer_share_terminal_without_logging_password(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result, output = self.exercise(root, "success")
+            self.assertEqual(result["code"], 0, result)
+            self.assertTrue((root / "installer-started").exists())
+            self.assertIn("Password: ", output)
+            log = (root / "host.log").read_text()
+            self.assertIn("authorized", log)
+            self.assertIn("package output", log)
+            self.assertNotIn("fixture-password", log + output)
+            self.assertNotIn("Password: ", log)
+
+    def test_authentication_failure_or_missing_terminal_stops_before_installer(self):
+        for mode, terminal, code in (("auth-failure", True, 17), ("success", False, 1)):
+            with self.subTest(terminal=terminal), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                result, _output = self.exercise(root, mode, terminal=terminal)
+                self.assertEqual(result["code"], code, result)
+                self.assertFalse((root / "installer-started").exists())
+                self.assertEqual((root / "calls").read_text().splitlines(), ['["-v"]'])
+                self.assertTrue((root / "multipass-1.0.0.pkg").exists())
+                self.assertIn("sudo fixture:", (root / "host.log").read_text())
+
+    def test_installer_failure_keeps_diagnostics_and_exit_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result, _output = self.exercise(root, "installer-failure")
+            self.assertEqual(result["code"], 23, result)
+            self.assertIn("installation failed", result["error"])
+            self.assertIn("package output", (root / "host.log").read_text())
+
+    def test_interactive_timeout_and_interrupt_reap_child_and_preserve_caller(self):
+        for mode, code in (("timeout", 124), ("interrupt", 130)):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                result, _output = self.exercise(root, mode)
+                self.assertEqual(result["code"], code, result)
+                self.assertFalse(result["child_running"])
+                self.assertEqual(result["followup"], "still running")
+                self.assertIn("command fixture: waiting", (root / "host.log").read_text())
 
 
 class HostReadiness(unittest.TestCase):
@@ -2086,7 +2153,9 @@ class LiveCleanup(unittest.TestCase):
                 runtime.record_creation(record, self.markers[self.name])
                 raise RuntimeError("bootstrap failed after launch")
             return self.command(argv, *positional, **keywords)
-        with mock.patch.object(live, "run", side_effect=failed):
+        # 创建命令已由替身接管，不生成依赖本机 Multipass CLI 的在线中断包装器。
+        with mock.patch.object(live, "interrupt_after_first_stop", return_value={}), \
+                mock.patch.object(live, "run", side_effect=failed):
             self.assertTrue(live.main())
         self.assertEqual([argv for argv in self.calls if argv[1] == "delete"],
                          [["multipass", "delete", "--purge", self.name]])

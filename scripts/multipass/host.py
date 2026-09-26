@@ -149,10 +149,11 @@ class Host:
         else:
             self.notice("  STEP SKIP [host/download] Reuse verified Multipass package cache")
         with self.progress("sudo", "Authorize the official package installer", timeout=120):
-            self.run(["sudo", "-v"], timeout=120)
+            self.run(["sudo", "-v"], timeout=120, interactive=True)
         with self.progress("installer", "Install the official Multipass package", timeout=1800):
-            self.run(["sudo", "installer", "-pkg", str(pkg), "-target", "/"],
-                     timeout=1800, stream=True)
+            # 与认证共享终端会话以复用 sudo 凭据；凭据失效时立即报告失败。
+            self.run(["sudo", "-n", "installer", "-pkg", str(pkg), "-target", "/"],
+                     timeout=1800, stream=True, interactive=True)
         self.source = "official-pkg"
 
     @staticmethod

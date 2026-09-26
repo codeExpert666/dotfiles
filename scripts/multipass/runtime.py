@@ -74,22 +74,25 @@ class Runner:
     def __init__(self):
         self.log = None
         self.active = None
+        self.active_interactive = False
         self.on_wait = None
         self.output_mode = "native"
         self.last_log = None
 
     def __call__(self, argv, *, timeout=15, check=True, stream=False, heartbeat=None,
-                 on_wait=None, show_output=True):
+                 on_wait=None, show_output=True, interactive=False):
         argv = [str(part) for part in argv]
         if heartbeat is None and timeout >= 60:
             heartbeat = PROGRESS_INTERVAL
         on_wait = on_wait or self.on_wait
         failure_events = deque(maxlen=3)
-        if stream or heartbeat:
+        if stream or heartbeat or interactive:
+            # sudo 从 /dev/tty 认证；保留调用方会话和前台进程组，输出仍写入日志。
             process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                       text=True, bufsize=1, start_new_session=True,
+                                       text=True, bufsize=1, start_new_session=not interactive,
                                        env={**os.environ, "NO_COLOR": "1", "CLICOLOR": "0",
                                             "HOMEBREW_NO_COLOR": "1"})
+            self.active_interactive = interactive
             self.active = process
             output = deque(maxlen=200) if stream else []
             last_visible = [time.monotonic()]
@@ -173,10 +176,11 @@ class Runner:
             except BaseException as exc:
                 primary = exc
             finally:
-                # 回收组内后代后再排空日志，包括 EOF 前没有换行的正文。
+                # 停止命令后再排空日志，包括 EOF 前没有换行的正文。
                 self.stop()
                 worker.join(timeout=5)
                 self.active = None
+                self.active_interactive = False
             if worker.is_alive():
                 forwarding_errors.append(RuntimeError("forwarder did not finish"))
             if forwarding_errors:
@@ -220,14 +224,21 @@ class Runner:
 
     def stop(self):
         if self.active:
+            def send(signum):
+                if self.active_interactive:
+                    # 前台 sudo 负责向安装器转交信号；不能终止调用方共享的进程组。
+                    self.active.send_signal(signum)
+                else:
+                    os.killpg(self.active.pid, signum)
+
             try:
-                os.killpg(self.active.pid, signal.SIGTERM)
+                send(signal.SIGTERM)
                 self.active.wait(timeout=5)
             except (ProcessLookupError, subprocess.TimeoutExpired):
                 pass
             finally:
                 try:
-                    os.killpg(self.active.pid, signal.SIGKILL)
+                    send(signal.SIGKILL)
                 except ProcessLookupError:
                     pass
                 self.active.wait()
