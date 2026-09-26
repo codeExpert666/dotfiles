@@ -12,6 +12,8 @@ import shlex
 from pathlib import Path
 import shutil
 import signal
+import socket
+import ssl
 import struct
 import subprocess
 import sys
@@ -1367,12 +1369,106 @@ class NeovimProgress(unittest.TestCase):
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
         self.addCleanup(release.set)
+        self.local_download_env(f'http://user:password@127.0.0.1:{server.server_port}')
+        return requests
+
+    def local_download_env(self, base):
         # 本地故障注入始终直连回环地址，不继承使用者的网络代理。
         for name in ('http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY'):
             self.env.pop(name, None)
         self.env.update(no_proxy='127.0.0.1,localhost,::1', NO_PROXY='127.0.0.1,localhost,::1')
-        self.env['DOTFILES_TEST_CURL_BASE'] = f'http://user:password@127.0.0.1:{server.server_port}'
-        return requests
+        self.env['DOTFILES_TEST_CURL_BASE'] = base
+
+    def local_tls(self, scenario):
+        # 临时自签证书由 curl 显式信任；保持真实 TLS 验证，不使用 --insecure。
+        cert, key, config = (self.root / name for name in ('tls.pem', 'tls.key', 'tls.cnf'))
+        config.write_text('[req]\nprompt=no\ndistinguished_name=dn\nx509_extensions=ext\n'
+                          '[dn]\nCN=localhost\n[ext]\nsubjectAltName=IP:127.0.0.1\n'
+                          'basicConstraints=critical,CA:TRUE\n')
+        run([shutil.which('openssl'), 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+             '-days', '1', '-keyout', str(key), '-out', str(cert), '-config', str(config)],
+            env=self.env, cwd=self.root, timeout=10, check=True)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(cert, key)
+        evidence = {'connections': [], 'requests': [], 'errors': []}
+        lock = threading.Lock()
+        release = threading.Event()
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                evidence['requests'].append(self.path)
+                body = b'parser archive'
+                self.send_response(200)
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body[:1])
+                self.wfile.flush()
+                started = time.monotonic()
+                if scenario == 'curl_tls_body':
+                    release.wait(1.0)  # 已完成 TLS、响应头及首字节，剩余响应体超过 0.3 秒连接上限。
+                self.wfile.write(body[1:])
+                evidence['body_elapsed'] = time.monotonic() - started
+
+            def log_message(self, *_):
+                pass
+
+        class Server(ThreadingHTTPServer):
+            def finish_request(self, request, client_address):
+                connection = {'started': time.monotonic()}
+                with lock:
+                    evidence['connections'].append(connection)
+                    attempt = len(evidence['connections'])
+                # 安全护栏长于 curl 的测试连接上限；触发此护栏会记录错误并令测试失败。
+                request.settimeout(5)
+                try:
+                    if scenario == 'curl_tls_failure' or (scenario == 'curl_tls_retry' and attempt == 1):
+                        hello = request.recv(5, socket.MSG_PEEK)
+                        connection['client_hello'] = hello[:2] == b'\x16\x03'
+                        # 接收 ClientHello 后不回任何 TLS 数据；等待 curl 自行超时并关闭连接。
+                        while request.recv(4096):
+                            pass
+                        connection['client_closed'] = True
+                        connection['elapsed'] = time.monotonic() - connection['started']
+                    else:
+                        with context.wrap_socket(request, server_side=True) as tls:
+                            connection['tls_established'] = True
+                            Handler(tls, client_address, self)
+                except OSError as error:
+                    evidence['errors'].append(str(error))
+
+        server = Server(('127.0.0.1', 0), Handler)
+        server.daemon_threads = True
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.addCleanup(release.set)
+        self.local_download_env(f'https://127.0.0.1:{server.server_port}')
+        self.env['CURL_CA_BUNDLE'] = str(cert)
+        return evidence
+
+    def assert_download_command(self, timers, output, name='bash'):
+        destination = str(self.root / '.cache/nvim' / ('tree-sitter-' + name + '.tar.gz'))
+        commands = [cmd for cmd in timers['system_commands'] if destination in cmd]
+        self.assertEqual(len(commands), 1, output)
+        command = commands[0]
+        base = self.env.get('DOTFILES_TEST_CURL_BASE', 'http://127.0.0.1:1')
+        self.assertEqual(command[:-2], [
+            'curl', '--no-progress-meter', '--fail', '--show-error', '--retry', '7', '-L',
+            base + '/repo/' + name + '/archive/test-revision.tar.gz', '--output', destination,
+            '--connect-timeout', '20'], output)
+        self.assertEqual(command[-2], '--write-out', output)
+        self.assertRegex(output, r'event=start;[^\n]*connect_timeout=20s')
+
+    def assert_tls_stalled(self, evidence, count):
+        self.assertEqual(evidence['errors'], [], evidence)
+        stalled = [item for item in evidence['connections'] if 'client_hello' in item]
+        self.assertEqual(len(stalled), count, evidence)
+        for connection in stalled:
+            self.assertTrue(connection['client_hello'], evidence)
+            self.assertTrue(connection.get('client_closed'), evidence)
+            self.assertGreaterEqual(connection['elapsed'], 0.2, evidence)
+            self.assertLess(connection['elapsed'], 3, evidence)
 
     @unittest.skipUnless(shutil.which('curl'), 'real curl is required for local HTTP download tests')
     def test_local_http_download_ignores_inherited_proxy(self):
@@ -1409,6 +1505,8 @@ class NeovimProgress(unittest.TestCase):
                 self.assertNotIn('event=finish;', output)
                 self.assertNotIn('READY: Neovim / Treesitter / install;', output)
                 self.assertEqual(timers['real_curl_exits'], 2, output)
+                for name in ('bash', 'go'):
+                    self.assert_download_command(timers, output, name)
                 failure = output.index('FAIL: Neovim preparation:')
                 self.assertNotIn('DOWNLOAD:', output[failure:])
                 self.assertIn(reason, output[failure:])
@@ -1434,6 +1532,74 @@ class NeovimProgress(unittest.TestCase):
         self.assertNotIn('event=retry;', output)
         self.assertNotIn('PARSER FAIL:', output)
         self.assertEqual(timers['curl_callbacks'], 1)
+        self.assert_download_command(timers, output)
+
+    @unittest.skipUnless(shutil.which('curl') and shutil.which('openssl'),
+                         'real curl and openssl are required for local TLS timeout tests')
+    def test_real_curl_tls_connect_timeout_retries_and_succeeds(self):
+        evidence = self.local_tls('curl_tls_retry')
+        code, output, timers = self.execute('curl_tls_retry', 'event=retry;', persist=True)
+        self.assertEqual(code, 0, output)
+        self.assert_download_command(timers, output)
+        self.assert_tls_stalled(evidence, 1)
+        self.assertEqual(len(evidence['connections']), 2, evidence)
+        self.assertTrue(evidence['connections'][1]['tls_established'], evidence)
+        self.assertEqual(evidence['requests'], ['/repo/bash/archive/test-revision.tar.gz'])
+        self.assertRegex(output, r'event=stderr;[^\n]*curl: \(28\)')
+        self.assertRegex(output, r'event=retry;[^\n]*[Tt]imeout[^\n]*\b1 seconds?\b')
+        self.assertRegex(output, r'event=finish;[^\n]*exit=0; retry_notices=1;[^\n]*http=200;')
+        self.assertLess(output.index('curl: (28)'), output.index('event=retry;'))
+        self.assertLess(output.index('event=retry;'), output.index('event=finish;'))
+        self.assertIn('curl: (28)', timers['curl_results']['bash']['stderr'])
+        self.assertIn('curl: (28)', self.log_path.read_text())
+        self.assertIn('event=retry;', self.log_path.read_text())
+        self.assertIn('READY: configured Treesitter parsers installed and loadable', output)
+        self.assertNotIn('PARSER FAIL:', output)
+        self.assertEqual(timers['curl_callbacks'], 1)
+        self.assertEqual((self.root / '.cache/nvim/tree-sitter-bash.tar.gz').read_bytes(), b'parser archive')
+
+    @unittest.skipUnless(shutil.which('curl') and shutil.which('openssl'),
+                         'real curl and openssl are required for local TLS timeout tests')
+    def test_real_curl_tls_connect_timeout_exhaustion_fails(self):
+        evidence = self.local_tls('curl_tls_failure')
+        code, output, timers = self.execute('curl_tls_failure')
+        self.assertEqual(code, 1, output)
+        self.assert_download_command(timers, output)
+        self.assert_tls_stalled(evidence, 2)
+        self.assertEqual(len(evidence['connections']), 2, evidence)
+        self.assertEqual(evidence['requests'], [])
+        self.assertEqual(len(re.findall(r'event=stderr;[^\n]*curl: \(28\)', output)), 2, output)
+        self.assertRegex(output, r'event=finish;[^\n]*exit=28; retry_notices=1;')
+        self.assertIn('PARSER FAIL: Neovim / Treesitter / install / bash;', output)
+        self.assertIn('curl: (28)', output[output.index('FAIL: Neovim preparation:'):])
+        self.assertNotIn('READY: Neovim / Treesitter / install;', output)
+        self.assertNotIn('READY: configured Treesitter', output)
+        self.assertNotIn('READY: completion resources', output)
+        self.assertNotIn('event=cancel;', output)
+        self.assertEqual(timers['curl_callbacks'], 1)
+        self.assertEqual(timers['curl_results']['bash']['code'], 28)
+
+    @unittest.skipUnless(shutil.which('curl') and shutil.which('openssl'),
+                         'real curl and openssl are required for local TLS timeout tests')
+    def test_real_curl_body_can_outlast_connect_timeout(self):
+        evidence = self.local_tls('curl_tls_body')
+        code, output, timers = self.execute('curl_tls_body')
+        self.assertEqual(code, 0, output)
+        self.assert_download_command(timers, output)
+        self.assertEqual(evidence['errors'], [], evidence)
+        self.assertEqual(len(evidence['connections']), 1, evidence)
+        self.assertTrue(evidence['connections'][0]['tls_established'], evidence)
+        args = timers['executed_curl']
+        limit = float(args[args.index('--connect-timeout') + 1])
+        self.assertEqual(limit, 0.3)
+        self.assertGreater(evidence['body_elapsed'], limit * 2, evidence)
+        self.assertEqual((self.root / '.cache/nvim/tree-sitter-bash.tar.gz').read_bytes(), b'parser archive')
+        finish = next(line for line in output.splitlines() if 'event=finish;' in line)
+        self.assertGreater(float(re.search(r'curl_total=([\d.]+)', finish).group(1)), limit)
+        self.assertIn('exit=0; retry_notices=0;', finish)
+        self.assertNotIn('event=retry;', output)
+        self.assertNotIn('event=stderr;', output)
+        self.assertIn('READY: configured Treesitter parsers installed and loadable', output)
 
     @unittest.skipUnless(shutil.which('curl'), 'real curl is required for local HTTP download tests')
     def test_real_curl_retry_succeeds_with_live_reason_and_redirect_summary(self):
@@ -1525,6 +1691,13 @@ class NeovimProgress(unittest.TestCase):
         self.assertEqual(timers['curl_callbacks'], 1)
         self.assertTrue(timers['non_target_original'])
         self.assertTrue(timers['unrelated_curl_original'])
+        self.assert_download_command(timers, output)
+        self.assertEqual(len(timers['system_commands']), 4)
+        self.assertIn(['curl', '--version'], timers['system_commands'])
+        self.assertIn(['sh', '-c', 'printf unchanged'], timers['system_commands'])
+        self.assertIn(['curl', '--silent', '--fail', '--show-error', '--retry', '7', '-L',
+                       'http://example.invalid/unrelated', '--output',
+                       str(self.root / '.cache/nvim/unrelated.tar.gz')], timers['system_commands'])
 
     def test_cache_reuse_and_distinct_treesitter_phases(self):
         code, output, _ = self.execute('reuse')

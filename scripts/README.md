@@ -254,7 +254,14 @@ Treesitter 的 `PARSER` 行来自锁定插件实际创建的解析器任务，�
 旧 `parser.so` 的存在不代表修订对齐完成；只有插件 update 任务结束后才会输出该阶段的
 `READY`。插件报告的下载器或编译器错误会出现在 `PARSER FAIL` 和阶段 `FAIL` 中。
 仅实际启动的 Treesitter curl 请求另有 `DOWNLOAD` 行，以阶段、解析器和 `request` 区分并发请求。
-`start` 显示原始 URL，运行中的 `stderr`、`retry` 保留 curl 的错误和重试提示；`WAIT` 的
+`start` 显示原始 URL 和 `connect_timeout=20s`。每次连接最多等待 20 秒，范围包括 DNS、
+TCP 连接及 TLS 握手；连接建立后的响应体传输不受这个连接上限限制。保留插件的
+`--retry 7` 及 curl 默认退避，不额外限制整次传输时间。单个请求的 `wall_elapsed` 包含
+重试、退避、重定向和传输，因此可能超过 20 秒；整个 install、update 阶段仍各受 600 秒
+上限保护。此设置只缩短失败连接的等待，不判定或修复底层网络故障。连接上限的含义见
+[curl 的 connect-timeout 文档](https://curl.se/docs/manpage.html#--connect-timeout)。
+
+运行中的 `stderr`、`retry` 保留 curl 的错误和重试提示；`WAIT` 的
 `downloads` 显示最近一条真实事件。`finish` 包含退出码、最终 HTTP 状态、最终响应字节数、
 原始及重定向后的 URL。URL 的用户信息、查询参数和片段会隐去。`retry_notices` 只计实际看到的
 重试提示；`retries` 仅在 curl 8.9.0+ 可读，其他版本为 `unavailable`，不从耗时推断次数。

@@ -224,22 +224,23 @@ local function curl_task(phase)
       local target = info.url .. "/archive/" .. info.revision .. ".tar.gz"
       local output = vim.fs.joinpath(vim.fn.stdpath("cache"), "tree-sitter-" .. name .. ".tar.gz")
       -- 与锁定插件 install.lua 的参数和回调方式一致；响应来自本地 HTTP 服务。
-      local handle = vim.system(
-        { "curl", "--silent", "--fail", "--show-error", "--retry", "7", "-L", target, "--output", output },
-        nil,
-        function(result)
-          counters.curl_callbacks = (counters.curl_callbacks or 0) + 1
-          if result.code ~= 0 then
-            failures[#failures + 1] = name
-            log:error("Error during download: %s", result.stderr)
-          else
-            log:info("Compiling parser")
-            log:info("Installing parser")
-            log:info("Language installed")
-          end
-          completed[name] = true
+      local args = { "curl", "--silent", "--fail", "--show-error", "--retry", "7", "-L", target, "--output", output }
+      local before = vim.deepcopy(args)
+      local handle = vim.system(args, nil, function(result)
+        counters.curl_callbacks = (counters.curl_callbacks or 0) + 1
+        counters.curl_results = counters.curl_results or {}
+        counters.curl_results[name] = result
+        if result.code ~= 0 then
+          failures[#failures + 1] = name
+          log:error("Error during download: %s", result.stderr)
+        else
+          log:info("Compiling parser")
+          log:info("Installing parser")
+          log:info("Language installed")
         end
-      )
+        completed[name] = true
+      end)
+      assert(vim.deep_equal(args, before), "download wrapper changed the caller's arguments")
       handles[name] = handle
       local file = assert(io.open(marker .. "." .. name .. ".pid", "w"))
       file:write(handle.pid)
@@ -462,6 +463,29 @@ if scenario:match("^curl_real_") then
     end
     return task
   end
+end
+
+-- 在生产包装器与真实进程之间记录实际参数；只在 TLS 故障夹具中缩短等待。
+if scenario:match("^curl_") then
+  local system = vim.system
+  counters.system_commands = {}
+  vim.system = function(cmd, opts, callback)
+    table.insert(counters.system_commands, vim.deepcopy(cmd))
+    if scenario:match("^curl_tls_") and cmd[1] == "curl" and cmd[2] ~= "--version" then
+      cmd = vim.deepcopy(cmd)
+      for index, value in ipairs(cmd) do
+        if value == "--connect-timeout" then
+          cmd[index + 1] = "0.3"
+        end
+      end
+      if scenario == "curl_tls_failure" then
+        cmd[6] = "1" -- 生产值另行断言为 7；失败测试只等一次原生退避。
+      end
+      counters.executed_curl = vim.deepcopy(cmd)
+    end
+    return system(cmd, opts, callback)
+  end
+  original_system = vim.system
 end
 
 dofile(entrypoint)

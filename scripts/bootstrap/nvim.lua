@@ -310,6 +310,7 @@ end
 -- logger；异步调度器随后调用 vim.system(curl)。事件、目标 URL 和输出文件共同确定请求归属。
 -- 只转发这些 logger 的真实事件；旧 parser.so 不能代表 update 已完成。
 local function treesitter_events()
+  local connect_timeout_seconds = 20
   local log = require("nvim-treesitter.log")
   local original_new, original_system = log.new, vim.system
   local state = { phase = nil, started = nil, active = {}, errors = {}, latest = {}, pending = {}, next_request = 0 }
@@ -385,9 +386,11 @@ local function treesitter_events()
     state.next_request = state.next_request + 1
     local request =
       { id = tostring(state.next_request), phase = state.phase, lang = lang, started = uv.hrtime(), retries_seen = 0 }
-    request_line(request, "start", "url=" .. safe_url(cmd[8]))
+    request_line(request, "start", "url=" .. safe_url(cmd[8]) .. "; connect_timeout=" .. connect_timeout_seconds .. "s")
     local args = vim.deepcopy(cmd)
     args[2] = "--no-progress-meter"
+    args[#args + 1] = "--connect-timeout"
+    args[#args + 1] = tostring(connect_timeout_seconds)
     args[#args + 1] = "--write-out"
     args[#args + 1] = curl_write_out(has_retries)
 
