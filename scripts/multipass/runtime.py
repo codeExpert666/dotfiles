@@ -88,18 +88,22 @@ class Runner:
         failure_events = deque(maxlen=3)
         if stream or heartbeat or interactive:
             # sudo 从 /dev/tty 认证；保留调用方会话和前台进程组，输出仍写入日志。
-            process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            # 供解析的结果始终分开捕获；仅流式展示合并两路输出以保留诊断顺序。
+            process = subprocess.Popen(argv, stdout=subprocess.PIPE,
+                                       stderr=subprocess.STDOUT if stream else subprocess.PIPE,
                                        text=True, bufsize=1, start_new_session=not interactive,
                                        env={**os.environ, "NO_COLOR": "1", "CLICOLOR": "0",
                                             "HOMEBREW_NO_COLOR": "1"})
             self.active_interactive = interactive
             self.active = process
             output = deque(maxlen=200) if stream else []
+            error_output = []
+            output_lock = threading.Lock()
             last_visible = [time.monotonic()]
             event_driven = [False]
             forwarding_errors = []
 
-            def forward():
+            def forward(pipe, captured):
                 log = None
                 try:
                     if self.log:
@@ -107,41 +111,42 @@ class Runner:
                 except OSError as exc:
                     forwarding_errors.append(exc)
                 try:
-                    with process.stdout:
-                        for raw in process.stdout:
+                    with pipe:
+                        for raw in pipe:
                             if not stream:
-                                output.append(raw)
+                                captured.append(raw)
                             for line in clean_output(raw).splitlines():
-                                visible = stream and show_output
-                                if line.startswith("@@DOTFILES/1 DETAIL "):
-                                    line = line[len("@@DOTFILES/1 DETAIL "):]
-                                    visible = False
-                                elif line.startswith("@@DOTFILES/1 EVENT "):
-                                    line = line[len("@@DOTFILES/1 EVENT "):]
-                                    event_driven[0] = True
-                                    if line.startswith(("FAIL:", "FAIL ", "FAILED phase:")):
-                                        failure_events.append(line)
-                                elif self.output_mode == "quiet":
-                                    visible = bool(re.match(r"(?:Warning:|WARN[: ]|Error:|FAIL[: ])", line))
-                                if stream:
-                                    output.append(line + "\n")
-                                if log:
-                                    try:
-                                        log.write(line + "\n")
-                                        log.flush()
-                                    except OSError as exc:
-                                        forwarding_errors.append(exc)
+                                with output_lock:
+                                    visible = stream and show_output
+                                    if line.startswith("@@DOTFILES/1 DETAIL "):
+                                        line = line[len("@@DOTFILES/1 DETAIL "):]
+                                        visible = False
+                                    elif line.startswith("@@DOTFILES/1 EVENT "):
+                                        line = line[len("@@DOTFILES/1 EVENT "):]
+                                        event_driven[0] = True
+                                        if line.startswith(("FAIL:", "FAIL ", "FAILED phase:")):
+                                            failure_events.append(line)
+                                    elif self.output_mode == "quiet":
+                                        visible = bool(re.match(r"(?:Warning:|WARN[: ]|Error:|FAIL[: ])", line))
+                                    if stream:
+                                        captured.append(line + "\n")
+                                    if log:
                                         try:
-                                            log.close()
-                                        except OSError as close_error:
-                                            forwarding_errors.append(close_error)
-                                        log = None
-                                if visible:
-                                    try:
-                                        print(line[:800], file=sys.stderr, flush=True)
-                                        last_visible[0] = time.monotonic()
-                                    except OSError as exc:
-                                        forwarding_errors.append(exc)
+                                            log.write(line + "\n")
+                                            log.flush()
+                                        except OSError as exc:
+                                            forwarding_errors.append(exc)
+                                            try:
+                                                log.close()
+                                            except OSError as close_error:
+                                                forwarding_errors.append(close_error)
+                                            log = None
+                                    if visible:
+                                        try:
+                                            print(line[:800], file=sys.stderr, flush=True)
+                                            last_visible[0] = time.monotonic()
+                                        except OSError as exc:
+                                            forwarding_errors.append(exc)
                 except Exception as exc:
                     forwarding_errors.append(exc)
                 finally:
@@ -151,8 +156,12 @@ class Runner:
                         except OSError as exc:
                             forwarding_errors.append(exc)
 
-            worker = threading.Thread(target=forward, daemon=True)
-            worker.start()
+            pipes = [(process.stdout, output)]
+            if process.stderr is not None:
+                pipes.append((process.stderr, error_output))
+            workers = [threading.Thread(target=forward, args=pair, daemon=True) for pair in pipes]
+            for worker in workers:
+                worker.start()
             started = time.monotonic()
             primary = None
             try:
@@ -178,10 +187,11 @@ class Runner:
             finally:
                 # 停止命令后再排空日志，包括 EOF 前没有换行的正文。
                 self.stop()
-                worker.join(timeout=5)
+                for worker in workers:
+                    worker.join(timeout=5)
                 self.active = None
                 self.active_interactive = False
-            if worker.is_alive():
+            if any(worker.is_alive() for worker in workers):
                 forwarding_errors.append(RuntimeError("forwarder did not finish"))
             if forwarding_errors:
                 message = f"command output could not be saved/forwarded to {self.log}: {forwarding_errors[0]}"
@@ -193,7 +203,7 @@ class Runner:
                     primary = Failure(message)
             if primary:
                 raise primary
-            result = subprocess.CompletedProcess(argv, code, "".join(output), "")
+            result = subprocess.CompletedProcess(argv, code, "".join(output), "".join(error_output))
         else:
             try:
                 result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)

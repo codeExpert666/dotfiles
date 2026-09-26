@@ -236,6 +236,24 @@ class HostPolicy(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
 
+    def test_image_lookup_accepts_json_with_stderr_diagnostics(self):
+        root = Path(self.temp.name)
+        cli = root / "multipass"
+        entry = {"os": "Ubuntu", "release": "26.04 LTS"}
+        payload = json.dumps({"errors": [], "images": {"26.04": entry}})
+        diagnostic = "[2026-09-27T00:24:59.024] [error] [url downloader] Failed to get release metadata"
+        program = ("import sys\nassert sys.argv[1:] == ['find', '--format', 'json']\n"
+                   f"print({diagnostic!r}, file=sys.stderr, flush=True)\nprint({payload!r})\n")
+        cli.write_text(f"#!/bin/sh\nexec {shlex.quote(sys.executable)} -c {shlex.quote(program)} \"$@\"\n")
+        cli.chmod(0o755)
+        runner = runtime.Runner()
+        runner.log = root / "command.log"
+        machine = host.Host(runner, runtime.RELEASES, root)
+        machine.cli = str(cli)
+        self.assertEqual(machine.image("26.04"), entry)
+        self.assertIn(diagnostic, runner.log.read_text())
+        self.assertIn(payload, runner.log.read_text())
+
     def test_qualified_version_does_not_call_installer(self):
         calls = []
 
@@ -869,6 +887,58 @@ completed=yes
             self.assertIn('early out\nearly err\n', runner.log.read_text())
             result = runner([sys.executable, '-c', 'print("{\\"answer\\":42}")'])
             self.assertEqual(json.loads(result.stdout), {'answer': 42})
+
+    def test_progress_capture_keeps_stdout_and_stderr_separate(self):
+        payload = json.dumps({"answer": 42}) + "\n"
+        diagnostic = "Warning: release metadata unavailable\n"
+        program = (f"import sys;sys.stderr.write({diagnostic!r});sys.stderr.flush();"
+                   f"sys.stdout.write({payload!r})")
+        for options in ({"timeout": 60}, {"timeout": 2, "heartbeat": .05},
+                        {"timeout": 2, "interactive": True}):
+            with self.subTest(options=options), tempfile.TemporaryDirectory() as directory:
+                runner = runtime.Runner()
+                runner.log = Path(directory) / "command.log"
+                terminal = io.StringIO()
+                with redirect_stderr(terminal):
+                    result = runner([sys.executable, "-c", program], **options)
+                self.assertEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, payload)
+                self.assertEqual(result.stderr, diagnostic)
+                self.assertEqual(terminal.getvalue(), "")
+                self.assertIn(payload, runner.log.read_text())
+                self.assertIn(diagnostic, runner.log.read_text())
+
+    def test_progress_capture_drains_both_pipes_for_unchecked_failure(self):
+        payload = "out" * 50000
+        diagnostic = "err" * 50000
+        program = ("import sys;sys.stderr.write('err' * 50000);sys.stderr.flush();"
+                   "sys.stdout.write('out' * 50000);sys.stdout.flush();sys.exit(37)")
+        with tempfile.TemporaryDirectory() as directory:
+            runner = runtime.Runner()
+            runner.log = Path(directory) / "command.log"
+            result = runner([sys.executable, "-c", program], timeout=2, heartbeat=.05, check=False)
+            self.assertEqual(result.returncode, 37)
+            self.assertEqual(result.stdout, payload)
+            self.assertEqual(result.stderr, diagnostic)
+            self.assertIn(payload + "\n", runner.log.read_text())
+            self.assertIn(diagnostic + "\n", runner.log.read_text())
+            self.assertIsNone(runner.active)
+
+    def test_progress_capture_failure_and_timeout_preserve_both_logs(self):
+        for ending, timeout, code in (("sys.exit(37)", 2, 37), ("time.sleep(5)", .2, 124)):
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as directory:
+                runner = runtime.Runner()
+                runner.log = Path(directory) / "command.log"
+                program = ("import sys,time;sys.stdout.write('stdout evidence');sys.stdout.flush();"
+                           "sys.stderr.write('stderr evidence');sys.stderr.flush();" + ending)
+                with self.assertRaises(runtime.CommandFailure) as failure:
+                    runner([sys.executable, "-c", program], timeout=timeout, heartbeat=.05)
+                self.assertEqual(failure.exception.returncode, code)
+                for evidence in ("stdout evidence", "stderr evidence"):
+                    self.assertIn(evidence + "\n", runner.log.read_text())
+                    if code == 37:
+                        self.assertIn(evidence, failure.exception.output)
+                self.assertIsNone(runner.active)
 
     def test_pure_python_failure_and_lock_cleanup_are_persisted_without_success(self):
         with tempfile.TemporaryDirectory() as directory:

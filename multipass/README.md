@@ -240,6 +240,8 @@ bash scripts/multipass.sh provision --apply --name ubuntu-dev --ref '<新40位SH
 开始和收尾报告本次**宿主日志目录**，不在每个阶段反复输出长路径；客户机 `run.*` 由 bootstrap
 单独报告，并在成功收据的 `development.bootstrap_log` 中记录。两边日志均保留完整诊断正文，
 只去掉显示控制符；Python 校验异常、命令失败及清理失败会记录具体原因，终端摘要可以较短。
+供解析的子命令结果始终区分 stdout 与 stderr；启用心跳也不会将诊断混入 JSON，
+两路输出仍完整写入宿主日志。
 需要查阅客户机日志时须在客户机内打开该路径，不能把 `/home/ubuntu/...` 当作宿主路径。
 
 `destroy --apply` 也会增加 attempt。归档后，日志和 receipt 的路径随状态目录迁入
