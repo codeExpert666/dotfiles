@@ -27,8 +27,9 @@ import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'support'))
 from harness import REPO, Process, cleanup_on_exit, run, running, snapshot, terminal
+from terminfo_fixture import tools as terminfo_tools
 BASH = os.environ.get('DOTFILES_TEST_BASH') or shutil.which('bash')
-REAL_TOOLS = {name: shutil.which(name) for name in ('git', 'stow', 'rm', 'rmdir', 'mktemp', 'zsh', 'nvim', 'starship', 'cc', 'npm')}
+REAL_TOOLS = {name: shutil.which(name) for name in ('git', 'stow', 'rm', 'rmdir', 'mktemp', 'zsh', 'nvim', 'starship', 'cc', 'npm', 'awk')}
 spec = importlib.util.spec_from_file_location('bootstrap_resources', REPO / 'scripts/bootstrap/resources.py')
 resources = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(resources)
@@ -56,6 +57,120 @@ def zsh_fixture(home, root, env):
     bundle.write_text('source "$ANTIDOTE_HOME/zsh-users/zsh-autosuggestions/zsh-autosuggestions.zsh"\n')
     env.update(TEST_BUNDLE=str(bundle), TEST_ANTIDOTE_CLI=str(cli))
     return manifest, bundle, cache
+
+
+class Terminfo(unittest.TestCase):
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location('bootstrap_terminfo', REPO / 'scripts/bootstrap/terminfo.py')
+        self.helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.helper)
+        self.temp = tempfile.TemporaryDirectory(prefix='terminfo-test-')
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.home = self.root / 'home with spaces'
+        self.home.mkdir()
+        self.bin = self.root / 'bin'
+        self.bin.mkdir()
+        terminfo_tools(self.bin)
+        self.env = {'HOME': str(self.home), 'PATH': f'{self.bin}:/usr/bin:/bin',
+                    'TERMINFO': '/must-not-be-used', 'TERMINFO_DIRS': '/must-not-be-used'}
+        env = patch.dict(os.environ, self.env, clear=True)
+        env.start()
+        self.addCleanup(env.stop)
+
+    def compile(self, name, database=None):
+        source = self.root / 'fixture.terminfo'
+        source.write_text(f'{name}|user entry,\n\tcols#91, lines#37, colors#8,\n')
+        database = database or self.home / '.terminfo'
+        database.mkdir(exist_ok=True)
+        subprocess.run(['tic', '-x', '-o', str(database), str(source)], check=True)
+        return database
+
+    def test_only_ghostty_is_preserved_while_xterm_ghostty_is_compiled_and_reused(self):
+        database = self.compile('ghostty')
+        before = snapshot(database)
+        self.assertNotEqual(self.helper.lookup().returncode, 0)
+        self.helper.prepare()
+        result = self.helper.lookup()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for capability in ('colors#256', 'cols#80', 'kbs=\\177', 'Tc', 'fullkbd'):
+            # New ncurses can print numbers in hex.
+            self.assertIn(capability, result.stdout.replace('colors#0x100', 'colors#256').replace('kbs=^?', 'kbs=\\177'))
+        after = snapshot(database)
+        self.assertEqual({key: after[key] for key in before}, before)
+        self.helper.prepare()
+        self.assertEqual(snapshot(database), after)
+
+    def test_existing_user_and_system_definitions_are_reused_without_writes(self):
+        for system in (False, True):
+            with self.subTest(system=system):
+                database = self.compile('xterm-ghostty', self.root / 'system' if system else None)
+                terminfo_tools(self.bin, database if system else None)
+                before = snapshot(self.home)
+                self.helper.prepare()
+                self.assertEqual(snapshot(self.home), before)
+                self.assertIn('cols#91', self.helper.lookup().stdout)
+
+    def test_compile_failure_keeps_other_definitions_and_returns_nonzero(self):
+        self.compile('ghostty')
+        before = snapshot(self.home)
+        (self.bin / 'tic').unlink()
+        (self.bin / 'tic').write_text('#!/bin/sh\necho "compiler failed" >&2\nexit 42\n')
+        (self.bin / 'tic').chmod(0o755)
+        result = run([sys.executable, '-B', str(REPO / 'scripts/bootstrap/terminfo.py')], env=self.env)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('compiler failed', result.stderr)
+        self.assertIn('FAIL terminfo', result.stderr)
+        self.assertNotIn('READY:', result.stdout)
+        self.assertEqual(snapshot(self.home), before)
+
+    def test_install_failure_preserves_other_entries(self):
+        database = self.compile('ghostty')
+        before = snapshot(database)
+        with patch.object(self.helper.os, 'link', side_effect=PermissionError('publish denied')):
+            with self.assertRaisesRegex(PermissionError, 'publish denied'):
+                self.helper.prepare()
+        self.assertNotEqual(self.helper.lookup().returncode, 0)
+        self.assertEqual({key: snapshot(database)[key] for key in before}, before)
+        self.assertFalse(list(database.rglob('.xterm-ghostty-*')))
+
+    def test_final_resolution_failure_rolls_back_only_the_new_entry(self):
+        database = self.compile('ghostty')
+        before = snapshot(database)
+        original = self.helper.lookup
+        calls = []
+        def lookup(database=None):
+            calls.append(database)
+            if len(calls) == 4:
+                return subprocess.CompletedProcess(['infocmp'], 1, '', 'final lookup failed\n')
+            return original(database)
+        with patch.object(self.helper, 'lookup', side_effect=lookup):
+            with self.assertRaisesRegex(RuntimeError, 'default search path'):
+                self.helper.prepare()
+        self.assertNotEqual(original().returncode, 0)
+        self.assertEqual({key: snapshot(database)[key] for key in before}, before)
+        self.assertFalse(list(database.rglob('xterm-ghostty')))
+
+    def test_conflicting_paths_are_preserved(self):
+        root = self.home / '.terminfo'
+        for prefix in ('x', '78'):
+            path = root / prefix / 'xterm-ghostty'
+            path.parent.mkdir(parents=True)
+            path.write_bytes(b'user-owned invalid entry')
+        before = snapshot(root)
+        with self.assertRaises(FileExistsError):
+            self.helper.prepare()
+        self.assertEqual(snapshot(root), before)
+
+    def test_alias_source_is_rejected_before_publication(self):
+        self.compile('ghostty')
+        before = snapshot(self.home)
+        source = self.root / 'aliases.terminfo'
+        source.write_text('xterm-ghostty|ghostty|Ghostty,\n\tcols#80,\n')
+        with patch.object(self.helper, 'SOURCE', source):
+            with self.assertRaisesRegex(RuntimeError, 'only xterm-ghostty'):
+                self.helper.prepare()
+        self.assertEqual(snapshot(self.home), before)
 
 
 class Orchestration(unittest.TestCase):
@@ -110,6 +225,7 @@ class Orchestration(unittest.TestCase):
         for name in commands:
             shutil.copyfile(self.root / 'fixture.py', self.bin / name)
             (self.bin / name).chmod(0o755)
+        terminfo_tools(self.bin)
         (self.bin / 'python3').symlink_to(sys.executable)
         # PATH 中的同名 Bash 故意失败，确保执行时沿用测试入口选定的解释器。
         (self.bin / 'bash').write_text('#!/bin/sh\nexit 91\n')
@@ -199,9 +315,20 @@ class Orchestration(unittest.TestCase):
         output = self.invoke('--profile', 'server')
         self.assertEqual(output.stdout, '', 'preview reports must use stderr')
         self.assertIn('PLAN: nvim', output.stderr)
+        self.assertIn('compile bundled Ghostty 1.3.1 text with tic -x', output.stderr)
         self.assertIn('dry run completed', output.stderr)
         self.assertEqual(snapshot(self.home), before)
         self.assertEqual(self.events(), [])
+
+    def test_terminfo_compile_failure_stops_bootstrap_before_deployment(self):
+        self.mock_shell('tic', 'echo "fixture tic failure" >&2\nexit 42\n')
+        output = self.invoke('--apply', '--profile', 'server', success=1).stderr
+        self.assertIn('FAILED phase: terminal definition', output)
+        logs = list((self.home / '.local/state/dotfiles-bootstrap').glob('run.*'))
+        self.assertIn('fixture tic failure', logs[0].read_text())
+        self.assertFalse((self.home / '.terminfo').exists())
+        self.assertFalse((self.home / '.config/nvim/init.lua').exists())
+        self.assertFalse(any(event[0] == 'doctor' for event in self.events()))
 
     def test_missing_deploy_dependencies_defer_preview(self):
         self.env['BOOTSTRAP_TEST_OLD'] = 'git,stow'
@@ -973,7 +1100,10 @@ class Orchestration(unittest.TestCase):
                 self.assertEqual(list(self.scratch.iterdir()), [])
 
     def test_logging_failure_is_not_command_success(self):
-        self.mock_shell('awk', 'cat >/dev/null\nexit 73\n')
+        # Fail the deployment receiver explicitly, not whichever earlier
+        # preparation action happens to emit output first.
+        self.mock_shell('awk', 'case " $* " in\n*" source=deploy "*) cat >/dev/null; exit 73 ;;\n'
+                        '*) exec ' + shlex.quote(REAL_TOOLS['awk']) + ' "$@" ;;\nesac\n')
         output = self.invoke('--apply', '--profile', 'server', success=1).stderr
         self.assertIn('FAIL logging:', output)
         self.assertIn('deployment preflight failed (exit 73)', output)

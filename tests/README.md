@@ -9,7 +9,7 @@
 ### 运行前提与依赖
 
 - **解释器**：公开入口与支持文件兼容 Bash 3.2+；Python 用例需要 Python 3.9+。
-- **必要工具**：全量回归依赖 Git、GNU Stow（支持 `--no-folding`）、Zsh、Vim 以及常见 Unix 命令。
+- **必要工具**：全量回归依赖 Git、GNU Stow（支持 `--no-folding`）、Zsh、Vim、真实 `tic`/`infocmp` 以及常见 Unix 命令。
 - **可选应用**：Neovim、Shuck、Lazygit/delta、Starship、Atuin、Ghostty 等应用未安装时明确标记为 `SKIP`；已安装但验证未通过则报告失败。
 - **解释器传递**：调用入口所使用的 Bash 解释器会统一传递给各子套件及被测脚本。
 
@@ -56,10 +56,17 @@ bash tests/multipass.sh Inputs.test_missing_ssh_key
 ### doctor
 
 验证 PASS/WARN/FAIL/SKIP 的诊断判定逻辑、遇到独立故障时继续报告其他检查项的能力，以及绝不修改被测系统真实状态的只读边界。覆盖部署缺失、工具版本失配及 Java/Maven runtime 路径分歧。借助真实 PTY 终端与应用替身夹具检查 TUI 交互、编辑器交接与子进程清理；路径与权限故障必须报告失败，不得误判为健康。
+终端定义回归在无 TTY、TERM 未设置或为 `dumb` 时均检查缺失失败，并验证真实目标 HOME
+中的 `~/.terminfo` 可被发现，不被隔离探针 HOME 或 `TERMINFO` 覆盖掩盖。
 
 ### bootstrap
 
 通过包管理器替身、本地预置归档和受控时钟，验证 profile 配置（server/desktop）、安装阶段顺序、sudo 权限请求、部署前置预检、日志与文件锁、资源复用与失败重试逻辑。针对 Go/JDK/Maven 验证版本选择、归档校验和、缓存损坏恢复及安装失败时保留旧版本；针对字体验证族名匹配与延迟发现；针对 Zsh 验证终端隔离及被中断时子进程树的安全回收。
+
+terminfo 使用真实 `tic -x` 编译随仓库的固定文本，以真实 `infocmp` 解析结果。
+测试夹具仅将默认数据库查询限定到临时 HOME，防止宿主已有定义掩盖缺失。
+覆盖只有 `ghostty` 时补齐、用户/系统条目复用、重复执行、别名及冲突保护、编译/发布/最终解析
+失败和 dry-run 不写 HOME；故障注入验证失败传播，不用始终成功的替身代替编译证据。
 
 输出用例分别捕获 stdout、stderr 和持久化日志，覆盖快速完成、静默/持续写日志的长任务心跳、
 ANSI/回车/退格/无末尾换行、未知错误格式、日志接收失败、清理失败及中断排空。
@@ -81,6 +88,7 @@ Neovim 的完整下载、重试、并发、超时和解析器错误断言读取�
 - **失败与续跑**：元数据记录先于 launch 创建，持久化保存失败历史与实例 UUID；首次必要重启按 stop → `Stopped` → start → `Running` 核对状态，覆盖命令非零但目标已达成、中断续跑、旧收据边界、身份与 boot ID、cloud-init、helper 清理和共享超时预算；禁止借 provision 跳过首次启动。异常状态下 helper 清理和在线诊断不得隐式启动实例，未完成的清理保留待办标记。
 - **退役与归属**：严禁凭旧回执同名重建；验证 destroy 预览、定向删除实例、宿主状态迁移至 `retired/`、日志路径迁移和旧历史保留，以及共享 SSH 配置的安全保留。
 - **输出证据**：实际 Bash bootstrap 输出接收器与宿主 Python Runner 串联，分别核对终端 stdout/stderr、客户机 `run.*`、宿主 `bootstrap.log` 和 receipt。另测持续详情不抑制心跳、已有摘要不重复心跳、旧输出兼容、日志转发故障及 Python 校验错误的归属。
+- **终端依赖**：核心 doctor 的缺失定义失败必须传递到 Multipass runtime/check；PTY 回放断言区分正确输入、重复回显和未擦除字符。
 
 ## 验证范围与证据边界
 
@@ -125,6 +133,10 @@ bash tests/multipass-live.sh --ref '<40位提交SHA>' \
 ```
 
 该入口依次验收 Ubuntu 24.04 与 26.04：首次正常 stop 后受控中断创建，再以同一声明续跑，独立核验管理状态、身份、boot ID、cloud-init 与重启标志，并完成 bootstrap/doctor、重新配置及日常 stop/start 的 SSH 检查。每个版本结束后仅清理本轮登记且能再次核实归属的实例；状态不稳时只读采集并保留实例。详细运行参数、测试报告位置及清理机制见 [Multipass 维护与验收](../multipass/README.md#维护与验收)。
+终端步骤通过系统 SSH（绕过 Ghostty 上传）验证普通用户默认路径下的 `xterm-ghostty`，
+再在现有 Zsh 配置的 PTY 中逐字输入并发送 DEL，分别断言显示内容、擦除结果和实际参数。
+[ssh_pty.py](multipass/ssh_pty.py) 保留原始输出与 JSON 断言；其 ASCII 单行回放器遇到不支持的
+屏幕控制序列即失败，不将未知输出算作通过。此测试不覆盖客户端 GUI 渲染。
 首次启动无需重启时，仍独立验证客户机状态、身份和重启标志并继续其余检查，将中断恢复场景明确记为 `skipped`。`summary.json` 的 `reboot_coverage` 区分已通过、已跳过和未到达的场景，并保存本轮宿主编排器的 `runtime_sha256`；检查双镜像覆盖时须同时核对这些字段。
 外部下载临时失败时，可用 `--only-image 24.04` 或 `--only-image 26.04` 与新的报告目录只重试失败镜像；这份单镜像报告不能单独代表双镜像全部通过。
 

@@ -24,6 +24,8 @@ import live
 import runtime
 import ssh_config
 import ssh_proxy
+import ssh_pty
+from terminfo_fixture import tools as terminfo_tools
 
 
 PUB = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG3Z+/i5KijOrBwCDnV+BYuzxq76WhXpuN4V7UZckucA"
@@ -1025,6 +1027,58 @@ class Orchestration(unittest.TestCase):
     def apply(self, *, local_config=None, **kwargs):
         runtime.create_or_provision(args(apply=True, dry_run=False, ssh_public_key=self.key, **kwargs),
                                     local_config or {}, self.home, runtime.Runner())
+
+    def test_core_terminfo_failure_propagates_through_runtime_check(self):
+        self.apply()
+        before = self.state.joinpath('receipt.json').read_bytes()
+        bindir = self.home / 'probe-bin'
+        bindir.mkdir()
+        for name in ('uname', 'mkdir', 'mktemp', 'rm', 'sleep', 'env', 'cp', 'cmp', 'cat'):
+            (bindir / name).symlink_to(shutil.which(name))
+        terminfo_tools(bindir)
+        # Satisfy the other mandatory dependency checks so this test can prove
+        # both failure from the missing definition alone and success after repair.
+        jdk = self.home / 'fixture-jdk'
+        (jdk / 'bin').mkdir(parents=True)
+        versions = {'java': f'    java.home = {jdk}\nopenjdk version "25.0.1"',
+                    'javac': 'javac 25.0.1',
+                    'mvn': f'Apache Maven 3.9.16\nJava version: 25.0.1, runtime: {jdk}',
+                    **{name: '99.99.99' for name in ('git', 'zsh', 'nvim', 'delta')}}
+        for name, output in versions.items():
+            tool = (jdk / 'bin' if name in ('java', 'javac') else bindir) / name
+            tool.write_text("#!/bin/sh\nprintf '%s\\n' " + shlex.quote(output)
+                            + (' >&2' if name == 'java' else '') + '\n')
+            tool.chmod(0o755)
+        observed = []
+        def guest_exec(machine, *argv, **_kwargs):
+            if argv[-1] == '/var/lib/dotfiles-multipass/instance.json':
+                return SimpleNamespace(stdout=json.dumps({'uuid': machine.declaration['uuid']}))
+            if argv[-2:] == ('rev-parse', 'HEAD'):
+                return SimpleNamespace(stdout=REF)
+            self.assertIn('/home/ubuntu/.dotfiles/scripts/doctor.sh', argv)
+            self.assertIn('dependencies', argv)
+            self.assertIn('HOME=/home/ubuntu', argv)
+            self.assertFalse(any(arg.startswith('TERM=') for arg in argv))
+            observed.append(argv)
+            # Only the VM transport is simulated; execute the current core doctor
+            # in a target HOME with no xterm-ghostty and no host database fallback.
+            return runtime.Runner()(['/usr/bin/env', '-i', f'HOME={self.home}', f'PATH={jdk / "bin"}:{bindir}',
+                                     shutil.which('bash'), str(REPO / 'scripts/doctor.sh'),
+                                     '--only', 'dependencies', '--verbose'])
+        with mock.patch.object(runtime.Machine, 'm', guest_exec), redirect_stdout(io.StringIO()):
+            with self.assertRaises(runtime.CommandFailure) as failed:
+                runtime.check(args(runtime=True), {}, self.home, runtime.Runner())
+        self.assertIn('FAIL dependencies.xterm-ghostty', failed.exception.output)
+        self.assertRegex(failed.exception.output, r'result: PASS=\d+ WARN=\d+ FAIL=1 SKIP=0')
+        self.assertEqual(failed.exception.returncode, 1)
+        database = self.home / '.terminfo'
+        database.mkdir()
+        subprocess.run([str(bindir / 'tic'), '-x', '-o', str(database),
+                        str(REPO / 'scripts/bootstrap/terminfo/xterm-ghostty.terminfo')], check=True)
+        with mock.patch.object(runtime.Machine, 'm', guest_exec), redirect_stdout(io.StringIO()):
+            runtime.check(args(runtime=True), {}, self.home, runtime.Runner())
+        self.assertEqual(len(observed), 2)
+        self.assertEqual(self.state.joinpath('receipt.json').read_bytes(), before)
 
     def test_git_identity_cli_precedence_config_fallback_and_omission(self):
         config = {"git_identity": {"name": "Config Name", "email": "config@example.invalid"}}
@@ -2103,6 +2157,7 @@ class LiveAcceptance(unittest.TestCase):
         for patcher in (mock.patch.object(live, "HOME", self.home),
                         mock.patch.object(live, "STATE", self.state),
                         mock.patch.object(live, "run", side_effect=self.command),
+                        mock.patch.object(live, "verify_ssh_pty"),
                         mock.patch.object(live, "interrupt_after_first_stop", return_value={})):
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -2137,7 +2192,7 @@ class LiveAcceptance(unittest.TestCase):
                 receipt["attempts"].append({"status": "ok"})
                 runtime.save_json(directory / "receipt.json", receipt)
             return ""
-        if argv[0] in ("bash", "ssh"):
+        if argv[0] in ("bash", "ssh", "/usr/bin/ssh"):
             return ""
         if argv[:2] == ["multipass", "list"]:
             return json.dumps({"list": [{"name": self.name, "state": self.current_state}]})
@@ -2175,6 +2230,8 @@ class LiveAcceptance(unittest.TestCase):
         self.assertTrue(any(argv[:3] == ["bash", str(live.ENTRY), "provision"] for argv in self.calls))
         self.assertTrue(any(argv[:2] == ["multipass", "stop"] for argv in self.calls))
         self.assertTrue((report / "ssh-after-restart.log").is_file())
+        self.assertTrue((report / "terminfo.log").is_file())
+        live.verify_ssh_pty.assert_called_once_with(self.name, report)
 
     def test_controlled_interruption_accepts_direct_and_bash_signal_exit_codes(self):
         for code in (-15, 143):
@@ -2198,6 +2255,17 @@ class LiveAcceptance(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "first boot assertions failed"):
             live.acceptance(self.name, "24.04", REF, self.home / "key.pub", report)
         self.assertFalse((report / "reboot-coverage.json").exists())
+
+
+class TerminalAcceptance(unittest.TestCase):
+    def test_display_replay_detects_duplicate_echo_and_stale_erasure(self):
+        start = b'\x1b[2J\x1b[HDFPTY> '
+        correct = start + b'ab\x1b[32mc\x1b[39mX\b \b'
+        self.assertEqual(ssh_pty.screen_line(correct), 'DFPTY> abc')
+        self.assertNotEqual(ssh_pty.screen_line(start + b'aabbcc'), 'DFPTY> abc')
+        self.assertNotEqual(ssh_pty.screen_line(start + b'abcX\b'), 'DFPTY> abc')
+        with self.assertRaisesRegex(ValueError, 'unsupported screen motion'):
+            ssh_pty.screen_line(start + b'abc\x1b[2A')
 
 
 class GuestGit(unittest.TestCase):
@@ -2287,6 +2355,31 @@ class GuestGit(unittest.TestCase):
 
 
 class GuestEnvironment(unittest.TestCase):
+    def test_runtime_without_term_runs_core_definition_check_with_target_home(self):
+        with tempfile.TemporaryDirectory() as root:
+            home = Path(root)
+            bindir = home / '.local/bin'
+            bindir.mkdir(parents=True)
+            terminfo_tools(bindir)
+            native_run = subprocess.run
+            results = []
+            def run_doctor(argv, **kwargs):
+                self.assertIn('dependencies', argv)
+                self.assertEqual(kwargs['env']['HOME'], str(home))
+                self.assertNotIn('TERM', kwargs['env'])
+                kwargs.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+                result = native_run(argv, **kwargs)
+                results.append(result)
+                result.check_returncode()
+                return result
+            with mock.patch.object(guest, 'HOME', home), \
+                    mock.patch.object(guest, 'REPO', REPO), \
+                    mock.patch.object(guest, 'require_ubuntu'), \
+                    mock.patch.object(guest.subprocess, 'run', side_effect=run_doctor):
+                with self.assertRaisesRegex(ValueError, 'bash failed'):
+                    guest.runtime()
+            self.assertIn('FAIL dependencies.xterm-ghostty', results[0].stderr)
+
     @unittest.skipUnless(shutil.which("zsh"), "native Zsh is not installed")
     def test_version_receipt_uses_jdk_from_zsh_startup(self):
         with tempfile.TemporaryDirectory() as root:

@@ -135,7 +135,7 @@ bash scripts/doctor.sh --only zsh --only nvim --runtime
 | -------------------- | -------------- | ------------------------------------------------------------------------ |
 | **环境与基础**       | `environment`  | 校验 HOME 绝对路径、XDG 默认布局变量及 `ZDOTDIR` 未导出                  |
 |                      | `deployment`   | 校验 Stow 软链、Skill 客户端两级链接、Codex 角色普通副本及竞争旧入口缺席 |
-|                      | `dependencies` | 检查核心工具最低版本；验证 JDK 21+ 与 Maven 3.9.x 的路径与运行时一致性   |
+|                      | `dependencies` | 检查核心工具、默认路径下的 `xterm-ghostty`；验证 JDK 21+ 与 Maven 3.9.x 的路径与运行时一致性 |
 |                      | `state`        | 检查状态和缓存目录存在性与权限（只读探测，不试写，不读取历史内容）       |
 | **Shell 与核心工具** | `zsh`          | 检查配置语法、Antidote 插件清单及生成的插件初始化脚本                    |
 |                      | `git`          | 检查生效配置层级、共享 include 顺序及核心配置项                          |
@@ -146,7 +146,7 @@ bash scripts/doctor.sh --only zsh --only nvim --runtime
 | **提示符与历史**     | `starship`     | 调用 Starship 验证所选 prompt 配置有效性                                 |
 |                      | `atuin`        | 在隔离环境中验证历史记录搜索配置与敏感凭据过滤规则                       |
 | **终端与界面**       | `ghostty`      | 校验 Ghostty 配置有效性；macOS 验证平台入口软链与光标着色器资源          |
-|                      | `terminal`     | 校验 terminfo 终端定义、UTF-8 支持、24-bit TrueColor 与客户端字体支持    |
+|                      | `terminal`     | 检查当前会话的 TERM 定义、UTF-8、24-bit TrueColor 与适用的客户端字体 |
 
 ### 判定状态与退出码
 
@@ -178,6 +178,10 @@ bash scripts/doctor.sh --only zsh --only nvim --runtime
 新会话通过不代表已经运行的 Shell 或编辑器已加载新配置。Atuin 任意环境覆盖、Shuck 项目
 配置、GUI 渲染、剪贴板及 SSH 客户端字体不由这些检查完整覆盖，须结合实际使用验收。
 
+`dependencies.xterm-ghostty` 保留真实目标 HOME，移除探针的 `TERMINFO`/`TERMINFO_DIRS`
+覆盖后执行 `infocmp -x xterm-ghostty`。不依赖当前 TERM 或 TTY，因此 server 与
+Multipass runtime 都会检查用户级定义；缺失记为 FAIL。doctor 只读，修复由 bootstrap 负责。
+
 ## bootstrap 准备完整环境
 
 ```sh
@@ -185,9 +189,9 @@ bash scripts/bootstrap.sh --dry-run --profile server
 bash scripts/bootstrap.sh --apply --profile server
 ```
 
-`server` 准备命令行环境与 terminfo 工具；`desktop` 额外准备 Ghostty、两套字体和 Linux
-剪贴板工具。profile 控制软件与字体，配置包按平台选择。远程字体装在终端客户端，
-Ghostty SSH 集成向远端提供终端定义。
+`server` 准备命令行环境、terminfo 工具和 `xterm-ghostty` 定义；`desktop` 额外准备
+Ghostty GUI、两套字体和 Linux 剪贴板工具。`tic`/`infocmp` 工具存在不代表具体定义可用，
+`ncurses-term` 也可能仅提供 `ghostty`。客户端 GUI 与字体不属于远端 server 的依赖。
 
 ### 预检与执行流程
 
@@ -197,10 +201,11 @@ Ghostty SSH 集成向远端提供终端定义。
 
 预览离线读取声明并探测真实 PATH 中的命令，不调用包管理器或下载资源；探针隔离
 HOME/XDG、日志、临时文件和工作目录。Git/Stow 未达标时，部署预检延后到依赖安装完成。
+终端定义的发现探针保留真实 HOME，并明确报告复用或离线源码编译计划，不写目标目录。
 
 | 阶段       | `--apply` 执行内容                                                                                                                                          |
 | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 软件与能力 | 准备平台软件及所需 Go/JDK/Maven，探测 npm、C、Java/Maven 能力                                                                                               |
+| 软件与能力 | 准备平台软件及所需 Go/JDK/Maven，探测 npm、C、Java/Maven 能力，然后准备并验证 `xterm-ghostty` |
 | 部署       | 运行 deploy 预检，再部署配置                                                                                                                                |
 | 插件与资源 | 准备 Zsh、Neovim 插件和工具；desktop 另准备桌面软件及字体                                                                                                   |
 | 验收       | 复查工具链能力，运行适用的 doctor 诊断（含受控运行检查），清理后汇总。server 检查 12 个基础模块（自动排除 ghostty 与 terminal），desktop 执行全部 14 个模块 |
@@ -223,6 +228,13 @@ macOS 首次安装可能需要完成 Command Line Tools 安装窗口后重跑。
 [releases.json](bootstrap/releases.json)。首次安装版本和必要依赖由各来源决定；
 Go/JDK/Maven 达标后离线复用，不追逐新版本，也不列入 Brewfile 或 apt 清单。
 归档先校验、暂存，再发布；损坏资源不会替换有效安装，非受管入口冲突会保留并报错。
+
+终端定义优先复用默认搜索路径中系统或当前用户的有效 `xterm-ghostty`。缺失时，以随仓库
+保存的 [Ghostty 1.3.1 文本及 MIT 许可](bootstrap/terminfo/README.md)为来源，通过本机
+`tic -x` 暂存编译并验证，只向 `~/.terminfo` 发布 `xterm-ghostty`，保留 `ghostty` 等其他条目。
+不修改系统数据库，不需要长期设置 `TERMINFO`/`TERMINFO_DIRS`，也不下载 latest 或安装 GUI。
+已有但无效的同名文件、链接或目录冲突会保留并报错；编译、发布及最终解析失败均阻止成功，
+最终解析失败会撤回本次新条目。Ghostty 的 SSH 自动上传是客户端便利功能，核心准备不依赖它。
 
 受管 JDK 发布到 `~/.local/share/dotfiles-bootstrap/jdk/current`，Zsh 自动设置其
 `JAVA_HOME` 和 PATH，登录时在 `brew shellenv` 后恢复优先级。需要其他 JDK 时，在

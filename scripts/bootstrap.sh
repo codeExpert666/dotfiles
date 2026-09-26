@@ -15,7 +15,8 @@ Usage: bootstrap.sh [--dry-run|--apply] --profile {desktop|server}
 The default is an offline, read-only preview. --apply prepares platform software,
 deploys configuration, prepares plugins, and runs doctor.
 desktop adds Ghostty and IosevkaTerm Nerd Font / Sarasa Term SC.
-server prepares CLI tools and terminfo utilities; fonts belong on the client.
+Both profiles prepare terminfo utilities and a resolvable xterm-ghostty entry.
+server prepares CLI tools; Ghostty GUI and fonts belong on the client.
 
 Supported: Ubuntu 24.04/26.04 (x86_64, arm64), macOS 15/26 (Apple Silicon).
 Requires Bash 3.2+, an existing absolute HOME and the default XDG layout.
@@ -120,6 +121,14 @@ esac
 initialize_scratch
 preview_software
 preview_requirements
+if command -v infocmp > /dev/null && (
+	unset TERMINFO TERMINFO_DIRS
+	infocmp -x xterm-ghostty
+) > "$scratch/terminfo.out" 2>&1; then
+	say 'FOUND: xterm-ghostty resolves with the target HOME and default terminfo search path; reuse it.'
+else
+	say 'PLAN: after tools are ready, check xterm-ghostty with the target HOME and default search path; if missing, compile bundled Ghostty 1.3.1 text with tic -x and install only xterm-ghostty into ~/.terminfo, then verify infocmp. No download or target write during preview.'
+fi
 say 'PLAN: reuse compatible Go; otherwise install the latest stable Go from go.dev (resolved only during --apply).'
 say 'PLAN: reuse a complete JDK 21+ and Maven 3.9; otherwise install the latest stable Temurin JDK 25 and verified Maven archive only during --apply.'
 if [[ $profile == desktop ]]; then
@@ -181,6 +190,9 @@ prepare_java_and_maven
 verify_requirements base
 verify_build_tools
 verify_java_build_tools
+
+phase='terminal definition'
+run 'prepare xterm-ghostty terminfo' 120 python3 -B "$script_dir/bootstrap/terminfo.py"
 
 phase='deployment'
 output_source=deploy run 'deployment preflight' 120 "$BASH" "$script_dir/deploy.sh" --dry-run

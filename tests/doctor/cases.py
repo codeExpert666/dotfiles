@@ -19,6 +19,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'support'))
 import harness
 from harness import REPO, Process, cleanup_on_exit, run, running, snapshot
+from terminfo_fixture import tools as terminfo_tools
 BASH = os.environ.get("DOTFILES_TEST_BASH") or shutil.which("bash")
 PACKAGES = ("scripts", "atuin", "codex", "ghostty", "ghostty-macos", "git", "lazygit", "nvim", "shuck", "skills", "starship", "vim", "zsh")
 
@@ -332,6 +333,34 @@ class DoctorTests(unittest.TestCase):
         self.minimal_path("stow")
         log = self.doctor("--only", "dependencies", code=1)
         self.assertIn("PASS dependencies.stow-capability", log)
+
+    def test_required_terminfo_uses_target_home_without_term_or_tty(self):
+        self.minimal_path("infocmp")
+        terminfo_tools(self.bindir)
+        self.env['PATH'] = str(self.bindir)
+        self.env.update(TERMINFO='/must-not-be-used', TERMINFO_DIRS='/must-not-be-used')
+        for term in (None, 'dumb'):
+            with self.subTest(term=term):
+                if term is None:
+                    self.env.pop('TERM', None)
+                else:
+                    self.env['TERM'] = term
+                log = self.doctor('--only', 'dependencies', '--verbose', code=1)
+                self.assertIn('FAIL dependencies.xterm-ghostty', log)
+                self.assertNotIn('SKIP dependencies.xterm-ghostty', log)
+        database = self.target / '.terminfo'
+        database.mkdir()
+        subprocess.run([str(self.bindir / 'tic'), '-x', '-o', str(database),
+                        str(REPO / 'scripts/bootstrap/terminfo/xterm-ghostty.terminfo')], check=True)
+        for term in (None, 'dumb'):
+            with self.subTest(prepared=True, term=term):
+                if term is None:
+                    self.env.pop('TERM', None)
+                else:
+                    self.env['TERM'] = term
+                # Other required tools are deliberately absent in this fixture.
+                log = self.doctor('--only', 'dependencies', code=1)
+                self.assertIn('PASS dependencies.xterm-ghostty', log)
 
     @unittest.skipUnless(shutil.which("delta"), "native delta is required")
     def test_delta_capability_with_a_controlling_terminal(self):

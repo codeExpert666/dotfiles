@@ -50,6 +50,8 @@ separately from discovery and runtime validation. GUI rendering/clipboard
 and remote client fonts require manual verification.
 Dependency checks require a complete, consistent JDK 21+ for JDTLS and stable
 Maven 3.9.x using that JDK; their version and runtime queries remain offline.
+xterm-ghostty must resolve with the real target HOME and default terminfo search
+path, even without TERM or a TTY. Session terminal/font checks are separate.
 
 Requirements: Linux or macOS, Bash 3.2+, standard Unix utilities.
 Native checks without their application are skipped after reporting it missing.
@@ -632,6 +634,15 @@ check_java_dependencies() {
 
 check_dependencies() {
 	local name severity version location alternatives alternative distinct
+	# This baseline also applies to headless server/runtime checks. Do not use
+	# clean_probe: its temporary HOME would hide the user's ~/.terminfo.
+	if need_tool infocmp FAIL dependencies.infocmp; then
+		if capture 8 env -u TERMINFO -u TERMINFO_DIRS "$tool_path" -x xterm-ghostty; then
+			report PASS dependencies.xterm-ghostty 'xterm-ghostty resolves with the target HOME and default terminfo search path'
+		else
+			native_error dependencies.xterm-ghostty 'default terminfo search path cannot resolve xterm-ghostty' 'Run bootstrap --apply --profile server (or desktop) as this user to prepare the definition.'
+		fi
+	fi
 	check_java_dependencies
 	for name in git stow zsh nvim delta vim lazygit fzf atuin zoxide starship shuck rg fd curl node cc tree-sitter shellcheck shfmt; do
 		severity=WARN

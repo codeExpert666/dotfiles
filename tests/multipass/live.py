@@ -15,6 +15,7 @@ import time
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts/multipass"))
 from runtime import load_json, lock, safe_directory
 from ssh_config import atomic
+from ssh_pty import verify as verify_ssh_pty
 
 
 REPO = Path(__file__).resolve().parents[2]
@@ -305,6 +306,14 @@ def acceptance(name, image, ref, key, report):
         report / "locale.log", timeout=120)
     run(["bash", str(ENTRY), "check", "--name", name, "--runtime"],
         report / "check-runtime.log", timeout=1800)
+    # Explicit name, real ubuntu HOME, no TERM/TERMINFO overrides or Ghostty
+    # shell integration: these entries must have been prepared by bootstrap.
+    run(["/usr/bin/ssh", "-o", "BatchMode=yes", name,
+         'test "$(id -un)" = ubuntu && test "$HOME" = /home/ubuntu && '
+         'env -u TERM -u TERMINFO -u TERMINFO_DIRS infocmp -x xterm-ghostty && '
+         'env -u TERMINFO -u TERMINFO_DIRS TERM=xterm-ghostty tput cols'],
+        report / "terminfo.log", timeout=30)
+    verify_ssh_pty(name, report)
     verify = ('test "$(id -un)" = ubuntu && test "$HOME" = /home/ubuntu '
               '&& test -d "$HOME/workspace" && test -d "$HOME/.dotfiles" '
               '&& test "$(getent passwd ubuntu | cut -d: -f7)" = "$(command -v zsh)" '

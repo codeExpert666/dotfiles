@@ -65,10 +65,13 @@ bootstrap 准备系统依赖与运行时工具链、部署配置，最后自动�
 
 | Profile   | 准备范围                                                       | 适用场景                                     |
 | --------- | -------------------------------------------------------------- | -------------------------------------------- |
-| `server`  | 命令行环境、terminfo 终端定义及基础配置                        | 服务器或远程环境（字体安装在本地终端客户端） |
+| `server`  | 命令行环境、terminfo 工具、`xterm-ghostty` 定义及基础配置     | 服务器或远程环境（字体安装在本地终端客户端） |
 | `desktop` | 额外准备 Ghostty、IosevkaTerm Nerd Font 和 Sarasa Term SC 字体 | 本地桌面机器（macOS / Ubuntu Desktop）       |
 
-profile 控制软件和字体的安装范围，配置包链接则按操作系统平台选择；`server` 同样会部署 Ghostty 基础配置，以支持终端定义与 SSH 跨端集成。桌面机器将命令中的 profile 参数改为 `desktop`：
+profile 控制软件和字体的安装范围，配置包链接则按操作系统平台选择。
+两个 profile 均由核心 bootstrap 准备并验收 `xterm-ghostty` 定义；客户机不需要
+Ghostty GUI 或字体。`server` 部署的 Ghostty 配置文件不负责安装定义，SSH 集成提供额外便利。
+桌面机器将命令中的 profile 参数改为 `desktop`：
 
 ```sh
 bash scripts/bootstrap.sh --dry-run --profile server
@@ -193,5 +196,7 @@ Codex 角色源文件位于 [codex/agents/](codex/agents/)，部署为 `~/.codex
 - LazyVim starter 衍生的 Neovim 配置：[Apache License 2.0](nvim/.config/nvim/LICENSE)。
 - Ghostty 光标着色器：[MIT License](ghostty-macos/.config/ghostty/shaders/LICENSE)，
   来源和本地调整见[着色器说明](ghostty-macos/.config/ghostty/shaders/README.md)。
+- Ghostty 终端定义：[MIT License](scripts/bootstrap/terminfo/LICENSE)，
+  固定版本和生成方式见[来源说明](scripts/bootstrap/terminfo/README.md)。
 - Starship 配置基于[官方 Tokyo Night 预设](https://starship.rs/presets/tokyo-night)，
   保留 ISC 许可；完整声明见[配置文件](starship/.config/starship.toml)。

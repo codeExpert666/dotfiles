@@ -282,6 +282,30 @@ bash scripts/multipass.sh provision --apply --name ubuntu-dev --ref '<新40位SH
 
 脚本绝不强制关闭电源、不自动重启宿主 daemon，也绝不干扰其他无关实例；仅当用户显式执行 `destroy --apply` 时，才会对经过严格身份比对的受管实例执行彻底销毁。
 
+### Ghostty SSH 输入重复或退格异常
+
+客户机的 `xterm-ghostty` 由[核心 bootstrap](../scripts/README.md#bootstrap-准备完整环境)
+准备，GUI 和字体装在客户端。同名重建可能留下 Ghostty 的旧安装缓存，导致 SSH 集成
+误以为新客户机已有定义。先通过系统 SSH 检查普通用户的默认搜索路径：
+
+```sh
+command ssh ubuntu-dev-2604 'env -u TERMINFO -u TERMINFO_DIRS infocmp xterm-ghostty'
+```
+
+若缺失，在客户机使用含此修复的仓库先预览，再执行核心 `bootstrap.sh --apply --profile server`；
+或在已启用 `ssh-terminfo` 的 Ghostty 窗口中，移除该目标的缓存后，用 Shell 的 `ssh` 函数重连。
+以下命令已按 Ghostty 1.3.1 的 `+ssh-cache --help` 和 Zsh 集成实现核实，目标须匹配
+`ssh -G` 输出的 `user@hostname`（示例为受管实例的默认用户和名称）：
+
+```sh
+ghostty +ssh-cache --remove=ubuntu@ubuntu-dev-2604
+ssh ubuntu-dev-2604
+```
+
+重连后再检查 `infocmp xterm-ghostty`。`bash scripts/multipass.sh ssh` 直接执行系统 SSH，
+不会经过 Ghostty 的 Shell 包装函数。脚本不自动改动客户端缓存或降级 TERM；
+Ghostty 1.3.1 也没有后续版本的 `+ssh` 入口。
+
 ### 其他失败的处理
 
 - **并发锁与内容冲突**：遇到宿主机锁（`lock`、`host-install.lock`）、客户机 bootstrap 锁或 Git 仓库变动时，必须先人工确认进程状态。丢失 PID 或无法确定属主的遗留锁不可盲目忽略；受管 SSH 文件发生外部修改时同样保留现场并报错，严禁并行发起第二份安装任务。
@@ -309,6 +333,9 @@ bash tests/multipass-live.sh --ref '<40位SHA>' \
 ```
 
 该验收套件依次针对 Ubuntu 24.04 与 26.04 镜像进行全流程实测：在首次正常 stop 成功后受控中断 `create`，确认实例为 `Stopped`，再用原声明续跑；独立核对管理连接、身份、新 boot ID、cloud-init 与重启标志，然后验收 bootstrap、doctor、重复配置（provision）及日常 stop/start 后的 SSH 联通性。诊断采集在非 `Running` 状态只使用只读管理查询；定向清理必须匹配本轮创建记录、声明与客户机 marker，无法验证时保留实例。
+其中终端验收通过系统 SSH 绕过 Ghostty 自动上传，以普通 `ubuntu` 用户的真实 HOME
+和默认搜索路径解析 `xterm-ghostty`，再用真实 Zsh 配置做受控 PTY 输入、退格显示及执行结果断言。
+报告保留 `terminfo.log`、`ssh-pty.raw` 和 `ssh-pty.json`；这不替代 Ghostty GUI 的人工观察。
 若镜像更新后无需重启，套件独立核验首次启动、身份及清除的重启标志，并继续完成其余验收；`reboot-coverage.json` 将中断恢复场景记为 `skipped`，不会冒充已经覆盖。发生重启且受控续跑验收通过时，该字段为 `passed`。汇总报告记录本轮宿主 `runtime_sha256`、实际执行的镜像和各自的 `reboot_coverage`；客户机 bootstrap 的固定提交由 `ref` 单独记录。
 若一个镜像已完成、另一个镜像因外部下载超时等原因失败，可用新的 `--report-dir` 并加 `--only-image 24.04` 或 `--only-image 26.04` 单独重试失败镜像；报告的 `images` 字段只列出本次实际执行的镜像。
 验收报告默认保存在 `~/.local/state/dotfiles-multipass/reports/<时间戳>/` 中，亦可通过 `--report-dir <绝对路径>` 自定义输出位置；测试结论仅对运行时的指定提交与机器环境有效。
