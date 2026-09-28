@@ -31,6 +31,8 @@
 	editor = nvim
 	# 将 Git 的普通分页输出交给 delta 完整渲染，不改变实际差异内容。
 	pager = delta
+	# 在路径输出中直接显示中文等非 ASCII 字符，特殊字符仍按需转义。
+	quotePath = false
 
 [interactive]
 	# 交互式补丁仅由 delta 着色并保持逐行对应，避免影响 Git 应用补丁。
