@@ -28,6 +28,9 @@
 Zsh 交互会话提供 `lg`（`lazygit`）和 `mp`（系统 `multipass`）别名。`mp` 调用原生命令，
 仓库的开发机编排入口仍是 `bash scripts/multipass.sh`。
 
+Java DAP 调试通过[窗口跳转配置](nvim/.config/nvim/lua/plugins/java-dap.lua)优先复用已打开的
+源码窗口，避免从输入终端命中断点时跳入固定的调试面板。设置在 `nvim-dap` 加载时自动应用。
+
 ## 快速开始
 
 ### 部署前须知与环境要求
