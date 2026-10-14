@@ -113,6 +113,59 @@ run_interactive_zsh '[[ $ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE == fg=red && ${DOTFILES
 [[ ! -s $case_log ]] || fail 'plugin initialization produced unexpected output'
 pass
 
+case_label='Zsh discovers and exports the system SSH agent only on native Linux'
+case_log="$case_root/zsh-system-agent.log"
+agent_runtime="$case_root/runtime with spaces"
+mkdir -p "$agent_runtime"
+# 创建真正的 Unix socket 路径；无需启动代理，也不接触宿主的个人 agent。
+run_application "$real_python" -c 'import socket, sys
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as agent:
+    agent.bind(sys.argv[1])' "$agent_runtime/openssh_agent" > "$case_log" 2>&1 || fail 'could not prepare the SSH agent socket fixture'
+expected_agent=''
+[[ $host_kernel != Linux ]] || expected_agent="$agent_runtime/openssh_agent"
+# shellcheck disable=SC2016
+run_test_command pty 30 env XDG_RUNTIME_DIR="$agent_runtime" DOTFILES_TEST_EXPECTED_AGENT="$expected_agent" \
+	"$real_zsh" -ic '[[ ${SSH_AUTH_SOCK-} == "$DOTFILES_TEST_EXPECTED_AGENT" ]] &&
+  if [[ -n $DOTFILES_TEST_EXPECTED_AGENT ]]; then
+    env | grep -Fqx -- "SSH_AUTH_SOCK=$DOTFILES_TEST_EXPECTED_AGENT"
+  fi' >> "$case_log" 2>&1 || fail 'system SSH agent discovery or export differs on the native platform'
+# 空的继承值与未设置一样；macOS 仍不选择 Linux socket。
+# shellcheck disable=SC2016
+run_test_command pty 30 env XDG_RUNTIME_DIR="$agent_runtime" SSH_AUTH_SOCK= DOTFILES_TEST_EXPECTED_AGENT="$expected_agent" \
+	"$real_zsh" -ic '[[ ${SSH_AUTH_SOCK-} == "$DOTFILES_TEST_EXPECTED_AGENT" ]]' \
+	>> "$case_log" 2>&1 || fail 'an empty SSH_AUTH_SOCK did not follow native platform discovery'
+[[ ! -s $case_log ]] || fail 'SSH agent discovery produced unexpected startup output'
+pass
+
+case_label='Zsh preserves an inherited SSH agent even when a system socket is available'
+case_log="$case_root/zsh-inherited-agent.log"
+# 保留另一套代理（例如 SSH 转发）的地址；不因候选 socket 存在而切换，也不探测其存活。
+# shellcheck disable=SC2016
+run_test_command pty 30 env XDG_RUNTIME_DIR="$agent_runtime" SSH_AUTH_SOCK="$agent_runtime/inherited agent" \
+	"$real_zsh" -ic '[[ $SSH_AUTH_SOCK == "$XDG_RUNTIME_DIR/inherited agent" ]]' \
+	> "$case_log" 2>&1 || fail 'an inherited SSH agent address was overwritten'
+[[ ! -s $case_log ]] || fail 'inherited SSH agent selection produced unexpected startup output'
+pass
+
+case_label='Zsh leaves the SSH agent unset without a runtime directory or real socket'
+case_log="$case_root/zsh-missing-agent.log"
+# shellcheck disable=SC2016
+run_interactive_zsh '[[ -z ${SSH_AUTH_SOCK+x} ]]' > "$case_log" 2>&1 || fail 'SSH agent was set without XDG_RUNTIME_DIR'
+# shellcheck disable=SC2016
+run_test_command pty 30 env XDG_RUNTIME_DIR= "$real_zsh" -ic '[[ -z ${SSH_AUTH_SOCK+x} ]]' \
+	>> "$case_log" 2>&1 || fail 'SSH agent was set with an empty XDG_RUNTIME_DIR'
+missing_agent_runtime="$case_root/runtime without socket"
+mkdir -p "$missing_agent_runtime"
+# shellcheck disable=SC2016
+run_test_command pty 30 env XDG_RUNTIME_DIR="$missing_agent_runtime" "$real_zsh" -ic '[[ -z ${SSH_AUTH_SOCK+x} ]]' \
+	>> "$case_log" 2>&1 || fail 'SSH agent was set without a system socket'
+: > "$missing_agent_runtime/openssh_agent"
+# shellcheck disable=SC2016
+run_test_command pty 30 env XDG_RUNTIME_DIR="$missing_agent_runtime" "$real_zsh" -ic '[[ -z ${SSH_AUTH_SOCK+x} ]]' \
+	>> "$case_log" 2>&1 || fail 'a regular file was mistaken for an SSH agent socket'
+[[ ! -s $case_log ]] || fail 'missing SSH agent inputs produced unexpected startup output'
+pass
+
 case_label='Zsh declares truecolor only for Ghostty SSH sessions'
 case_log="$case_root/zsh-truecolor.log"
 # 共享执行器清空环境并固定 TERM，SSH 变量因此由 env 覆写；断言放进启动命令，

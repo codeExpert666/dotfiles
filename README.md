@@ -133,6 +133,11 @@ chsh -s "$(command -v zsh)"
 本机交互设置放在 `~/.config/zsh/local.zsh`，登录环境放在 `~/.config/zsh/local.zprofile`；
 这两个文件不纳入仓库，doctor 会检查其语法。
 
+Linux 交互式 Zsh 在 `SSH_AUTH_SOCK` 未设置或为空、`XDG_RUNTIME_DIR` 非空且其中的
+`openssh_agent` 是 socket 时，自动使用该系统 OpenSSH agent；已有代理地址优先保留。
+这只设置连接地址，agent 服务与密钥解锁仍需单独准备。客户机使用自己的 GitHub 密钥，见
+[Multipass GitHub 认证](multipass/README.md#客户机使用自己的-github-密钥)。
+
 `Ctrl-R` 打开 Atuin 历史搜索，`Ctrl-T` 打开 fzf 路径查找，`z`/`zi` 通过 zoxide 跳转目录。
 原生 Zsh 历史保存在 `~/.local/state/zsh/history`，macOS Terminal 的额外会话保存与恢复已禁用。
 Atuin 默认关闭自动同步，bootstrap 不导入历史或登录账户；需要时手动执行：

@@ -105,7 +105,8 @@ ssh-add ~/.ssh/id_ed25519_multipass
 
 ## 日常使用
 
-以下命令均在宿主机执行，将 `ubuntu-dev` 替换为实际的实例名称；脚本命令在仓库根目录运行。
+除明确标注在客户机执行的命令外，以下命令均在宿主机执行；将 `ubuntu-dev` 替换为实际的
+实例名称，脚本命令在仓库根目录运行。
 
 ### 连接与检查
 
@@ -127,6 +128,54 @@ bash scripts/multipass.sh check --name ubuntu-dev --runtime
 - **端口转发**：支持标准 SSH 语法，例如 `ssh -L 8080:localhost:8080 ubuntu-dev`。
 - **状态检查**：`check` 属于只读探测，不会启动已停止的实例，也不会修复状态。它校验声明一致性、客户机内部归属标记（`/var/lib/dotfiles-multipass/instance.json`）及 Git HEAD 状态；附加 `--runtime` 会流式执行[受控诊断](../scripts/README.md#doctor-检查与证据)，并在出现异常时返回非零退出码。
 - **客户机内日常操作**：登录客户机后，可在 `~/workspace` 开展开发工作；如需在客户机内自检环境，可直接运行 `~/.dotfiles/scripts/doctor.sh`。
+
+### 客户机使用自己的 GitHub 密钥
+
+客户机可以使用自己生成并已向 GitHub 注册公钥的私钥，让终端和远程 IDEA 共用客户机的
+SSH agent。以下命令均在客户机执行；示例适用于系统提供 `openssh_agent` socket 的环境，
+已在 Ubuntu 26.04 原生验证。先核对系统实际提供的服务和 socket 地址：
+
+```sh
+systemctl --user cat ssh-agent.socket
+systemctl --user status ssh-agent.socket
+```
+
+系统提供该单元但尚未启用时，可执行 `systemctl --user enable --now ssh-agent.socket`。
+共享 Linux Zsh 配置仅在未继承其他 agent 地址、`XDG_RUNTIME_DIR` 非空且
+`$XDG_RUNTIME_DIR/openssh_agent` 是 socket 时设置 `SSH_AUTH_SOCK`，不创建或启动服务，
+也不解锁密钥。没有该 socket 的系统应先准备自己的 agent，并使用其实际地址。
+
+将下面条目并入客户机 `~/.ssh/config` 现有的 `Host github.com` 配置，保留已有的
+`HostName`、`Port` 等连接设置。私钥路径以 `~/.ssh/id_ed25519_github` 为例，请替换为已有
+私钥的实际路径；`%i` 由 OpenSSH 展开为当前客户机用户的 UID：
+
+```sshconfig
+Host github.com
+  User git
+  IdentityFile ~/.ssh/id_ed25519_github
+  IdentitiesOnly yes
+  IdentityAgent /run/user/%i/openssh_agent
+  AddKeysToAgent yes
+```
+
+在客户机终端加载并解锁密钥。显式指定 socket 可以确保操作客户机的 agent，即使当前
+终端继承了其他代理地址；非交互 Shell 也可以使用同样的命令：
+
+```sh
+SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/openssh_agent" ssh-add ~/.ssh/id_ed25519_github
+SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/openssh_agent" ssh-add -l
+ssh -T git@github.com
+```
+
+GitHub 返回 `You've successfully authenticated` 表示认证成功；这项测试通常仍返回退出码
+1，因为 GitHub 不提供交互 Shell。远程 IDEA 后端的 Git 调用客户机的 OpenSSH；
+`IdentityAgent` 会覆盖 `SSH_AUTH_SOCK` 的代理选择，因此 GitHub 认证按上述配置使用
+客户机 agent，密钥解锁后无需重启 IDEA。`ssh-add` 则通过环境变量选择 agent。
+
+私钥、GitHub 身份和本机 SSH 配置保留在仓库之外。无需在 `local.zsh` 和
+`local.zprofile` 中重复强制设置同一个代理地址；只有要求覆盖已有代理选择的本机策略
+才需要保留本机覆盖。agent 退出或客户机重启后需重新执行 `ssh-add`；其退出时机受用户
+会话生命周期和 `Linger` 设置影响，启用 linger 也不会自动解锁密钥或跨重启保存它。
 
 ### 重新配置或更新提交
 
