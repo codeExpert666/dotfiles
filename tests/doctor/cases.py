@@ -137,6 +137,9 @@ class DoctorTests(unittest.TestCase):
         self.assertIn("PASS deployment..agents/skills/coding-mentor", log)
         self.assertIn("PASS deployment..claude/skills/coding-mentor", log)
         self.assertIn("PASS deployment.skill-source.coding-mentor", log)
+        self.assertIn("PASS deployment..agents/skills/post-dev-review", log)
+        self.assertIn("PASS deployment..claude/skills/post-dev-review", log)
+        self.assertIn("PASS deployment.skill-source.post-dev-review", log)
         self.assertIn("PASS deployment.skill-source.astra-sol", log)
         self.assertIn("PASS deployment..agents/skills/astra-sol", log)
         self.assertIn("PASS deployment..codex/agents/sol_worker.toml", log)
@@ -228,9 +231,17 @@ class DoctorTests(unittest.TestCase):
         shutil.copytree(type(self).repo, self.repo, symlinks=True)
         self.script = self.repo / 'scripts/doctor.sh'
         self.deploy()
-        (self.repo / 'skills/.claude/skills/coding-mentor').unlink()
-        log = self.doctor('--only', 'deployment', code=1)
-        self.assertIn('FAIL deployment.skill-alias..claude/skills/coding-mentor', log)
+        for name in ('coding-mentor', 'post-dev-review'):
+            with self.subTest(skill=name):
+                alias = self.repo / 'skills/.claude/skills' / name
+                target = alias.readlink()
+                alias.unlink()
+                try:
+                    log = self.doctor('--only', 'deployment', code=1)
+                    self.assertIn('FAIL deployment.skill-alias..claude/skills/' + name, log)
+                    self.assertIn('PASS deployment..agents/skills/' + name, log)
+                finally:
+                    alias.symlink_to(target, target_is_directory=True)
 
     def test_codex_agent_copy_faults(self):
         self.deploy()

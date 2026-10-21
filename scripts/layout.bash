@@ -18,6 +18,7 @@ layout_directories=(
 layout_skill_clients=(
 	'astra-sol|.agents'
 	'coding-mentor|.agents .claude'
+	'post-dev-review|.agents .claude'
 	'shell-script-review|.agents .claude'
 )
 # Codex 拒绝代理 TOML 的符号链接，此文件单独发布为普通副本。

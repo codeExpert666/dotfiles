@@ -189,6 +189,10 @@ ln -s '../../src/<名称>' 'skills/.claude/skills/<名称>'
 
 专用技能只声明对应客户端；`astra-sol` 仅声明 `.agents`，不建立 `.claude` 入口。
 
+[post-dev-review](skills/src/post-dev-review/SKILL.md) 是共享技能，通过 `.agents` 和 `.claude`
+发现同一份源码；用于开发后的代码冗余／兼容性审视、使用文档重编排与验证，也可只执行其中一阶段。
+与其他共享技能一样，现有目录链接沿用同一份源码；新增入口通过 deploy 部署并由 doctor 核验。
+
 Codex 角色源文件位于 [codex/agents/](codex/agents/)，部署为 `~/.codex/agents/` 下的普通文件。
 首次接管或更新不同内容的角色时，先核对差异、备份并移走旧文件，再预览和部署。
 新开 Codex 会话验证角色加载与一次小任务委派；doctor 只验证部署文件。

@@ -1,0 +1,4 @@
+interface:
+  display_name: "开发后代码与文档整理"
+  short_description: "按现有行为契约整理代码冗余、兼容分支与使用文档，并验证交付结果"
+  default_prompt: "请使用 $post-dev-review 完成当前仓库开发后的代码与使用文档复核，落实本次已授权的调整并验证结果。"

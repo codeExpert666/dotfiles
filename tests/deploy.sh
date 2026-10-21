@@ -60,7 +60,7 @@ assert_unchanged "$case_work" "$case_root/work.before"
 pass
 
 case_label='shared skills and Claude aliases read the same instructions and resources'
-for name in coding-mentor shell-script-review; do
+for name in coding-mentor post-dev-review shell-script-review; do
 	shared="$case_target/.agents/skills/$name/SKILL.md"
 	alias="$case_target/.claude/skills/$name/SKILL.md"
 	# Codex 跟随 Skill 目录链接，但跳过文件级链接形式的 SKILL.md。
@@ -71,6 +71,12 @@ done
 for relative in references/review-lenses.md agents/openai.yaml; do
 	[[ $case_target/.claude/skills/shell-script-review/$relative -ef $case_repo/skills/src/shell-script-review/$relative ]] ||
 		fail "skill resource is not available through the Claude alias: $relative"
+done
+for client in .agents .claude; do
+	for relative in references/code-review.md references/docs-review.md agents/openai.yaml; do
+		[[ $case_target/$client/skills/post-dev-review/$relative -ef $case_repo/skills/src/post-dev-review/$relative ]] ||
+			fail "post-dev-review resource is not available through $client: $relative"
+	done
 done
 pass
 
@@ -171,7 +177,7 @@ for name in .stow-local-ignore README.md LICENSE COPYING .gitignore notes~; do
 	assert_absent "$case_target/$name"
 done
 for client in .agents .claude; do
-	for name in coding-mentor shell-script-review; do
+	for name in coding-mentor post-dev-review shell-script-review; do
 		assert_link "$case_target/$client/skills/$name" "$case_repo/skills/src/$name"
 	done
 done
@@ -182,7 +188,7 @@ case_log="$case_root/unstow.log"
 assert_unchanged "$case_target/src" "$case_root/src.before"
 assert_unchanged "$case_repo/skills" "$case_root/skills.before"
 for client in .agents .claude; do
-	for name in coding-mentor shell-script-review; do
+	for name in coding-mentor post-dev-review shell-script-review; do
 		assert_absent "$case_target/$client/skills/$name"
 	done
 done
