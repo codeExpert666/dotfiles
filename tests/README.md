@@ -132,6 +132,17 @@ DOTFILES_TEST_PREPARED_HOME=/path/to/prepared-home bash tests/all.sh
 目录扫描、文件树渲染、监听、Git 状态、诊断和文件操作均调用真实插件。
 所有新建、重命名、复制、移动和删除均限定在本轮临时目录；未提供缓存时明确标记为 `SKIP`。
 
+同一命令还验证 [Java hover 临时修复](config-loading/java-hover.lua)：复制 Noice、Nui 和
+`markdown` / `markdown_inline` parser 到隔离 HOME，以长 `jdt://` 链接及公开的 `Thread` 文档片段构造响应。
+调用真实 Noice formatter 与 Neovim 窗口测量，确认 120 列下 `HttpClient` 首段可显示为一行，
+80 / 120 列下 `Thread` 的属性名和 `Since` 各占一行，表格说明与标题不丢失。
+覆盖 `systemProperty`、元信息包装、宽度变化、多列表格与转义管道、短表格及不规则表格、
+普通与嵌套列表、代码块（含 Markdown 示例）、行内代码、转义标签、普通网页链接、中文与多行链接文字、
+不同 LSP 内容格式、幂等性、其他客户端、请求错误和 parser 缺失回退。
+LSP 响应来自夹具，不启动 JDTLS，也不代表 Ghostty 图形截图验收。
+按根 README 的条件逐项移除临时处理时，同步调整对应断言；全部移除后删除此 Lua 探针与
+`config-loading.sh` 中对应的缓存集成用例。
+
 macOS 默认临时目录较长，Neovim 将完整路径编码为缓存文件名时可能报 `ENAMETOOLONG`。
 遇到该错误可加 `TMPDIR=/tmp` 重跑上述命令，仍使用隔离夹具并保留全部断言。
 

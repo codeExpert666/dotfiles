@@ -35,6 +35,29 @@ Ghostty SSH 会话中的 Neovim 使用 OSC52 与本地剪贴板交换文本。�
 Java DAP 调试通过[窗口跳转配置](nvim/.config/nvim/lua/plugins/java-dap.lua)优先复用已打开的
 源码窗口，避免从输入终端命中断点时跳入固定的调试面板。设置在 `nvim-dap` 加载时自动应用。
 
+Java 的 `K` 文档浮窗使用[临时修复](nvim/.config/nvim/lua/plugins/java-hover.lua)，在 Noice 渲染前整理
+JDTLS 的 Markdown：移除 `jdt://` 链接目标以避免隐藏长链接造成大片空白；将 `{@systemProperty ...}`
+显示为代码文本；将 `Since` 显示为单行、`Impl Note` 显示为标题与正文；过宽表格改成逐项列出列名和内容，
+并保留表格标题。宽度参考 Noice hover 的 `max_width`（默认 120）与终端可用列数。
+
+仅处理 Java hover，保留普通列表及其嵌套关系、短表格、代码块（含 Markdown 示例）、行内代码、转义文本、
+普通网页链接和文档来源。元信息规则只识别顶层、单个子项的 JDTLS 包装结构，无法可靠解析的表格保留原文。
+其他语言及源码中的 `gd` 不受影响，但浮窗内被移除目标的 Java 文档链接不再可跳转。
+缺少 parser 或整理失败时回退为原始响应。部署后重启 Neovim 生效；已运行的会话需另行加载配置并重新请求 hover。
+
+上游关联与移除条件（核对日期：2026-10-24）：
+
+| 处理 | 上游关联 | 停用该处理后的验收条件 |
+| --- | --- | --- |
+| `strip_jdt_links` | [Neovim issue #14409](https://github.com/neovim/neovim/issues/14409)、[PR #42370](https://github.com/neovim/neovim/pull/42370)，PR 尚未合并，接替已关闭的 [#40897](https://github.com/neovim/neovim/pull/40897) | 修复进入本机 Neovim 后，`HttpClient` 在窄浮窗中保留链接也不再出现异常空白 |
+| `format_system_properties` | [Javadoc systemProperty 规范](https://docs.oracle.com/en/java/javase/25/docs/specs/javadoc/doc-comment-spec.html#systemproperty)；尚无已确认的直接修复 PR | 本机 JDTLS 返回的 `Thread` 文档已将两项属性转换为代码文本，不再泄露原始标签 |
+| `format_wide_tables` | [JDTLS PR #3786](https://github.com/eclipse-jdtls/eclipse.jdt.ls/pull/3786) 已合并，仅优化表格空白，本机版本仍有过宽表格；它不是完整排版修复 | 更新后的 JDTLS / Noice 在 80、120 列浮窗中能完整、清晰地显示 `Thread` 表格，列名、说明和标题均保留 |
+| `format_metadata` | JDTLS 生成嵌套列表，当前 Noice 保留列表标记；尚无已确认的直接修复 PR | `Since: 1.0` 与 `Implementation Note` 排版清晰，正常列表和代码示例仍完整 |
+
+各项独立验收后，可移除 `clean_markdown` 中相应调用、专属辅助函数及对应断言。
+全部满足后删除 `java-hover.lua` 及其已部署软链，并移除对应的
+[缓存集成回归](tests/README.md#已准备插件缓存的集成)和本说明；不要仅凭某个 PR 合并就删除整套处理。
+
 Neovim 文件树使用 Snacks Explorer：`Space e` 打开项目根目录，
 `Space E` 打开当前工作目录，`h` / `l` 收起或展开目录。连续单子目录合并为一行
 （例如 `java/io/github/voiceinsight`），遇到文件或多个子目录时保留分支；隐藏项与被忽略项仍显示。
