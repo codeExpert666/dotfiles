@@ -126,6 +126,12 @@ DOTFILES_TEST_PREPARED_HOME=/path/to/prepared-home bash tests/all.sh
 
 测试用例会将缓存复制到临时夹具中并校验来源完整性。Neovim 准备步骤会主动屏蔽 Git/curl/wget 外部下载，通过缓存解析器验证首次安装目录创建、重跑幂等性与加载失败恢复；Zsh 与 Neovim 其余调用均执行真实插件 API。该模式不是独立的第六套测试，而是对离线套件的增强集成模式。
 
+单独验证 Snacks Explorer 的紧凑目录与搜索、导航、文件操作，可运行
+`DOTFILES_TEST_PREPARED_HOME=/path/to/prepared-home bash tests/config-loading.sh`。
+该检查复制已准备的 PR #2907 插件缓存，不联网安装插件；输入和确认提示由夹具回答，
+目录扫描、文件树渲染、监听、Git 状态、诊断和文件操作均调用真实插件。
+所有新建、重命名、复制、移动和删除均限定在本轮临时目录；未提供缓存时明确标记为 `SKIP`。
+
 macOS 默认临时目录较长，Neovim 将完整路径编码为缓存文件名时可能报 `ENAMETOOLONG`。
 遇到该错误可加 `TMPDIR=/tmp` 重跑上述命令，仍使用隔离夹具并保留全部断言。
 

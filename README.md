@@ -35,6 +35,18 @@ Ghostty SSH 会话中的 Neovim 使用 OSC52 与本地剪贴板交换文本。�
 Java DAP 调试通过[窗口跳转配置](nvim/.config/nvim/lua/plugins/java-dap.lua)优先复用已打开的
 源码窗口，避免从输入终端命中断点时跳入固定的调试面板。设置在 `nvim-dap` 加载时自动应用。
 
+Neovim 文件树使用 Snacks Explorer：`Space e` 打开项目根目录，
+`Space E` 打开当前工作目录，`h` / `l` 收起或展开目录。连续单子目录合并为一行
+（例如 `java/io/github/voiceinsight`），遇到文件或多个子目录时保留分支；隐藏项与被忽略项仍显示。
+侧栏与 `Space Space` 文件搜索、`Space /` 内容搜索共用 Snacks Picker 输入框。
+合并行上的新建、重命名、复制和移动操作针对路径末端目录；需要逐层选择中间目录时，
+可将[文件树配置](nvim/.config/nvim/lua/plugins/snacks.lua)中的 `compact_folders` 改为 `false` 并重启。
+
+目录合并暂用未合并的 [Snacks PR #2907](https://github.com/folke/snacks.nvim/pull/2907)，
+插件来源与提交固定在 `snacks.lua` 和 `lazy-lock.json`；[修复模块](nvim/.config/nvim/lua/config/snacks-compact.lua)
+处理目录导航、标签、隐藏样式、符号链接与文件监听问题。升级该版本时应运行[缓存集成回归](tests/README.md#已准备插件缓存的集成)，
+并在上游正式支持后复核、移除临时来源和修复。
+
 ## 快速开始
 
 ### 部署前须知与环境要求

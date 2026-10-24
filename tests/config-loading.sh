@@ -220,6 +220,24 @@ else
 	skip 'nvim is not installed'
 fi
 
+case_label='Snacks compact explorer works with the prepared plugin cache'
+if [[ -z ${DOTFILES_TEST_PREPARED_HOME-} ]]; then
+	skip 'set DOTFILES_TEST_PREPARED_HOME for cached Snacks explorer integration'
+elif [[ -z ${real_nvim-} ]]; then
+	skip 'nvim is not installed'
+else
+	case_log="$case_root/snacks-explorer.log"
+	prepared_snacks="$DOTFILES_TEST_PREPARED_HOME/.local/share/nvim/lazy/snacks.nvim"
+	[[ -d $prepared_snacks ]] || fail 'prepared Snacks plugin cache is missing'
+	mkdir -p "$case_home/.local/share/nvim/lazy"
+	cp -R "$prepared_snacks" "$case_home/.local/share/nvim/lazy/snacks.nvim"
+	run_application "$real_nvim" --headless -u NONE -n -i NONE \
+		-l "$test_dir/config-loading/snacks-explorer.lua" "$case_home/.local/share/nvim/lazy/snacks.nvim" \
+		"$case_home/.config/nvim/lua/config/snacks-compact.lua" \
+		> "$case_log" 2>&1 || fail 'Snacks compact explorer integration failed'
+	pass
+fi
+
 case_label='Shuck CLI loads global formatting settings from the deployed config'
 if real_shuck=$(command -v shuck); then
 	case_log="$case_root/shuck.log"

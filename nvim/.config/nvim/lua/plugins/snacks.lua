@@ -1,23 +1,29 @@
--- 设置 Snacks 文件浏览器、文件名搜索和内容搜索的显示范围。
+-- 文件树和搜索统一使用 Snacks；目录合并暂时依赖固定的 PR #2907。
 return {
   {
     "folke/snacks.nvim",
+    url = "https://github.com/Dawe257/snacks.nvim.git",
+    branch = "explorer/compact-folders",
+    commit = "0e163b4982b0d48eb2853383b0ffb04d49c0625a",
     -- opts 会与 LazyVim 已有的 Snacks 配置合并。
-    opts = {
-      -- 文件浏览器也使用 picker，因此与搜索功能在此统一配置。
-      picker = {
-        -- 按来源分别配置，键名必须是 sources（复数），否则以下设置不会被读取。
-        -- hidden = true：包含以 . 开头的文件和目录，例如 .gitignore、.config/。
-        -- ignored = true：包含被 .gitignore 等规则忽略的文件，也会纳入依赖目录和构建产物。
-        sources = {
-          -- 文件浏览器（默认 Space e）：显示隐藏项和被忽略的项目。
-          explorer = { hidden = true, ignored = true },
-          -- 文件名搜索（默认 Space Space）：搜索范围包含隐藏项和被忽略的文件。
-          files = { hidden = true, ignored = true },
-          -- 内容搜索（默认 Space /）：同时搜索隐藏文件和被忽略文件中的文本。
-          grep = { hidden = true, ignored = true },
+    opts = function(_, opts)
+      local compact = require("config.snacks-compact")
+      compact.setup()
+      return vim.tbl_deep_extend("force", opts, {
+        picker = {
+          -- hidden：显示点文件；ignored：包含被忽略的文件和构建产物。
+          sources = {
+            explorer = {
+              hidden = true,
+              ignored = true,
+              compact_folders = true,
+              transform = compact.transform,
+            },
+            files = { hidden = true, ignored = true },
+            grep = { hidden = true, ignored = true },
+          },
         },
-      },
-    },
+      })
+    end,
   },
 }
