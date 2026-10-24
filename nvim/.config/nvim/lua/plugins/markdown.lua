@@ -3,6 +3,22 @@
 local markdownlint_config = vim.fn.stdpath("config") .. "/.markdownlint.json"
 
 return {
+  -- 在支持 Kitty 图形协议的终端中直接渲染 Mermaid 和 Markdown 图片。
+  {
+    "folke/snacks.nvim",
+    opts = {
+      image = {
+        enabled = true,
+        doc = {
+          -- 阅读时用图表替代源码；光标进入代码块时由 Snacks 显示源码。
+          conceal = function(_, kind)
+            return kind == "chart" or kind == "math"
+          end,
+        },
+      },
+    },
+  },
+
   -- 配置诊断：检查 Markdown 并显示警告。
   {
     "mfussenegger/nvim-lint",

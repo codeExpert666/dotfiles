@@ -32,6 +32,26 @@ Ghostty SSH 会话中的 Neovim 使用 OSC52 与本地剪贴板交换文本。�
 寄存器菜单时，`*` / `+` 显示兼容性提示，菜单不会主动读取剪贴板；显式
 `"+yy` / `"+p` 仍可复制和粘贴。
 
+Neovim 的 Markdown 诊断与格式化共用[个人规则](nvim/.config/nvim/.markdownlint.json)，
+禁用 `MD013/line-length` 行长检查，其余 Markdown 检查保留。
+
+Markdown 图片与 Mermaid 代码块通过[Markdown 配置](nvim/.config/nvim/lua/plugins/markdown.lua)
+启用 Snacks Image，在 Ghostty 中直接显示于编辑区；打开包含 `mermaid` 代码块的 `.md` 文件即可预览，
+光标离开代码块时用图表替代源码，进入代码块时显示源码以便编辑，修改后图表自动刷新。
+配置变更后重启 Neovim 生效；浏览器预览仍可用 `Space c p` 切换。
+
+图表渲染需要 ImageMagick、Mermaid CLI 及其配套的无界面浏览器。这些是可选依赖，
+不随核心 bootstrap 安装；macOS 可用以下命令准备（浏览器下载到当前用户的 Puppeteer 缓存）：
+
+```sh
+brew install imagemagick mermaid-cli
+"$(brew --prefix mermaid-cli)/libexec/lib/node_modules/@mermaid-js/mermaid-cli/node_modules/.bin/puppeteer" \
+  browsers install chrome-headless-shell
+```
+
+可运行 `:checkhealth snacks` 检查终端图形协议与渲染工具。其他文档功能所提示的 PDF、LaTeX
+工具并非 Mermaid 的依赖。
+
 Java DAP 调试通过[窗口跳转配置](nvim/.config/nvim/lua/plugins/java-dap.lua)优先复用已打开的
 源码窗口，避免从输入终端命中断点时跳入固定的调试面板。设置在 `nvim-dap` 加载时自动应用。
 
@@ -111,10 +131,10 @@ cd ~/src/dotfiles
 
 bootstrap 准备系统依赖与运行时工具链、部署配置，最后自动运行健康诊断。选择适合的 profile：
 
-| Profile   | 准备范围                                                       | 适用场景                                     |
-| --------- | -------------------------------------------------------------- | -------------------------------------------- |
-| `server`  | 命令行环境、terminfo 工具、`xterm-ghostty` 定义及基础配置     | 服务器或远程环境（字体安装在本地终端客户端） |
-| `desktop` | 额外准备 Ghostty、IosevkaTerm Nerd Font 和 Sarasa Term SC 字体 | 本地桌面机器（macOS / Ubuntu Desktop）       |
+| Profile | 准备范围 | 适用场景 |
+| --- | --- | --- |
+| `server` | 命令行环境、terminfo 工具、`xterm-ghostty` 定义及基础配置 | 服务器或远程环境（字体安装在本地终端客户端） |
+| `desktop` | 额外准备 Ghostty、IosevkaTerm Nerd Font 和 Sarasa Term SC 字体 | 本地桌面机器（macOS / Ubuntu Desktop） |
 
 profile 控制软件和字体的安装范围，配置包链接则按操作系统平台选择。
 两个 profile 均由核心 bootstrap 准备并验收 `xterm-ghostty` 定义；客户机不需要
