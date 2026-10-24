@@ -220,6 +220,28 @@ else
 	skip 'nvim is not installed'
 fi
 
+case_label='CodeCompanion chat status follows ACP state without leaking across windows or sessions'
+if [[ -z ${DOTFILES_TEST_PREPARED_HOME-} ]]; then
+	skip 'set DOTFILES_TEST_PREPARED_HOME for cached CodeCompanion status integration'
+elif [[ -z ${real_nvim-} ]]; then
+	skip 'nvim is not installed'
+else
+	case_log="$case_root/codecompanion-status.log"
+	prepared_nvim="$DOTFILES_TEST_PREPARED_HOME/.local/share/nvim"
+	mkdir -p "$case_home/.local/share/nvim/lazy" "$case_home/.local/share/nvim/site/parser"
+	for plugin in codecompanion.nvim plenary.nvim nvim-treesitter; do
+		[[ -d $prepared_nvim/lazy/$plugin ]] || fail "prepared $plugin cache is missing"
+		cp -R "$prepared_nvim/lazy/$plugin" "$case_home/.local/share/nvim/lazy/$plugin"
+	done
+	for parser in markdown markdown_inline yaml; do
+		[[ -f $prepared_nvim/site/parser/$parser.so ]] || fail "prepared $parser parser is missing"
+		cp "$prepared_nvim/site/parser/$parser.so" "$case_home/.local/share/nvim/site/parser/$parser.so"
+	done
+	run_application "$real_nvim" --headless -u NONE -n -i NONE \
+		-l "$test_dir/config-loading/codecompanion-status.lua" > "$case_log" 2>&1 || fail 'CodeCompanion status integration failed'
+	pass
+fi
+
 case_label='Java hover formats JDT links, metadata, properties and wide tables while preserving lists and code'
 if [[ -z ${DOTFILES_TEST_PREPARED_HOME-} ]]; then
 	skip 'set DOTFILES_TEST_PREPARED_HOME for cached Java hover integration'

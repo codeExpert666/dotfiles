@@ -146,6 +146,14 @@ LSP 响应来自夹具，不启动 JDTLS，也不代表 Ghostty 图形截图验�
 macOS 默认临时目录较长，Neovim 将完整路径编码为缓存文件名时可能报 `ENAMETOOLONG`。
 遇到该错误可加 `TMPDIR=/tmp` 重跑上述命令，仍使用隔离夹具并保留全部断言。
 
+同一缓存命令还运行 [CodeCompanion 状态栏回归](config-loading/codecompanion-status.lua)：
+复制锁定的 CodeCompanion、Plenary、Treesitter 和 Markdown/YAML parser，
+使用真实插件窗口、ACP 通知处理与 Neovim winbar 求值，替换代理连接，不启动 Codex 或读取凭据。
+覆盖模型/推理/模式更新、上下文容量与比例、零值和未知/非法数据、压缩后的下降、模型切换、
+恢复会话、非活动窗口、多聊天和 tab 隔离、窄窗口、文本转义，以及隐藏重开和普通窗口复用。
+另以原生 winbar 的高亮范围与左右留白，验证标题/值/分隔符区分、宽窄窗口居中及主题切换。
+未提供缓存时明确标记为 `SKIP`；这些构造的通知不能代替真实代理的在线验收。
+
 ### 真实 Multipass 虚拟机验收
 
 [multipass-live.sh](multipass-live.sh) 由 [live.py](multipass/live.py) 驱动，独立于 `all.sh`，用于在真实硬件上做双版本闭环验收。它要求 Apple Silicon Mac、已加入 ssh-agent 的专用密钥、远程可拉取的完整提交 SHA 以及外网连接：
@@ -194,5 +202,5 @@ for path in Path('tests').rglob('*.py'):
 PY
 
 # 3. Lua 测试夹具代码格式校验
-stylua --check --indent-type Spaces --indent-width 2 tests/config-loading/nvim.lua tests/bootstrap/*.lua
+stylua --check --indent-type Spaces --indent-width 2 tests/config-loading/*.lua tests/bootstrap/*.lua
 ```

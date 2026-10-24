@@ -70,6 +70,12 @@ Neovim 文件树使用 Snacks Explorer：`Space e` 打开项目根目录，
 处理目录导航、标签、隐藏样式、符号链接与文件监听问题。升级该版本时应运行[缓存集成回归](tests/README.md#已准备插件缓存的集成)，
 并在上游正式支持后复核、移除临时来源和修复。
 
+Neovim 的 Codex 助手使用 [CodeCompanion + codex-acp](docs/codecompanion.md)：
+`Space a a` 打开聊天，选中代码后 `Space a i` 做局部修改，`Space a r` 审阅改动。
+CodeCompanion 固定发布版本，codex-acp 由 Mason 准备；首次使用需要完成 Codex 的 ChatGPT 登录。
+聊天顶部显示当前模型、推理等级、上下文用量与占比及权限模式；窗口较窄时自动简化字段名。
+安装、上下文、会话恢复、权限和完整按键见[使用文档](docs/codecompanion.md)。
+
 ## 快速开始
 
 ### 部署前须知与环境要求

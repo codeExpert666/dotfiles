@@ -945,7 +945,7 @@ check_nvim() {
 			report SKIP nvim.requirements 'locked LazyVim documentation is unavailable locally; no fetch attempted'
 		fi
 	fi
-	for tool in bash-language-server taplo lua-language-server shfmt stylua shellcheck shuck; do
+	for tool in bash-language-server taplo lua-language-server shfmt stylua shellcheck shuck codex-acp; do
 		location=''
 		if [[ $tool != shuck && -x $data_dir/mason/bin/$tool ]]; then
 			location="$data_dir/mason/bin/$tool"
