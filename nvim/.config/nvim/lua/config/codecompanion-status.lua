@@ -64,6 +64,16 @@ local function values(connection)
   return result
 end
 
+local function current_usage(connection, model)
+  local current = connection and usage[connection]
+  -- 在状态变更时立即失效，不能等到下一次重绘才发现中间切换过模型或会话。
+  if current and (current.session ~= connection.session_id or current.model ~= model) then
+    usage[connection] = nil
+    return nil
+  end
+  return current
+end
+
 local function count(value)
   if value == nil then
     return "待上报"
@@ -107,12 +117,7 @@ function M.render()
   local model = text(options.model, "待连接")
   local effort = text(options.thought_level, "待上报")
   local mode = text(modes[options.mode] or options.mode, "待上报")
-  local current = connection and usage[connection]
-  -- 用量属于具体会话及模型；恢复其他会话或切换模型后等待新的通知。
-  if current and (current.session ~= connection.session_id or current.model ~= options.model) then
-    usage[connection] = nil
-    current = nil
-  end
+  local current = current_usage(connection, options.model)
   local used, size = current and current.used, current and current.size
   local percent = used and size and string.format("%.1f%%", used / size * 100) or "待上报"
   local context = count(used) .. "/" .. count(size) .. " " .. percent
@@ -153,6 +158,7 @@ function M.setup()
     end
     local result = handle(self, notification)
     if matched and (update.sessionUpdate == "usage_update" or update.sessionUpdate == "config_option_update") then
+      current_usage(self, values(self).model)
       redraw()
     end
     return result
@@ -175,7 +181,13 @@ function M.setup()
       "CodeCompanionACPSessionPost",
       "CodeCompanionACPChatRestored",
     },
-    callback = redraw,
+    callback = function()
+      -- 本地配置请求与会话恢复也会更新状态，不一定经过 session/update 通知。
+      for connection in pairs(usage) do
+        current_usage(connection, values(connection).model)
+      end
+      redraw()
+    end,
   })
   vim.api.nvim_create_autocmd("BufWinEnter", {
     group = group,

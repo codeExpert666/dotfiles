@@ -112,14 +112,24 @@ function M.setup()
     for cwd, compact in pairs(cwds) do
       local root = Snacks.git.get_root(cwd)
       if root then
-        local index = root .. "/.git"
-        used[index] = true
-        Watch.start(index, function(file)
-          if vim.fs.basename(file) == "index" then
-            Git.refresh(root)
-            Watch.refresh()
-          end
-        end)
+        local git_dir = root .. "/.git"
+        -- worktree / submodule 的 .git 是指向实际 Git 目录的文件，路径也可能是相对的。
+        if vim.fn.isdirectory(git_dir) == 0 then
+          local ok, lines = pcall(vim.fn.readfile, git_dir, "", 1)
+          local target = ok and lines[1] and lines[1]:match("^gitdir: (.+)$")
+          git_dir = target
+              and vim.fs.normalize(target:sub(1, 1) == "/" and target or root .. "/" .. target, { expand_env = false })
+            or nil
+        end
+        if git_dir then
+          used[git_dir] = true
+          Watch.start(git_dir, function(file)
+            if vim.fs.basename(file) == "index" then
+              Git.refresh(root)
+              Watch.refresh()
+            end
+          end)
+        end
       end
       Tree:walk(Tree:find(cwd), function(node)
         if node.dir and (node.open or compact and node.expanded) then

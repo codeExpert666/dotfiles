@@ -130,6 +130,8 @@ DOTFILES_TEST_PREPARED_HOME=/path/to/prepared-home bash tests/all.sh
 `DOTFILES_TEST_PREPARED_HOME=/path/to/prepared-home bash tests/config-loading.sh`。
 该检查复制已准备的 PR #2907 插件缓存，不联网安装插件；输入和确认提示由夹具回答，
 目录扫描、文件树渲染、监听、Git 状态、诊断和文件操作均调用真实插件。
+Git 状态回归使用临时普通仓库和真实 worktree，覆盖 `.git` 文件的绝对/相对路径；
+核对实际索引目录已被监听，并排空夹具创建事件后，仅改变暂存区，验证暂存和取消暂存均自动刷新。
 所有新建、重命名、复制、移动和删除均限定在本轮临时目录；未提供缓存时明确标记为 `SKIP`。
 
 同一命令还验证 [Java hover 临时修复](config-loading/java-hover.lua)：复制 Noice、Nui 和
@@ -151,6 +153,7 @@ macOS 默认临时目录较长，Neovim 将完整路径编码为缓存文件名�
 使用真实插件窗口、ACP 通知处理与 Neovim winbar 求值，替换代理连接，不启动 Codex 或读取凭据。
 覆盖模型/推理/模式更新、上下文容量与比例、零值和未知/非法数据、压缩后的下降、模型切换、
 恢复会话、非活动窗口、多聊天和 tab 隔离、窄窗口、文本转义，以及隐藏重开和普通窗口复用。
+连续切换模型的回归在两次切换之间不求值 winbar，分别验证代理通知和本地配置请求都会立即清除旧统计。
 另以原生 winbar 的高亮范围与左右留白，验证标题/值/分隔符区分、宽窄窗口居中及主题切换。
 未提供缓存时明确标记为 `SKIP`；这些构造的通知不能代替真实代理的在线验收。
 

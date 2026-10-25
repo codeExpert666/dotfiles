@@ -375,6 +375,64 @@ test("hidden toggle updates where the compact chain stops", function()
   check(item(p, root .. "/java") and item(p, root .. "/java/.hidden"), "hidden toggle did not split the compact row")
 end)
 
+test("Git index changes refresh ordinary repositories and linked worktrees", function()
+  for _, kind in ipairs({ "repository", "worktree", "relative-gitdir" }) do
+    local root = fixture("index-" .. kind, { ["tracked.txt"] = "before" })
+    local function git(...)
+      local cmd = { "git", "-C", root }
+      vim.list_extend(cmd, { ... })
+      local result = vim.system(cmd, { text = true }):wait()
+      check(result.code == 0, "git fixture failed: " .. (result.stderr or ""))
+      return vim.trim(result.stdout)
+    end
+    git("init", "-q")
+    git("add", "tracked.txt")
+    git(
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.com",
+      "-c",
+      "commit.gpgsign=false",
+      "commit",
+      "-qm",
+      "initial"
+    )
+    local cwd = root
+    if kind ~= "repository" then
+      cwd = root .. "-linked"
+      git("worktree", "add", "--detach", cwd)
+      if kind == "relative-gitdir" then
+        local target = assert(vim.fn.readfile(cwd .. "/.git")[1]:match("^gitdir: (.+)$"))
+        vim.fn.writefile({ "gitdir: .." .. target:sub(#vim.fs.dirname(root) + 1) }, cwd .. "/.git")
+      end
+    end
+    local file = cwd .. "/tracked.txt"
+    vim.fn.writefile({ "after" }, file)
+    local p = open(cwd, { watch = true, git_status = true })
+    wait_for(function()
+      return item(p, file) and item(p, file).status == " M"
+    end, "initial unstaged change was not displayed: " .. kind)
+    local git_dir = git("-C", cwd, "rev-parse", "--absolute-git-dir")
+    wait_for(function()
+      return require("snacks.explorer.watch")._watches[git_dir] ~= nil
+    end, "the actual Git index directory is not watched: " .. kind)
+    settle(p)
+    -- 等待首次扫描和系统文件事件排空，避免创建夹具时的事件掩盖 index 监听缺失。
+    vim.wait(400, function()
+      return false
+    end, 20)
+    git("-C", cwd, "add", "tracked.txt")
+    wait_for(function()
+      return item(p, file) and item(p, file).status == "M "
+    end, "staging did not automatically refresh Git status: " .. kind)
+    git("-C", cwd, "reset", "-q", "HEAD", "--", "tracked.txt")
+    wait_for(function()
+      return item(p, file) and item(p, file).status == " M"
+    end, "unstaging did not automatically refresh Git status: " .. kind)
+  end
+end)
+
 test("explorer, files and grep share the picker input component", function()
   local root = fixture("input-style", { ["java/io/a.txt"] = "needle" })
   local p = open(root)

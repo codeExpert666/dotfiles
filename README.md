@@ -89,6 +89,8 @@ Neovim 文件树使用 Snacks Explorer：`Space e` 打开项目根目录，
 插件来源与提交固定在 `snacks.lua` 和 `lazy-lock.json`；[修复模块](nvim/.config/nvim/lua/config/snacks-compact.lua)
 处理目录导航、标签、隐藏样式、符号链接与文件监听问题。升级该版本时应运行[缓存集成回归](tests/README.md#已准备插件缓存的集成)，
 并在上游正式支持后复核、移除临时来源和修复。
+普通仓库和 Git worktree 暂存或取消暂存文件后，文件树中的 Git 状态会自动刷新；
+worktree 的 `.git` 文件使用绝对或相对路径均可。
 
 Neovim 的主要 AI 入口为 [Sidekick + 原生 Codex CLI](docs/sidekick.md)：
 `Space a a` 打开/隐藏，`Ctrl-.` 切换焦点，`Space a f` 添加当前文件，选区 `Space a v`

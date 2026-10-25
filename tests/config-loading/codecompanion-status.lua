@@ -204,6 +204,33 @@ check("switching models invalidates old capacity until a fresh report", function
   contains(bar(), "只读")
 end)
 
+check("model changes invalidate usage even when no winbar redraw occurs between updates", function()
+  configure(connection, "gpt-6-astra", "max", "workspace-write")
+  report(connection, 23665, 272000)
+  configure(connection, "gpt-6.1-sol", "medium", "workspace-write")
+  configure(connection, "gpt-6-astra", "max", "workspace-write")
+  contains(bar(), "待上报")
+  assert(not bar():find("272k", 1, true), "rapid model changes revived stale usage before redraw")
+  configure(connection, "gpt-6.1-sol", "high", "read-only")
+  report(connection, 42000, 200000)
+end)
+
+check("client model requests invalidate usage before the next winbar render", function()
+  local request = connection.send_rpc_request
+  connection.send_rpc_request = function(_, method, params)
+    assert(method == "session/set_config_option" and params.configId == "model", "unexpected client request")
+    return { configOptions = options(params.value, "high", "read-only") }
+  end
+  for _, model in ipairs({ "gpt-6-astra", "gpt-6.1-sol" }) do
+    assert(connection:set_model(model), "client could not set the model")
+    chat:update_metadata()
+  end
+  connection.send_rpc_request = request
+  contains(bar(), "待上报")
+  assert(not bar():find("200k", 1, true), "client model changes retained stale usage")
+  report(connection, 42000, 200000)
+end)
+
 check("restoring another session does not retain the previous session's usage", function()
   connection:use_session("restored-session")
   configure(connection, "gpt-6.1-sol", "high", "read-only")
