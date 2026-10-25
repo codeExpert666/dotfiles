@@ -70,8 +70,27 @@ local ok, err = pcall(function()
 
   local extras = vim.json.decode(table.concat(vim.fn.readfile(config .. "/lazyvim.json"), "\n"))
   assert(vim.tbl_contains(extras.extras, "lazyvim.plugins.extras.lang.toml"), "missing TOML extra")
+  assert(vim.tbl_contains(extras.extras, "lazyvim.plugins.extras.ai.sidekick"), "missing Sidekick extra")
   local lock = vim.json.decode(table.concat(vim.fn.readfile(config .. "/lazy-lock.json"), "\n"))
   assert(lock.LazyVim and lock["lazy.nvim"], "missing LazyVim or lazy.nvim lock entry")
+  assert(lock["sidekick.nvim"] and lock["codecompanion.nvim"], "missing primary or backup AI plugin lock")
+
+  -- 两套入口不能重叠，也不能把可执行映射放在备用分组前缀上。
+  local mappings = {}
+  for _, plugin in ipairs({ "sidekick", "codecompanion" }) do
+    local spec = dofile(config .. "/lua/plugins/" .. plugin .. ".lua")[1]
+    for _, key in ipairs(spec.keys) do
+      if key[2] ~= false then
+        local modes = type(key.mode) == "table" and key.mode or { key.mode or "n" }
+        for _, mode in ipairs(modes) do
+          local id = mode .. ":" .. key[1]
+          assert(not mappings[id], "duplicate AI mapping: " .. id)
+          assert(key[1] ~= "<leader>ac", "backup prefix has an executable mapping")
+          mappings[id] = plugin
+        end
+      end
+    end
+  end
 end)
 if not ok then
   print(err)

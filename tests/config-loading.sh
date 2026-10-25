@@ -220,6 +220,22 @@ else
 	skip 'nvim is not installed'
 fi
 
+case_label='Sidekick routes project contexts and keeps hidden terminal processes alive'
+if [[ -z ${DOTFILES_TEST_PREPARED_HOME-} ]]; then
+	skip 'set DOTFILES_TEST_PREPARED_HOME for cached Sidekick CLI integration'
+elif [[ -z ${real_nvim-} ]]; then
+	skip 'nvim is not installed'
+else
+	case_log="$case_root/sidekick.log"
+	prepared_sidekick="$DOTFILES_TEST_PREPARED_HOME/.local/share/nvim/lazy/sidekick.nvim"
+	[[ -d $prepared_sidekick ]] || fail 'prepared Sidekick plugin cache is missing'
+	mkdir -p "$case_home/.local/share/nvim/lazy"
+	cp -R "$prepared_sidekick" "$case_home/.local/share/nvim/lazy/sidekick.nvim"
+	run_application "$real_nvim" --headless -u NONE -n -i NONE \
+		-l "$test_dir/config-loading/sidekick.lua" > "$case_log" 2>&1 || fail 'Sidekick CLI integration failed'
+	pass
+fi
+
 case_label='CodeCompanion chat status follows ACP state without leaking across windows or sessions'
 if [[ -z ${DOTFILES_TEST_PREPARED_HOME-} ]]; then
 	skip 'set DOTFILES_TEST_PREPARED_HOME for cached CodeCompanion status integration'

@@ -1,7 +1,9 @@
-# 在 LazyVim 中使用 Codex
+# 在 LazyVim 中使用备用 CodeCompanion
 
 CodeCompanion 提供 Neovim 聊天缓冲区、选区编辑与代码审阅，codex-acp 将这些操作接到
 Codex App Server。聊天适合跨文件任务和测试，Inline 适合当前文件的局部修改。
+日常主入口是 [Sidekick + 原生 Codex CLI](sidekick.md)；本文描述备用入口，
+快捷键统一使用 `Space a c …`。两套客户端使用各自的会话，恢复同一会话前先退出旧客户端。
 
 ## 安装与登录
 
@@ -94,13 +96,13 @@ CodeCompanion v20.0.1 尚未保留通知中的容量，因此模块只补充读�
 
 | 按键 | 作用 |
 | --- | --- |
-| `Space a a` | 显示或隐藏聊天 |
-| `Space a n` | 新建 Codex 聊天 |
-| 可视模式 `Space a v` | 把选区加入最近的聊天，补充要求后提交 |
-| `Space a i` | 对当前文件发起 Inline 修改；可视模式限定选中行 |
-| `Space a p` | 打开动作与提示模板面板 |
-| `Space a r` | 打开代码审阅 |
-| `Space a c` | 为当前行或选区添加审阅评论 |
+| `Space a c c` | 显示或隐藏备用聊天 |
+| `Space a c n` | 新建 Codex 聊天 |
+| 可视模式 `Space a c v` | 把选区加入最近的聊天，补充要求后提交 |
+| `Space a c i` | 对当前文件发起 Inline 修改；可视模式限定选中行 |
+| `Space a c p` | 打开动作与提示模板面板 |
+| `Space a c r` | 打开代码审阅 |
+| `Space a c a` | 为当前行或选区添加审阅评论 |
 | `Space g g` | 打开已有 Lazygit，检查与提交全部变更 |
 
 聊天插入模式下 `Enter` 换行、`Ctrl-s` 提交；普通模式下 `Enter` 也提交。
@@ -139,7 +141,7 @@ Blink 自动补全聊天上下文和命令，回答由现有 Markdown 渲染器�
 
 ## 局部修改与项目任务
 
-选中函数后按 `Space a i`，输入“处理空输入，保持其他行为不变”。Inline 使用独立的
+选中函数后按 `Space a c i`，输入“处理空输入，保持其他行为不变”。Inline 使用独立的
 Codex 会话，从只读模式开始；CodeCompanion 仅批准修改缓冲区的临时副本，
 再把结果带回源码缓冲区供审阅。需要测试、运行命令或修改其他文件时，使用聊天。
 
@@ -153,7 +155,7 @@ diff 中 `ga` 接受当前块、`gr` 拒绝当前块，`}` / `{` 切换块；`g2
 
 ## 审阅、反馈与提交
 
-完成一轮任务后按 `Space a r`。审阅窗口中：
+完成一轮任务后按 `Space a c r`。审阅窗口中：
 
 | 按键 | 作用 |
 | --- | --- |

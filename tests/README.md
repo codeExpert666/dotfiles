@@ -154,6 +154,14 @@ macOS 默认临时目录较长，Neovim 将完整路径编码为缓存文件名�
 另以原生 winbar 的高亮范围与左右留白，验证标题/值/分隔符区分、宽窄窗口居中及主题切换。
 未提供缓存时明确标记为 `SKIP`；这些构造的通知不能代替真实代理的在线验收。
 
+同一命令还运行 [Sidekick CLI 回归](config-loading/sidekick.lua)：复制锁定的 Sidekick，
+使用真实 Neovim 终端与 `cat` 验证项目/worktree 目录切换时的会话隔离、文件引用、
+选区位置与文本范围、焦点切换、隐藏后原进程重用，以及缺少 CLI/tmux 时的明确报错和项目隔离。
+该探针禁用 mux 并仅注册本地终端后端，不发现宿主 tmux、不启动 Codex、不读取个人认证。
+普通离线探针同时检查两套 AI 映射不重叠。
+真实 Codex CLI、tmux 保活、历史恢复需单独在临时 Git 项目中进行原生 PTY 验收；
+PTY 结果不代表 Ghostty GUI 渲染或 Ubuntu 原生行为，记录见 [Sidekick 使用文档](../docs/sidekick.md)。
+
 ### 真实 Multipass 虚拟机验收
 
 [multipass-live.sh](multipass-live.sh) 由 [live.py](multipass/live.py) 驱动，独立于 `all.sh`，用于在真实硬件上做双版本闭环验收。它要求 Apple Silicon Mac、已加入 ssh-agent 的专用密钥、远程可拉取的完整提交 SHA 以及外网连接：

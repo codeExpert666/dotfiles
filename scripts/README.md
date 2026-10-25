@@ -178,7 +178,9 @@ bash scripts/doctor.sh --only zsh --only nvim --runtime
 新会话通过不代表已经运行的 Shell 或编辑器已加载新配置。Atuin 任意环境覆盖、Shuck 项目
 配置、GUI 渲染、剪贴板及 SSH 客户端字体不由这些检查完整覆盖，须结合实际使用验收。
 nvim 模块包含 codex-acp；离线检查只确认命令可执行，不读取 Codex 凭据或发起模型请求；
-聊天、Inline、权限与恢复按 [CodeCompanion 使用文档](../docs/codecompanion.md)另行验收。
+独立 Codex CLI 与 tmux 是额外依赖，Sidekick 的真实交互与恢复按
+[Sidekick 使用文档](../docs/sidekick.md)另行验收；备用聊天、Inline、权限与恢复见
+[CodeCompanion 使用文档](../docs/codecompanion.md)。
 
 `dependencies.xterm-ghostty` 保留真实目标 HOME，移除探针的 `TERMINFO`/`TERMINFO_DIRS`
 覆盖后执行 `infocmp -x xterm-ghostty`。不依赖当前 TERM 或 TTY，因此 server 与

@@ -1,4 +1,4 @@
--- Codex 通过 ACP 提供代理能力；CodeCompanion 负责聊天、上下文和改动审阅。
+-- 备用入口：Codex 通过 ACP 提供代理能力，CodeCompanion 负责聊天、Inline 与审阅。
 local function codex_adapter(name, mode)
   return function()
     return require("codecompanion.adapters").extend("codex", {
@@ -52,15 +52,20 @@ return {
       opts = { language = "Chinese" },
     },
     keys = {
-      { "<leader>aa", "<cmd>CodeCompanionChat Toggle<cr>", desc = "Toggle Codex Chat" },
-      { "<leader>an", "<cmd>CodeCompanionChat<cr>", desc = "New Codex Chat" },
-      { "<leader>av", ":CodeCompanionChat Add<cr>", mode = "x", desc = "Add Selection to Codex" },
-      { "<leader>ai", "<cmd>CodeCompanion<cr>", desc = "Codex Inline Edit" },
-      { "<leader>ai", ":CodeCompanion<cr>", mode = "x", desc = "Codex Inline Edit Selection" },
-      { "<leader>ap", "<cmd>CodeCompanionActions<cr>", mode = { "n", "x" }, desc = "Codex Actions" },
-      { "<leader>ar", "<cmd>CodeCompanionCodeReview<cr>", desc = "Review Codex Changes" },
-      { "<leader>ac", "<cmd>CodeCompanionCodeReview Comment<cr>", desc = "Comment on Code" },
-      { "<leader>ac", ":CodeCompanionCodeReview Comment<cr>", mode = "x", desc = "Comment on Selection" },
+      { "<leader>acc", "<cmd>CodeCompanionChat Toggle<cr>", desc = "CodeCompanion: Toggle Chat (Backup)" },
+      { "<leader>acn", "<cmd>CodeCompanionChat<cr>", desc = "CodeCompanion: New Chat" },
+      { "<leader>acv", ":CodeCompanionChat Add<cr>", mode = "x", desc = "CodeCompanion: Add Selection" },
+      { "<leader>aci", "<cmd>CodeCompanion<cr>", desc = "CodeCompanion: Inline Edit" },
+      { "<leader>aci", ":CodeCompanion<cr>", mode = "x", desc = "CodeCompanion: Inline Edit Selection" },
+      { "<leader>acp", "<cmd>CodeCompanionActions<cr>", mode = { "n", "x" }, desc = "CodeCompanion: Actions" },
+      { "<leader>acr", "<cmd>CodeCompanionCodeReview<cr>", desc = "CodeCompanion: Review Changes" },
+      { "<leader>aca", "<cmd>CodeCompanionCodeReview Comment<cr>", desc = "CodeCompanion: Comment on Code" },
+      {
+        "<leader>aca",
+        ":CodeCompanionCodeReview Comment<cr>",
+        mode = "x",
+        desc = "CodeCompanion: Comment on Selection",
+      },
     },
   },
   {
@@ -70,6 +75,6 @@ return {
   {
     "folke/which-key.nvim",
     optional = true,
-    opts = { spec = { { "<leader>a", group = "ai", mode = { "n", "x" } } } },
+    opts = { spec = { { "<leader>ac", group = "CodeCompanion (Backup)", mode = { "n", "x" } } } },
   },
 }

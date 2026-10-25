@@ -90,11 +90,16 @@ Neovim 文件树使用 Snacks Explorer：`Space e` 打开项目根目录，
 处理目录导航、标签、隐藏样式、符号链接与文件监听问题。升级该版本时应运行[缓存集成回归](tests/README.md#已准备插件缓存的集成)，
 并在上游正式支持后复核、移除临时来源和修复。
 
-Neovim 的 Codex 助手使用 [CodeCompanion + codex-acp](docs/codecompanion.md)：
-`Space a a` 打开聊天，选中代码后 `Space a i` 做局部修改，`Space a r` 审阅改动。
-CodeCompanion 固定发布版本，codex-acp 由 Mason 准备；首次使用需要完成 Codex 的 ChatGPT 登录。
-聊天顶部显示当前模型、推理等级、上下文用量与占比及权限模式；窗口较窄时自动简化字段名。
-安装、上下文、会话恢复、权限和完整按键见[使用文档](docs/codecompanion.md)。
+Neovim 的主要 AI 入口为 [Sidekick + 原生 Codex CLI](docs/sidekick.md)：
+`Space a a` 打开/隐藏，`Ctrl-.` 切换焦点，`Space a f` 添加当前文件，选区 `Space a v`
+添加位置与文本；补充要求后用 CLI 原生 `Enter` 提交。使用 LazyVim 官方 extra，关闭 NES，
+无需 Copilot；额外安装独立 `codex` 与 `tmux`，沿用个人登录与配置。从项目或 worktree
+目录启动 Neovim，以 `:pwd` 确定 CLI 目录；隐藏或退出 Neovim 后 tmux 中的任务仍可运行。
+
+[CodeCompanion + codex-acp](docs/codecompanion.md) 保留为备用：`Space a c c` 聊天，
+`Space a c i` 局部 Inline，`Space a c r` 审阅，`Space a c a` 添加审阅评论。
+插件、Mason 适配器、居中高亮的模型/推理/上下文/权限状态栏及原有功能继续保留。
+依赖、完整按键、项目工作流和恢复方式见两份使用文档。
 
 ## 快速开始
 
