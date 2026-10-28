@@ -5,7 +5,10 @@
 # 顺序表示首选字体和回退字体。
 font-family = "IosevkaTerm Nerd Font"
 font-family = "Sarasa Term SC"
-font-size = 15
+font-size = 18
+
+# 增加字符单元高度以提升行间距
+adjust-cell-height = 10%
 
 # 设置新窗口的初始字符网格尺寸和窗口内边距。
 window-width = 105

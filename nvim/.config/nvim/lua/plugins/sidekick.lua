@@ -55,6 +55,7 @@ return {
         tools = { codex = { cmd = { "codex", "--no-daemon" } } },
         win = {
           layout = "right",
+          split = { width = 0.3 },
           config = function(terminal)
             -- 只调整 Sidekick 自建会话，避免 tmux 的默认 Ctrl-b 前缀吞掉 CLI 按键。
             if terminal.mux_backend == "tmux" and terminal.mux_session then

@@ -7,6 +7,7 @@
 
 配置启用 [LazyVim 官方 Sidekick extra](https://www.lazyvim.org/extras/ai/sidekick)，
 并在 [sidekick.lua](../nvim/.config/nvim/lua/plugins/sidekick.lua) 中覆盖 CLI 和按键。
+终端默认在右侧展开，占 Neovim 总宽度的 30%。
 NES、Copilot 状态和普通模式 Tab 接管已关闭，不需要 Copilot 或额外 HTTP 模型。
 插件提交记录在 [lazy-lock.json](../nvim/.config/nvim/lazy-lock.json)，现有插件未整体升级。
 
