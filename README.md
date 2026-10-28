@@ -13,7 +13,7 @@
 | 配置模块                       | 部署方式   | 平台支持 | 部署入口（相对 HOME）                | 内容与特性                                                |
 | ------------------------------ | ---------- | -------- | ------------------------------------ | --------------------------------------------------------- |
 | [zsh](zsh)                     | Stow 软链  | 全平台   | `.zshenv`、`.config/zsh/`            | 补全、语法高亮、历史搜索与目录跳转                        |
-| [nvim](nvim)                   | Stow 软链  | 全平台   | `.config/nvim/`                      | LazyVim，Bash、Zsh 与 Markdown 编辑                       |
+| [nvim](nvim)                   | Stow 软链  | 全平台   | `.config/nvim/`                      | LazyVim，Bash、Zsh、Markdown 与 Python 编辑               |
 | [git](git)                     | Stow 软链  | 全平台   | `.config/git/config.shared`          | 共享别名、快进拉取、delta 与 zdiff3                       |
 | [ghostty](ghostty)             | Stow 软链  | 全平台   | `.config/ghostty/config.ghostty`     | 字体、主题、透明度、剪贴板与 SSH 集成                     |
 | [ghostty-macos](ghostty-macos) | Stow 软链  | 仅 macOS | `.config/ghostty/platform.ghostty`   | macOS 背景模糊、光标着色器、快捷终端与 Option 键          |
@@ -64,6 +64,13 @@ brew install imagemagick mermaid-cli
 
 可运行 `:checkhealth snacks` 检查终端图形协议与渲染工具。其他文档功能所提示的 PDF、LaTeX
 工具并非 Mermaid 的依赖。
+
+Python 使用 [LazyVim 官方语言扩展](https://www.lazyvim.org/extras/lang/python)：Pyright 提供补全、
+跳转与类型分析，Ruff 提供诊断和保存时格式化，并接入现有 DAP 与 Neotest。
+bootstrap 会准备相应插件、Mason 工具（`pyright`、`ruff`、`debugpy`）与 Treesitter parser；
+已有环境启用扩展后，重启 Neovim 并等待自动安装完成，也可用 `:Mason` 检查工具状态。
+在 Python 文件中按 `Space c v` 选择项目虚拟环境，`Space d c` 启动调试，`Space t t` 运行当前文件测试，
+`Space t r` 运行光标所在的测试。项目依赖及测试运行器（如 `pytest`）应安装在项目虚拟环境中。
 
 Java DAP 调试通过[窗口跳转配置](nvim/.config/nvim/lua/plugins/java-dap.lua)优先复用已打开的
 源码窗口，避免从输入终端命中断点时跳入固定的调试面板。设置在 `nvim-dap` 加载时自动应用。
