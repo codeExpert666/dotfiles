@@ -89,6 +89,11 @@ Neovim 探针还通过模拟会话环境检查 Ghostty SSH 下的 OSC52 provider
 并用真实 Neovim provider 与模拟终端回复验证复制、粘贴及普通 yank；这不代表真实
 Ghostty / SSH 的交互验收。
 
+Starship 检查用模拟 macOS / GNOME 回复驱动真实提示符渲染，覆盖 Latte / Macchiato
+选择、缓存复用与源配置更新、个人覆盖、缓存写入失败及无桌面回退。
+已准备缓存模式还用真实 Catppuccin 插件验证亮暗往返切换及原 Macchiato 高亮保持不变；
+这些检查不代替系统外观切换时的原生 GUI 验收。
+
 ### multipass
 
 通过公开入口和命令/VM 替身验证宿主编排的完整状态机与安全约定，完全离线运行且不连接真实 Multipass：

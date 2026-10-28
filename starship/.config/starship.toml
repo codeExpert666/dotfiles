@@ -1,5 +1,5 @@
-# 基于 Starship 的 Tokyo Night 预设修改。
-# 来源：https://starship.rs/presets/tokyo-night
+# 基于 Starship 的 Catppuccin Powerline 预设修改。
+# 来源：https://starship.rs/presets/catppuccin-powerline
 # 本仓库调整了身份显示、模块组合和提示符行为。
 # 上游版权与 ISC 许可声明如下：
 # ISC License
@@ -17,157 +17,262 @@
 # ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 # OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-# 唯一的个人提示符配置；Starship 从 ~/.config/starship.toml 自动读取。
-# 为支持 JSON Schema 的编辑器提供补全与类型检查；这行不控制外观。
-"$schema" = "https://starship.rs/config-schema.json"
+# 默认入口仍为 ~/.config/starship.toml；个性化修改维护在此处。
+"$schema" = 'https://starship.rs/config-schema.json'
 
-# 在每次新提示符前插入一个空行；format 末尾的 \n 继续把输入符号放到第二行。
+# 保留两行提示符、SSH 身份显示与 Git / 容器上下文；配色和分段沿用官方预设。
 add_newline = true
-
-# 保留明确的扫描和外部命令超时，便于排查大型仓库中的提示符延迟。
 scan_timeout = 30
 command_timeout = 500
 
-# 顶层 format 同时决定模块顺序和允许出现的模块。
-# 系统图标与按条件显示的 user@host 共用首个浅蓝色块。
-# 目录、Git、语言/容器、耗时/时间分别使用四段 Tokyo Night 色块。
-# 首块右侧的背景色空格统一写在顶层，身份模块隐藏时仍保留完整留白。
 format = """
-[░▒▓](#a3aed2)\
+[](red)\
 $os\
 $username\
 $hostname\
-[ ](bg:#a3aed2)\
-[](bg:#769ff0 fg:#a3aed2)\
+[ ](bg:red)\
+[](bg:peach fg:red)\
 $directory\
-[](fg:#769ff0 bg:#394260)\
+[](bg:yellow fg:peach)\
 $git_branch\
 $git_state\
 $git_status\
-[](fg:#394260 bg:#212736)\
-$java\
+[](fg:yellow bg:green)\
+$c\
+$rust\
 $golang\
+$nodejs\
+$bun\
+$php\
+$java\
+$kotlin\
+$haskell\
+$python\
+[](fg:green bg:sapphire)\
+$conda\
 $docker_context\
 $kubernetes\
-[](fg:#212736 bg:#1d2230)\
-$cmd_duration\
+[](fg:sapphire bg:lavender)\
 $time\
-[ ](fg:#1d2230)\
-\n$character"""
+[ ](fg:lavender)\
+$cmd_duration\
+$line_break\
+$character"""
 
-# username 默认不会在普通本地会话中始终显示；SSH 或 root 等场景由模块规则决定。
-# 普通身份采用深色文字；root 使用同一浅蓝背景上的深红色强调。
-# 用户名前的两个空格拉开与系统图标的距离，并随用户名模块一起显示或隐藏。
+# 默认深色；Zsh 在亮色外观下从本文件生成只改变 palette 的缓存副本。
+palette = 'catppuccin_macchiato'
+
+[os]
+disabled = false
+style = "bg:red fg:crust"
+
+[os.symbols]
+Windows = " "
+Ubuntu = "󰕈 "
+SUSE = " "
+Raspbian = "󰐿 "
+Mint = "󰣭 "
+Macos = "󰀵 "
+Manjaro = " "
+Linux = "󰌽 "
+Gentoo = "󰣨 "
+Fedora = "󰣛 "
+Alpine = " "
+Amazon = " "
+Android = " "
+AOSC = " "
+Arch = "󰣇 "
+Artix = "󰣇 "
+CachyOS = " "
+CentOS = " "
+Debian = "󰣚 "
+Redhat = "󱄛 "
+RedHatEnterprise = "󱄛 "
+Void = " "
+
 [username]
 show_always = false
-style_user = "bold fg:#090c0c bg:#a3aed2"
-style_root = "bold fg:#8c2432 bg:#a3aed2"
-format = "[  $user]($style)"
+style_user = "bg:red fg:crust"
+style_root = "bold bg:red fg:crust"
+format = '[$user]($style)'
 
-# 主机名只在 SSH 会话中显示；@ 随本模块一起隐藏，与用户名共用背景色。
+# SSH 中拼接 user@host，本地普通用户仍只显示系统图标。
 [hostname]
 ssh_only = true
 ssh_symbol = ""
-style = "bold fg:#090c0c bg:#a3aed2"
-format = "[@$hostname]($style)"
+style = "bg:red fg:crust"
+format = '[@$hostname]($style)'
 
-# 操作系统图标与身份信息共用第一段；图标依赖 Nerd Font，右侧留白由顶层统一补齐。
-[os]
-disabled = false
-style = "bg:#a3aed2 fg:#090c0c"
-format = "[ $symbol]($style)"
-
-[os.symbols]
-Windows = "󰍲"
-Ubuntu = "󰕈"
-SUSE = ""
-Raspbian = "󰐿"
-Mint = "󰣭"
-Macos = "󰀵"
-Manjaro = ""
-Linux = "󰌽"
-Gentoo = "󰣨"
-Fedora = "󰣛"
-Alpine = ""
-Amazon = ""
-Android = ""
-AOSC = ""
-Arch = "󰣇"
-Artix = "󰣇"
-EndeavourOS = ""
-CentOS = ""
-Debian = "󰣚"
-Redhat = "󱄛"
-RedHatEnterprise = "󱄛"
-Pop = ""
-
-# 目录段最多保留三层，并优先截断到 Git 仓库根目录。
 [directory]
-style = "fg:#e3e5e5 bg:#769ff0"
+style = "bg:peach fg:crust"
 format = "[ $path ]($style)"
 truncation_length = 3
 truncation_symbol = "…/"
 truncate_to_repo = true
 
-# 这些替换只匹配同名路径组件；使用其他语言或目录名时保持原名。
 [directory.substitutions]
 "Documents" = "󰈙 "
 "Downloads" = " "
-"Music" = " "
+"Music" = "󰝚 "
 "Pictures" = " "
+"Developer" = "󰲋 "
 
-# Git 分支、rebase/merge 等操作状态和工作区状态共用第三段背景色。
 [git_branch]
 symbol = ""
-style = "bg:#394260"
-format = '[[ $symbol $branch ](fg:#769ff0 bg:#394260)]($style)'
+style = "bg:yellow"
+format = '[[ $symbol $branch ](fg:crust bg:yellow)]($style)'
 
 [git_state]
-style = "bg:#394260"
-format = '[[ $state( $progress_current/$progress_total) ](fg:#769ff0 bg:#394260)]($style)'
+style = "bg:yellow"
+format = '[[ $state( $progress_current/$progress_total) ](fg:crust bg:yellow)]($style)'
 
 [git_status]
-style = "bg:#394260"
-format = '[[($all_status$ahead_behind )](fg:#769ff0 bg:#394260)]($style)'
+style = "bg:yellow"
+format = '[[($all_status$ahead_behind )](fg:crust bg:yellow)]($style)'
 
-# Java、Go 与容器上下文只在各自检测条件满足时进入第四段。
-[java]
-symbol = ""
-style = "bg:#212736"
-format = '[[ $symbol ($version) ](fg:#769ff0 bg:#212736)]($style)'
+[nodejs]
+symbol = ""
+style = "bg:green"
+format = '[[ $symbol( $version) ](fg:crust bg:green)]($style)'
+
+[bun]
+symbol = ""
+style = "bg:green"
+format = '[[ $symbol( $version) ](fg:crust bg:green)]($style)'
+
+[c]
+symbol = " "
+style = "bg:green"
+format = '[[ $symbol( $version) ](fg:crust bg:green)]($style)'
+
+[rust]
+symbol = ""
+style = "bg:green"
+format = '[[ $symbol( $version) ](fg:crust bg:green)]($style)'
 
 [golang]
 symbol = ""
-style = "bg:#212736"
-format = '[[ $symbol ($version) ](fg:#769ff0 bg:#212736)]($style)'
+style = "bg:green"
+format = '[[ $symbol( $version) ](fg:crust bg:green)]($style)'
+
+[php]
+symbol = ""
+style = "bg:green"
+format = '[[ $symbol( $version) ](fg:crust bg:green)]($style)'
+
+[java]
+symbol = " "
+style = "bg:green"
+format = '[[ $symbol( $version) ](fg:crust bg:green)]($style)'
+
+[kotlin]
+symbol = ""
+style = "bg:green"
+format = '[[ $symbol( $version) ](fg:crust bg:green)]($style)'
+
+[haskell]
+symbol = ""
+style = "bg:green"
+format = '[[ $symbol( $version) ](fg:crust bg:green)]($style)'
+
+[python]
+symbol = ""
+style = "bg:green"
+format = '[[ $symbol( $version)(\(#$virtualenv\)) ](fg:crust bg:green)]($style)'
 
 [docker_context]
 symbol = ""
-style = "bg:#212736"
-format = '[[ $symbol $context ](fg:#769ff0 bg:#212736)]($style)'
-only_with_files = true
+style = "bg:sapphire"
+format = '[[ $symbol( $context) ](fg:crust bg:sapphire)]($style)'
 
-# Kubernetes 先保留样式但默认禁用；确认 kubeconfig 与上下文切换习惯后再改为 false。
+# Kubernetes 仍默认关闭，沿用既有的显式启用方式。
 [kubernetes]
 symbol = "󱃾"
-style = "bg:#212736"
-format = '[[ $symbol $context ](fg:#769ff0 bg:#212736)]($style)'
+style = "bg:sapphire"
+format = '[[ $symbol $context ](fg:crust bg:sapphire)]($style)'
 disabled = true
 
-# 超过两秒的命令显示耗时；24 小时时钟沿用上游 Tokyo Night 的最后一段。
-[cmd_duration]
-min_time = 2000
-style = "bg:#1d2230"
-format = '[[ 󱎫 $duration ](fg:#a0a9cb bg:#1d2230)]($style)'
+[conda]
+symbol = "  "
+style = "fg:crust bg:sapphire"
+format = '[$symbol$environment ]($style)'
+ignore_base = false
 
 [time]
 disabled = false
 time_format = "%R"
-style = "bg:#1d2230"
-format = '[[  $time ](fg:#a0a9cb bg:#1d2230)]($style)'
+style = "bg:lavender"
+format = '[[  $time ](fg:crust bg:lavender)]($style)'
 
-# 输入符号单独位于第二行；成功、失败与 Vim normal mode 使用不同颜色或方向。
+[line_break]
+disabled = false
+
 [character]
-success_symbol = "[❯](bold #9ece6a)"
-error_symbol = "[❯](bold #f7768e)"
-vimcmd_symbol = "[❮](bold #9ece6a)"
+disabled = false
+success_symbol = '[❯](bold fg:green)'
+error_symbol = '[❯](bold fg:red)'
+vimcmd_symbol = '[❮](bold fg:green)'
+vimcmd_replace_one_symbol = '[❮](bold fg:lavender)'
+vimcmd_replace_symbol = '[❮](bold fg:lavender)'
+vimcmd_visual_symbol = '[❮](bold fg:yellow)'
+
+[cmd_duration]
+min_time = 2000
+style = "fg:lavender"
+format = '[ in $duration ]($style)'
+
+[palettes.catppuccin_latte]
+rosewater = "#dc8a78"
+flamingo = "#dd7878"
+pink = "#ea76cb"
+mauve = "#8839ef"
+red = "#d20f39"
+maroon = "#e64553"
+peach = "#fe640b"
+yellow = "#df8e1d"
+green = "#40a02b"
+teal = "#179299"
+sky = "#04a5e5"
+sapphire = "#209fb5"
+blue = "#1e66f5"
+lavender = "#7287fd"
+text = "#4c4f69"
+subtext1 = "#5c5f77"
+subtext0 = "#6c6f85"
+overlay2 = "#7c7f93"
+overlay1 = "#8c8fa1"
+overlay0 = "#9ca0b0"
+surface2 = "#acb0be"
+surface1 = "#bcc0cc"
+surface0 = "#ccd0da"
+base = "#eff1f5"
+mantle = "#e6e9ef"
+crust = "#dce0e8"
+
+[palettes.catppuccin_macchiato]
+rosewater = "#f4dbd6"
+flamingo = "#f0c6c6"
+pink = "#f5bde6"
+mauve = "#c6a0f6"
+red = "#ed8796"
+maroon = "#ee99a0"
+peach = "#f5a97f"
+yellow = "#eed49f"
+green = "#a6da95"
+teal = "#8bd5ca"
+sky = "#91d7e3"
+sapphire = "#7dc4e4"
+blue = "#8aadf4"
+lavender = "#b7bdf8"
+text = "#cad3f5"
+subtext1 = "#b8c0e0"
+subtext0 = "#a5adcb"
+overlay2 = "#939ab7"
+overlay1 = "#8087a2"
+overlay0 = "#6e738d"
+surface2 = "#5b6078"
+surface1 = "#494d64"
+surface0 = "#363a4f"
+base = "#24273a"
+mantle = "#1e2030"
+crust = "#181926"

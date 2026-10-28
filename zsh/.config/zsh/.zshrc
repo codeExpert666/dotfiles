@@ -101,7 +101,14 @@ fi
 
 # 若已安装 Starship，则加载提示符钩子，按当前目录、Git 状态和上一条命令结果渲染提示符。
 # 它只接管提示符；放在其他提示符配置之后，避免初始化结果再次被覆盖。
-(($+commands[starship])) && eval "$(starship init zsh)"
+if (($+commands[starship])); then
+	eval "$(starship init zsh)"
+	# Starship 先保存命令退出码和耗时，再为即将显示的提示符选择亮暗配色。
+	# shuck: source=starship.zsh
+	source "$ZDOTDIR/starship.zsh" || return
+	autoload -Uz add-zsh-hook
+	add-zsh-hook precmd _dotfiles_starship_theme
+fi
 
 # 本机交互设置最后覆盖默认值和工具初始化；登录环境放在 local.zprofile。
 # 高亮插件仍在本机按键绑定等调整之后加载。

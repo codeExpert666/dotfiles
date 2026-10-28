@@ -220,6 +220,22 @@ else
 	skip 'nvim is not installed'
 fi
 
+case_label='Catppuccin follows light and dark backgrounds with the previous Macchiato highlights'
+if [[ -z ${DOTFILES_TEST_PREPARED_HOME-} ]]; then
+	skip 'set DOTFILES_TEST_PREPARED_HOME for cached Catppuccin integration'
+elif [[ -z ${real_nvim-} ]]; then
+	skip 'nvim is not installed'
+else
+	case_log="$case_root/colorscheme.log"
+	prepared_catppuccin="$DOTFILES_TEST_PREPARED_HOME/.local/share/nvim/lazy/catppuccin"
+	[[ -d $prepared_catppuccin ]] || fail 'prepared Catppuccin plugin cache is missing'
+	mkdir -p "$case_home/.local/share/nvim/lazy"
+	cp -R "$prepared_catppuccin" "$case_home/.local/share/nvim/lazy/catppuccin"
+	run_application "$real_nvim" --headless -u NONE -n -i NONE \
+		-l "$test_dir/config-loading/colorscheme.lua" > "$case_log" 2>&1 || fail 'Catppuccin automatic appearance integration failed'
+	pass
+fi
+
 case_label='Sidekick routes project contexts and keeps hidden terminal processes alive'
 if [[ -z ${DOTFILES_TEST_PREPARED_HOME-} ]]; then
 	skip 'set DOTFILES_TEST_PREPARED_HOME for cached Sidekick CLI integration'
@@ -323,11 +339,20 @@ else
 	skip 'lazygit or delta is not installed'
 fi
 
-case_label='Starship loads the sole default Tokyo Night configuration'
+case_label='Starship follows system appearance with Catppuccin Powerline and preserves personal overrides'
 if real_starship=$(command -v starship); then
 	case_log="$case_root/starship.log"
-	run_application "$real_starship" print-config format > "$case_log" 2>&1 || fail 'Starship could not read the default configuration'
-	grep -Fq '[░▒▓](#a3aed2)' "$case_log" || fail 'Starship did not load Tokyo Night by default'
+	# shellcheck disable=SC2016
+	run_interactive_zsh '(( ${precmd_functions[(Ie)_dotfiles_starship_theme]} >
+  ${precmd_functions[(Ie)prompt_starship_precmd]} && ${precmd_functions[(Ie)prompt_starship_precmd]} > 0 )) || exit 1
+  prompt_starship_preexec
+  false | (exit 7)
+  prompt_starship_precmd
+  _dotfiles_starship_theme
+  [[ $STARSHIP_CMD_STATUS == 7 && ${STARSHIP_PIPE_STATUS[*]} == "1 7" ]]' \
+		> "$case_log" 2>&1 || fail 'appearance hook does not run after Starship saves command status'
+	run_application "$real_zsh" -f "$test_dir/config-loading/starship.zsh" "$real_starship" \
+		>> "$case_log" 2>&1 || fail 'Starship appearance, cache or override behavior differs'
 	pass
 else
 	skip 'starship is not installed'

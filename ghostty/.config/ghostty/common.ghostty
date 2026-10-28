@@ -35,12 +35,12 @@ shell-integration-features = ssh-env,ssh-terminfo
 # 关闭窗口、标签页或分屏时不显示确认提示。
 confirm-close-surface = false
 
-# 使用 95% 不透明背景和 Catppuccin Macchiato 深色主题。
+# 使用 95% 不透明背景，按系统外观切换 Catppuccin Latte / Macchiato。
 background-opacity = 0.95
-theme = "Catppuccin Macchiato"
+theme = light:Catppuccin Latte,dark:Catppuccin Macchiato
 
 # 使用线性颜色混合并校正文字渲染。
 alpha-blending = linear-corrected
 
-# 窗口界面固定为深色。
-window-theme = dark
+# 窗口界面与系统外观同步。
+window-theme = system

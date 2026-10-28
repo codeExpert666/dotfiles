@@ -18,7 +18,7 @@
 | [ghostty](ghostty)             | Stow 软链  | 全平台   | `.config/ghostty/config.ghostty`     | 字体、主题、透明度、剪贴板与 SSH 集成                     |
 | [ghostty-macos](ghostty-macos) | Stow 软链  | 仅 macOS | `.config/ghostty/platform.ghostty`   | macOS 背景模糊、光标着色器、快捷终端与 Option 键          |
 | [lazygit](lazygit)             | Stow 软链  | 全平台   | `.config/lazygit/config.yml`         | delta 差异渲染，按 `e` 调用 Neovim                        |
-| [starship](starship)           | Stow 软链  | 全平台   | `.config/starship.toml`              | Tokyo Night 提示符，SSH 下显示 user@host                  |
+| [starship](starship)           | Stow 软链  | 全平台   | `.config/starship.toml`              | Catppuccin Powerline 提示符，SSH 下显示 user@host         |
 | [atuin](atuin)                 | Stow 软链  | 全平台   | `.config/atuin/config.toml`          | 本地历史搜索与疑似凭据过滤                                |
 | [shuck](shuck)                 | Stow 软链  | 全平台   | `.config/shuck/shuck.toml`           | 命令行与语言服务器共用的 Zsh 格式规则                     |
 | [vim](vim)                     | Stow 软链  | 全平台   | `.vimrc`                             | 后备编辑器，状态使用 XDG state                            |
@@ -27,6 +27,19 @@
 
 Zsh 交互会话提供 `lg`（`lazygit`）和 `mp`（系统 `multipass`）别名。`mp` 调用原生命令，
 仓库的开发机编排入口仍是 `bash scripts/multipass.sh`。
+
+Ghostty 随系统外观自动切换 **Catppuccin Latte（亮）/ Macchiato（暗）**，窗口界面也跟随系统。
+修改配置后按 `Cmd+Shift+,` 重新加载；字体、透明度及光标效果沿用原设置。
+LazyVim 使用同样的两种配色，由 Neovim 的终端背景检测切换；重启 Neovim 生效。
+Ghostty 支持向已运行的 Neovim（0.11+）报告外观变化；其他终端或 tmux 需要透传相应协议，
+否则可能只在启动时检测。手动设置 `background` 会影响自动检测。
+
+Starship 采用[官方 Catppuccin Powerline 预设](https://starship.rs/presets/catppuccin-powerline)，
+保留两行提示符及 SSH 身份显示。在新 Zsh 会话中，macOS 与 GNOME 会在每次显示新提示符前
+按系统外观选择 Latte / Macchiato；系统外观改变后按一次回车即可刷新。
+其他桌面或无桌面环境默认 Macchiato。SSH 会话读取远端机器的外观，无法据此跟随本机系统。
+亮色副本自动生成到 `${XDG_CACHE_HOME:-~/.cache}/starship/catppuccin-latte.toml`，
+仅维护 `.config/starship.toml` 即可；个人 `STARSHIP_CONFIG` 覆盖仍然优先。
 
 Ghostty SSH 会话中的 Neovim 使用 OSC52 与本地剪贴板交换文本。按 `"` 打开
 寄存器菜单时，`*` / `+` 显示兼容性提示，菜单不会主动读取剪贴板；显式
@@ -282,5 +295,5 @@ Codex 角色源文件位于 [codex/agents/](codex/agents/)，部署为 `~/.codex
   来源和本地调整见[着色器说明](ghostty-macos/.config/ghostty/shaders/README.md)。
 - Ghostty 终端定义：[MIT License](scripts/bootstrap/terminfo/LICENSE)，
   固定版本和生成方式见[来源说明](scripts/bootstrap/terminfo/README.md)。
-- Starship 配置基于[官方 Tokyo Night 预设](https://starship.rs/presets/tokyo-night)，
+- Starship 配置基于[官方 Catppuccin Powerline 预设](https://starship.rs/presets/catppuccin-powerline)，
   保留 ISC 许可；完整声明见[配置文件](starship/.config/starship.toml)。
