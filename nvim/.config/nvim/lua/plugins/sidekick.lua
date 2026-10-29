@@ -52,7 +52,13 @@ return {
       cli = {
         mux = { enabled = true, backend = "tmux", create = "terminal" },
         -- 本机包装器按次覆盖桌面 MCP，已需 embedded 模式；显式选择以免回退警告。
-        tools = { codex = { cmd = { "codex", "--no-daemon" } } },
+        tools = {
+          codex = {
+            cmd = { "codex", "--no-daemon" },
+            -- 交给 Codex 滚动正文；Sidekick 的整屏回看会把输入框一起滚走。
+            native_scroll = true,
+          },
+        },
         win = {
           layout = "right",
           split = { width = 0.3 },
@@ -91,6 +97,7 @@ return {
       pcall(vim.keymap.del, "n", "<leader>uN")
       LazyVim.cmp.actions.ai_nes = nil
       require("sidekick").setup(opts)
+      require("config.sidekick-mouse").setup()
     end,
     keys = {
       { "<tab>", false, mode = "n" },

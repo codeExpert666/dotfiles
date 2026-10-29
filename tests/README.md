@@ -165,6 +165,9 @@ macOS 默认临时目录较长，Neovim 将完整路径编码为缓存文件名�
 同一命令还运行 [Sidekick CLI 回归](config-loading/sidekick.lua)：复制锁定的 Sidekick，
 使用真实 Neovim 终端与 `cat` 验证项目/worktree 目录切换时的会话隔离、文件引用、
 选区位置与文本范围、焦点切换、隐藏后原进程重用，以及缺少 CLI/tmux 时的明确报错和项目隔离。
+另以[鼠标回归](config-loading/sidekick-mouse.lua)中的模拟 TUI 捕获真实鼠标事件，
+覆盖活动终端及编辑区普通/插入/可视模式下悬停终端的上下滚轮、坐标、焦点保留，
+并确认普通编辑区滚动和其他工具不被接管。
 该探针禁用 mux 并仅注册本地终端后端，不发现宿主 tmux、不启动 Codex、不读取个人认证。
 普通离线探针同时检查两套 AI 映射不重叠。
 真实 Codex CLI、tmux 保活、历史恢复需单独在临时 Git 项目中进行原生 PTY 验收；

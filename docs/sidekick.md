@@ -112,6 +112,13 @@ Sidekick 按工具名和工作目录标识 tmux 会话；不同 Git worktree 使
 Sidekick 自建 tmux 会话的前缀键也被关闭，避免默认 `Ctrl-b` 截走原生输入；
 不修改用户的 tmux 配置或其他 tmux 会话。
 
+鼠标滚轮由 Codex 原生处理，滚动对话正文时输入框保持固定。配置通过
+`native_scroll = true` 关闭 Sidekick 的整屏快照回看，避免输入框随快照一起滚动。
+焦点在编辑区时，将指针悬停在 Codex 正文上也能上下滚动，键盘焦点保留在编辑区；
+配置将非活动 Codex 窗口的滚轮事件直接转交给终端，避免 Neovim 滚动整个终端缓冲区。
+保持终端输入模式；若已按 `Ctrl-q` 进入终端普通模式，先按 `i` 回到输入模式。
+应用这项配置后重启 Neovim，再用 `Space a a` 重连即可，tmux 中的 Codex 无需退出。
+
 ## 日常任务
 
 1. 从项目目录打开 Neovim，保存相关文件，确认 `:pwd`。
@@ -178,6 +185,10 @@ codex resume <session-id>     # 恢复指定会话
 - 历史恢复被拒绝：退出占用同一会话的 CLI/ACP 客户端，再恢复。
 - 按键不生效：`:verbose nmap <leader>aa`、`:verbose tmap <C-.>` 查看最终映射；
   重启 Neovim，避免旧插件映射留在当前进程。
+- 滚轮把输入框一起滚走：确认已重启 Neovim，且处于终端输入模式。Codex 应使用
+  全屏模式；若此前用 `/tui` 选择了滚动历史模式，切回全屏并按提示重启 Codex。
+  `--no-alt-screen` 会强制滚动历史模式，见
+  [OpenAI CLI 参数说明](https://learn.chatgpt.com/docs/developer-commands?surface=cli)。
 
 离线配置与缓存集成：
 
@@ -186,8 +197,10 @@ bash tests/config-loading.sh
 DOTFILES_TEST_PREPARED_HOME="$HOME" TMPDIR=/tmp bash tests/config-loading.sh
 ```
 
-缓存检查使用真实 Sidekick 终端和 `cat`，验证目录隔离、文件/选区输入、焦点和隐藏复用，
-不读取凭据、不启动模型或连接宿主 tmux；CodeCompanion 状态栏另有缓存回归。
+缓存检查使用真实 Sidekick 终端和 `cat`，验证目录隔离、文件/选区输入、焦点和隐藏复用；
+模拟 TUI 另行验证活动终端及编辑区普通/插入/可视模式下悬停终端的上下滚轮，
+确认滚轮转发、坐标和焦点保留。检查不读取凭据、不启动模型或连接宿主 tmux；
+CodeCompanion 状态栏另有缓存回归。
 这些检查与真实 Codex PTY、Ghostty GUI 验收的边界见[测试文档](../tests/README.md)。
 升级 Sidekick 时同时复核目录选择逻辑使用的 `sidekick.cli.state` API、窗口控制键和
 LazyVim extra 默认映射，再定向更新锁文件。
