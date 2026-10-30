@@ -2,6 +2,8 @@
 local data = vim.fn.stdpath("data")
 vim.opt.rtp:append(data .. "/lazy/noice.nvim")
 vim.opt.rtp:append(data .. "/lazy/nui.nvim")
+vim.opt.rtp:append(data .. "/lazy/blink.cmp")
+vim.opt.rtp:prepend(vim.fn.stdpath("config"))
 vim.cmd("syntax on")
 vim.o.columns, vim.o.lines = 160, 60
 
@@ -253,6 +255,87 @@ local function check_thread(win, lines)
 end
 render(normalized, check_thread, 120)
 render(normalized, check_thread, 80)
+
+-- 补全文档走 Blink draw，而非 Noice hover；同时验证已有 draw 扩展仍被调用。
+local draws = 0
+local blink_opts = {
+  completion = {
+    documentation = {
+      draw = function(ctx)
+        draws = draws + 1
+        return ctx.default_implementation({ detail = ctx.item.detail })
+      end,
+    },
+  },
+}
+spec[2].opts(nil, blink_opts)
+local draw = blink_opts.completion.documentation.draw
+local comparator = (
+  "A comparison function, which imposes a *total ordering* on some collection of objects. "
+  .. "Comparators can be passed to a sort method (such as [Collections.sort](%s) or [Arrays.sort](%s)) "
+  .. "to allow precise control over the sort order. Comparators can also be used to control the order of "
+  .. "certain data structures (such as [sorted sets](%s) or [sorted maps](%s)), or to provide an ordering "
+  .. "for collections of objects that don't have a [natural ordering](%s)."
+):format(url, url, url, url, url)
+local item = {
+  client_id = 1,
+  detail = "java.util.Comparator",
+  documentation = { kind = "markdown", value = comparator },
+  textEdit = { newText = "Comparator" },
+  additionalTextEdits = { { newText = "import java.util.Comparator;" } },
+}
+local item_snapshot = vim.deepcopy(item)
+local rendered
+local function draw_item(candidate)
+  draw({
+    item = candidate,
+    window = { config = { max_width = 80 } },
+    default_implementation = function(overrides)
+      rendered =
+        vim.tbl_extend("force", { detail = candidate.detail, documentation = candidate.documentation }, overrides or {})
+      return "drawn"
+    end,
+  })
+  return rendered.documentation
+end
+local completion_doc = draw_item(item)
+assert(not completion_doc.value:find("jdt://", 1, true), "Blink missed JDT links")
+assert(vim.deep_equal(item, item_snapshot), "completion cache, insertion or import edits changed")
+assert(rendered.detail == item.detail and draws == 1, "existing draw or signature was lost")
+for _, id in ipairs({ 2, 3 }) do
+  local other = vim.tbl_extend("force", item, { client_id = id })
+  assert(draw_item(other) == item.documentation, "another completion client's documentation changed")
+end
+for _, doc in ipairs({ comparator, { kind = "plaintext", value = comparator } }) do
+  assert(draw_item(vim.tbl_extend("force", item, { documentation = doc })) == doc, "Blink plaintext was parsed")
+end
+vim.treesitter.get_string_parser = function()
+  error("missing parser")
+end
+assert(draw_item(item) == item.documentation, "Blink did not fall back on parser failure")
+vim.treesitter.get_string_parser = parser
+local function blink_height(documentation)
+  local buf = vim.api.nvim_create_buf(false, true)
+  require("blink.cmp.lib.window.docs").render_detail_and_documentation({
+    bufnr = buf,
+    detail = item.detail,
+    documentation = documentation,
+    max_width = 80,
+    use_treesitter_highlighting = true,
+  })
+  local win = vim.api.nvim_open_win(buf, false, { relative = "editor", row = 0, col = 0, width = 80, height = 25 })
+  vim.wo[win].wrap, vim.wo[win].linebreak = true, true
+  vim.wo[win].conceallevel, vim.wo[win].concealcursor = 2, "n"
+  vim.cmd("redraw!")
+  local height = vim.api.nvim_win_text_height(win, { start_row = 2, end_row = 2 }).all
+  assert(vim.api.nvim_buf_get_lines(buf, 0, 1, false)[1] == item.detail)
+  vim.api.nvim_win_close(win, true)
+  vim.api.nvim_buf_delete(buf, { force = true })
+  return height
+end
+local blink_before, blink_after = blink_height(item.documentation), blink_height(completion_doc)
+assert(blink_before > blink_after and blink_after == 6, "Comparator completion still has concealed-link gaps")
+print(("PASS Blink Comparator: %d -> %d screen rows at 80 columns"):format(blink_before, blink_after))
 print(
   ("PASS Java hover: HttpClient %d -> %d rows; Thread metadata, tags, tables, lists and failure fallback checked"):format(
     before,

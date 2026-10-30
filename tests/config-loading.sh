@@ -286,7 +286,7 @@ else
 	case_log="$case_root/java-hover.log"
 	prepared_nvim="$DOTFILES_TEST_PREPARED_HOME/.local/share/nvim"
 	mkdir -p "$case_home/.local/share/nvim/lazy" "$case_home/.local/share/nvim/site/parser"
-	for plugin in noice.nvim nui.nvim; do
+	for plugin in noice.nvim nui.nvim blink.cmp; do
 		[[ -d $prepared_nvim/lazy/$plugin ]] || fail "prepared $plugin cache is missing"
 		cp -R "$prepared_nvim/lazy/$plugin" "$case_home/.local/share/nvim/lazy/$plugin"
 	done
