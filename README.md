@@ -85,6 +85,11 @@ JDTLS 的 Markdown：移除 `jdt://` 链接目标以避免隐藏长链接造成�
 其他语言及源码中的 `gd` 不受影响，但浮窗内被移除目标的 Java 文档链接不再可跳转。
 缺少 parser 或整理失败时回退为原始响应。部署后重启 Neovim 生效；已运行的会话需另行加载两个入口并重新打开文档。补全文档只调整显示，不修改候选缓存、插入内容或附加导入。
 
+Blink 的 Java 文档另有[局部代码块显示修复](nvim/.config/nvim/lua/config/java-documentation-view.lua)：
+在绘制后隐藏闭合代码围栏整行，以及无语言代码块两侧的空白行，避免 `Comparator` 公式显示反引号和多余留白。
+只添加当前文档缓冲区的显示标记，不删除原文、不改全局 Treesitter 查询；保留代码内部空行、带语言代码块的空白和正常段落间距。
+每次绘制都会清理旧标记；遇到其他客户端、未闭合围栏或 parser 失败时保留原始显示。
+
 上游关联与移除条件（上游状态核对日期：2026-10-24；补全文档接入：2026-10-30）：
 
 | 处理 | 上游关联 | 停用该处理后的验收条件 |
@@ -93,6 +98,12 @@ JDTLS 的 Markdown：移除 `jdt://` 链接目标以避免隐藏长链接造成�
 | `format_system_properties` | [Javadoc systemProperty 规范](https://docs.oracle.com/en/java/javase/25/docs/specs/javadoc/doc-comment-spec.html#systemproperty)；尚无已确认的直接修复 PR | 本机 JDTLS 返回的 `Thread` 文档已将两项属性转换为代码文本，不再泄露原始标签 |
 | `format_wide_tables` | [JDTLS PR #3786](https://github.com/eclipse-jdtls/eclipse.jdt.ls/pull/3786) 已合并，仅优化表格空白，本机版本仍有过宽表格；它不是完整排版修复 | 更新后的 JDTLS / Noice 在 80、120 列浮窗中能完整、清晰地显示 `Thread` 表格，列名、说明和标题均保留 |
 | `format_metadata` | JDTLS 生成嵌套列表，当前 Noice 保留列表标记；尚无已确认的直接修复 PR | `Since: 1.0` 与 `Implementation Note` 排版清晰，正常列表和代码示例仍完整 |
+
+围栏修复关联 [render-markdown issue #577](https://github.com/MeanderingProgrammer/render-markdown.nvim/issues/577)
+及 [Blink issue #2637](https://github.com/saghen/blink.cmp/issues/2637)。上游解决全局查询冲突与整行隐藏后，
+停用局部修复，先打开 Markdown，再查看 `Comparator` 补全文档：两段公式应各占一行、围栏无额外占行，
+正常代码与段落间距保持完整。通过后删除 `config/java-documentation-view.lua`、已部署软链、Blink draw 中的
+`apply` 调用以及对应回归；这项可独立于长链接清理移除。
 
 各项独立验收后，可移除 `clean_markdown` 中相应调用、专属辅助函数及对应断言。
 全部满足后删除 `plugins/java-hover.lua`、`config/java-documentation.lua` 及其已部署软链，并移除对应的

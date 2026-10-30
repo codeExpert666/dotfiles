@@ -286,10 +286,16 @@ local item = {
 }
 local item_snapshot = vim.deepcopy(item)
 local rendered
+local draw_buf = vim.api.nvim_create_buf(false, true)
 local function draw_item(candidate)
   draw({
     item = candidate,
-    window = { config = { max_width = 80 } },
+    window = {
+      config = { max_width = 80 },
+      get_buf = function()
+        return draw_buf
+      end,
+    },
     default_implementation = function(overrides)
       rendered =
         vim.tbl_extend("force", { detail = candidate.detail, documentation = candidate.documentation }, overrides or {})
@@ -336,6 +342,89 @@ end
 local blink_before, blink_after = blink_height(item.documentation), blink_height(completion_doc)
 assert(blink_before > blink_after and blink_after == 6, "Comparator completion still has concealed-link gaps")
 print(("PASS Blink Comparator: %d -> %d screen rows at 80 columns"):format(blink_before, blink_after))
+
+-- 运行真实 render-markdown 初始化，复现其对全局 Markdown 围栏查询的影响。
+vim.opt.rtp:append(data .. "/lazy/render-markdown.nvim")
+require("render-markdown").setup({ latex = { enabled = false } })
+local markdown_buf = vim.api.nvim_create_buf(false, true)
+vim.api.nvim_set_current_buf(markdown_buf)
+vim.api.nvim_buf_set_lines(markdown_buf, 0, -1, false, { "# README", "", "```", "example", "```" })
+vim.bo[markdown_buf].filetype = "markdown"
+require("render-markdown.core.ts").init()
+local shared_query = vim.treesitter.query.get("markdown", "highlights")
+local function fence_captures()
+  local tree = vim.treesitter.get_parser(markdown_buf, "markdown"):parse()[1]
+  local count = 0
+  for _, node in shared_query:iter_captures(tree:root(), markdown_buf, 0, -1) do
+    if node:type() == "fenced_code_block_delimiter" then
+      count = count + 1
+    end
+  end
+  return count
+end
+assert(fence_captures() == 0, "render-markdown conflict was not reproduced")
+local formula =
+  "For the mathematically inclined:\n\n```\n       {(x, y) such that c.compare(x, y) <= 0}.\n \n```\n\nThe quotient:\n\n```\n       {(x, y) such that c.compare(x, y) == 0}.\n \n```\n\nAfter."
+local doc_buf = vim.api.nvim_create_buf(false, true)
+local doc_win =
+  vim.api.nvim_open_win(doc_buf, false, { relative = "editor", row = 0, col = 0, width = 80, height = 25 })
+vim.wo[doc_win].conceallevel, vim.wo[doc_win].concealcursor = 2, "nvic"
+local function draw_formula(value, client_id)
+  local candidate = { client_id = client_id or 1, documentation = { kind = "markdown", value = value } }
+  draw({
+    item = candidate,
+    window = {
+      config = { max_width = 80 },
+      get_buf = function()
+        return doc_buf
+      end,
+    },
+    default_implementation = function(overrides)
+      require("blink.cmp.lib.window.docs").render_detail_and_documentation(vim.tbl_extend("force", {
+        bufnr = doc_buf,
+        documentation = candidate.documentation,
+        max_width = 80,
+        use_treesitter_highlighting = true,
+      }, overrides or {}))
+    end,
+  })
+  vim.cmd("redraw!")
+  assert(table.concat(vim.api.nvim_buf_get_lines(doc_buf, 0, -1, false), "\n") == value, "code/paragraph text changed")
+end
+local ns = vim.api.nvim_create_namespace("dotfiles.java-documentation-fences")
+draw_formula(formula)
+assert(#vim.api.nvim_buf_get_extmarks(doc_buf, ns, 0, -1, {}) == 6, "fences and edge blanks were not hidden")
+for _, range in ipairs({ { 2, 5 }, { 9, 12 } }) do
+  assert(
+    vim.api.nvim_win_text_height(doc_win, { start_row = range[1], end_row = range[2] }).all == 1,
+    "formula block does not occupy one row"
+  )
+end
+draw_formula(formula)
+assert(#vim.api.nvim_buf_get_extmarks(doc_buf, ns, 0, -1, {}) == 6, "redraw duplicated marks")
+assert(fence_captures() == 0, "local repair modified the shared query")
+draw_formula(formula, 2)
+assert(#vim.api.nvim_buf_get_extmarks(doc_buf, ns, 0, -1, {}) == 0, "marks leaked into another client's document")
+draw_formula("````markdown\n```\nliteral fence\n```\n````")
+assert(#vim.api.nvim_buf_get_extmarks(doc_buf, ns, 0, -1, {}) == 2, "nested Markdown example was hidden")
+draw_formula("```java\n\nint x = 1;\n\nint y = 2;\n\n```")
+assert(#vim.api.nvim_buf_get_extmarks(doc_buf, ns, 0, -1, {}) == 2, "typed code whitespace changed")
+draw_formula("```\nfirst\n\nsecond\n```")
+assert(#vim.api.nvim_buf_get_extmarks(doc_buf, ns, 0, -1, {}) == 2, "interior blank line was hidden")
+draw_formula("~~~\nformula\n~~~")
+assert(#vim.api.nvim_buf_get_extmarks(doc_buf, ns, 0, -1, {}) == 2, "tilde fences remain")
+draw_formula("```\nunfinished")
+assert(#vim.api.nvim_buf_get_extmarks(doc_buf, ns, 0, -1, {}) == 0, "unclosed fence was guessed")
+draw_formula(formula)
+local get_parser = vim.treesitter.get_parser
+vim.treesitter.get_parser = function()
+  error("missing parser")
+end
+require("config.java-documentation-view").apply(doc_buf, true)
+assert(#vim.api.nvim_buf_get_extmarks(doc_buf, ns, 0, -1, {}) == 0, "failed parse left stale marks")
+vim.treesitter.get_parser = get_parser
+vim.api.nvim_win_close(doc_win, true)
+print("PASS Blink formulas: one row per formula after render-markdown; code, paragraphs and shared query preserved")
 print(
   ("PASS Java hover: HttpClient %d -> %d rows; Thread metadata, tags, tables, lists and failure fallback checked"):format(
     before,

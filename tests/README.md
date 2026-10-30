@@ -139,7 +139,7 @@ Git 状态回归使用临时普通仓库和真实 worktree，覆盖 `.git` 文�
 核对实际索引目录已被监听，并排空夹具创建事件后，仅改变暂存区，验证暂存和取消暂存均自动刷新。
 所有新建、重命名、复制、移动和删除均限定在本轮临时目录；未提供缓存时明确标记为 `SKIP`。
 
-同一命令还验证 [Java hover 临时修复](config-loading/java-hover.lua)：复制 Noice、Nui、Blink 和
+同一命令还验证 [Java hover 临时修复](config-loading/java-hover.lua)：复制 Noice、Nui、Blink、render-markdown 和
 `markdown` / `markdown_inline` parser 到隔离 HOME，以长 `jdt://` 链接及公开的 `Thread` 文档片段构造响应。
 调用真实 Noice formatter 与 Neovim 窗口测量，确认 120 列下 `HttpClient` 首段可显示为一行，
 80 / 120 列下 `Thread` 的属性名和 `Since` 各占一行，表格说明与标题不丢失。
@@ -147,6 +147,8 @@ Git 状态回归使用临时普通仓库和真实 worktree，覆盖 `.git` 文�
 普通与嵌套列表、代码块（含 Markdown 示例）、行内代码、转义标签、普通网页链接、中文与多行链接文字、
 不同 LSP 内容格式、幂等性、其他客户端、请求错误和 parser 缺失回退。
 还通过 Blink 的 draw 入口与真实渲染器验证 `Comparator` 在 80 列下首段为 6 行，覆盖其他客户端、plaintext、parser 失败、已有 draw 扩展及补全候选与附加导入不变。
+围栏回归运行真实 render-markdown 初始化并确认全局隐藏规则被禁用，再用 Blink draw 验证公式各占一行。
+覆盖重复绘制、切换客户端、未闭合及波浪线围栏、嵌套 Markdown 示例、代码内部空行、带语言代码块和 parser 失败清理；同时检查原文与全局查询保持不变。
 LSP 响应来自夹具，不启动 JDTLS，也不代表 Ghostty 图形截图验收。
 按根 README 的条件逐项移除临时处理时，同步调整对应断言；全部移除后删除此 Lua 探针与
 `config-loading.sh` 中对应的缓存集成用例。

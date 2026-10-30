@@ -49,9 +49,13 @@ return {
               return ctx.default_implementation(vim.tbl_extend("force", { documentation = cleaned }, overrides or {}))
             end,
           })
-          return original(context)
+          local result = original(context)
+          require("config.java-documentation-view").apply(ctx.window:get_buf(), true)
+          return result
         end
-        return original(ctx)
+        local result = original(ctx)
+        require("config.java-documentation-view").apply(ctx.window:get_buf(), false)
+        return result
       end
     end,
   },
