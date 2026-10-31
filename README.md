@@ -41,6 +41,10 @@ Starship 采用[官方 Catppuccin Powerline 预设](https://starship.rs/presets/
 亮色副本自动生成到 `${XDG_CACHE_HOME:-~/.cache}/starship/catppuccin-latte.toml`，
 仅维护 `.config/starship.toml` 即可；个人 `STARSHIP_CONFIG` 覆盖仍然优先。
 
+Lazygit（0.66.2+）共用 Latte / Macchiato 双主题，按终端背景自动选择；delta 的亮暗参数也随之切换。
+LazyVim 内通过 Snacks 打开的 Lazygit 会收到主题变化通知，隐藏后恢复仍沿用同一进程；
+保留 `e` 返回当前 Neovim 的集成。旧 Lazygit 需升级后使用这份配置。
+
 Ghostty SSH 会话中的 Neovim 使用 OSC52 与本地剪贴板交换文本。按 `"` 打开
 寄存器菜单时，`*` / `+` 显示兼容性提示，菜单不会主动读取剪贴板；显式
 `"+yy` / `"+p` 仍可复制和粘贴。

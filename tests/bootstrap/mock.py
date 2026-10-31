@@ -315,7 +315,7 @@ elif '--version' in args:
     elif name == 'nvim':
         print('NVIM v0.12.5\nLuaJIT 2.1')
     elif name == 'lazygit':
-        print('commit=abc, version=0.65.1, os=linux, git version=2.43.0')
+        print('commit=abc, version=0.66.2, os=linux, git version=2.43.0')
     elif name in ('git', 'stow'):
         os.execv(os.environ['BOOTSTRAP_TEST_REAL_' + name.upper()], [name, *args])
     else:

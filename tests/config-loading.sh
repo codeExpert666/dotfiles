@@ -342,6 +342,18 @@ else
 	skip 'lazygit or delta is not installed'
 fi
 
+case_label='Snacks Lazygit updates a running or hidden process when the Neovim theme changes'
+if [[ -z ${DOTFILES_TEST_PREPARED_HOME-} ]]; then
+	skip 'set DOTFILES_TEST_PREPARED_HOME for cached Lazygit appearance integration'
+elif [[ -z ${real_nvim-} || -z ${real_lazygit-} || -z ${real_delta-} ]]; then
+	skip 'nvim, lazygit or delta is not installed'
+else
+	case_log="$case_root/lazygit-appearance.log"
+	run_application "$real_nvim" --headless -u NONE -n -i NONE \
+		-l "$test_dir/config-loading/lazygit-appearance.lua" > "$case_log" 2>&1 || fail 'Snacks Lazygit appearance integration failed'
+	pass
+fi
+
 case_label='Starship follows system appearance with Catppuccin Powerline and preserves personal overrides'
 if real_starship=$(command -v starship); then
 	case_log="$case_root/starship.log"

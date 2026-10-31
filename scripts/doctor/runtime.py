@@ -248,6 +248,7 @@ def zsh(repo, original, home, env):
             return
     relative_files = [".zshenv", ".config/zsh/.zshrc", ".config/zsh/.zprofile",
                       ".config/zsh/common.zsh", ".config/zsh/linux.zsh", ".config/zsh/macos.zsh",
+                      ".config/zsh/starship.zsh",
                       ".config/zsh/.zsh_plugins.txt"]
     if not all(managed(original / name, repo / "zsh" / name, "zsh.runtime") for name in relative_files):
         return
@@ -408,7 +409,8 @@ def lazygit(repo, original, home, env, config):
              env, project, observe=observe, seconds=12)
     if not completed_renders() or not delta_args.exists() or not editor_args.exists():
         raise RuntimeError("configured renderer/editor did not complete")
-    if not {"--dark", "--paging=never"}.issubset(delta_args.read_text().splitlines()):
+    if (not {"--paging=never"}.issubset(delta_args.read_text().splitlines())
+            or len({"--dark", "--light"}.intersection(delta_args.read_text().splitlines())) != 1):
         raise RuntimeError("unexpected delta options")
     if not any(Path(arg).name == "sample.txt" for arg in editor_args.read_text().splitlines()):
         raise RuntimeError("Neovim did not receive the selected file")

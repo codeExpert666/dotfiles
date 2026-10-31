@@ -10,9 +10,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'support'))
 from harness import cleanup_on_exit, run, terminal
 
 
-def main():
-    lazygit, delta = sys.argv[1:]
-    root = Path.cwd() / "lazygit-test"
+def check_appearance(lazygit, delta, appearance):
+    root = Path.cwd() / ("lazygit-test-" + appearance)
     root.mkdir()
     work = root / "repo"
     work.mkdir()
@@ -26,6 +25,7 @@ def main():
     # 在夹具中关闭网络活动和首次启动提示。
     overrides = root / "runtime.yml"
     overrides.write_text(
+        f"gui:\n  colorScheme: {appearance}\n"
         "git:\n  autoFetch: false\n"
         "update:\n  method: never\n"
         "disableStartupPopups: true\n"
@@ -54,6 +54,7 @@ def main():
         path.chmod(0o755)
     env = dict(os.environ)
     env.update(
+        COLORTERM="truecolor",
         PATH=str(bin_dir) + os.pathsep + env["PATH"],
         LG_CONFIG_FILE=f"{expected / 'config.yml'},{overrides}",
         DOTFILES_EDITOR_PROBE=str(editor_probe),
@@ -86,7 +87,10 @@ def main():
     try:
         assert completed_renders(), "Lazygit did not complete the configured delta renderer"
         assert editor_probe.exists(), "Lazygit did not invoke the configured Neovim editor"
-        assert "--dark" in delta_probe.read_text().splitlines()
+        assert "--" + appearance in delta_probe.read_text().splitlines()
+        assert "--" + ({"light": "dark", "dark": "light"}[appearance]) not in delta_probe.read_text().splitlines()
+        foreground = b"38;2;76;79;105" if appearance == "light" else b"38;2;202;211;245"
+        assert foreground in output, "Lazygit did not render the selected Catppuccin foreground"
         assert "--paging=never" in delta_probe.read_text().splitlines()
         assert any(
             Path(arg).name == "sample.txt" for arg in editor_probe.read_text().splitlines()
@@ -98,4 +102,5 @@ def main():
 
 if __name__ == "__main__":
     with cleanup_on_exit():
-        main()
+        for appearance in ("dark", "light"):
+            check_appearance(*sys.argv[1:], appearance)

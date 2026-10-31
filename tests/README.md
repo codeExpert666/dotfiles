@@ -93,6 +93,8 @@ Starship 检查用模拟 macOS / GNOME 回复驱动真实提示符渲染，覆�
 选择、缓存复用与源配置更新、个人覆盖、缓存写入失败及无桌面回退。
 已准备缓存模式还用真实 Catppuccin 插件验证亮暗往返切换及原 Macchiato 高亮保持不变；
 这些检查不代替系统外观切换时的原生 GUI 验收。
+Lazygit 的真实 TUI 检查分别验证亮暗主题和 delta 参数；缓存模式另测 Snacks 内同一
+Lazygit 进程在主题切换、隐藏与恢复后更新配色，保留编辑器集成。
 
 ### multipass
 

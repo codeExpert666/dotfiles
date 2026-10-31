@@ -26,7 +26,7 @@ npm	0	base	any
 nvim	0.12.0	base	any
 fzf	0.48.0	base	any
 delta	0.16.5	base	any
-lazygit	0.65.0	base	any
+lazygit	0.66.2	base	any
 atuin	18.20.1	base	any
 starship	1.26.0	base	any
 zoxide	0.9.0	base	any

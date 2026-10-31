@@ -7,6 +7,33 @@ os:
 git:
   # 配置差异渲染器；多个渲染器可用 | 键切换。
   diffRenderers:
-    # 使用 delta 渲染差异，--dark 采用适合深色终端背景的配色。
+    # 由 Lazygit 的终端检测结果选择 --light / --dark，不让 delta 再抢读终端。
     # --paging=never 禁用 delta 分页器，由 LazyGit 显示和滚动差异。
-    - command: delta --dark --paging=never
+    - command: delta --{{colorScheme}} --paging=never
+
+# 两个入口共用配色；亮暗主题覆盖 Snacks 生成的基础 gui.theme。
+# Catppuccin Latte / Macchiato，采用蓝色强调；背景沿用终端。
+gui:
+  colorScheme: auto
+  lightTheme:
+    activeBorderColor: ['#1e66f5', 'bold']
+    inactiveBorderColor: ['#8c8fa1']
+    searchingActiveBorderColor: ['#df8e1d', 'bold']
+    optionsTextColor: ['#1e66f5']
+    selectedLineBgColor: ['#ccd0da']
+    inactiveViewSelectedLineBgColor: ['#e6e9ef']
+    cherryPickedCommitBgColor: ['#bcc0cc']
+    cherryPickedCommitFgColor: ['#1e66f5']
+    unstagedChangesColor: ['#d20f39']
+    defaultFgColor: ['#4c4f69']
+  darkTheme:
+    activeBorderColor: ['#8aadf4', 'bold']
+    inactiveBorderColor: ['#8087a2']
+    searchingActiveBorderColor: ['#eed49f', 'bold']
+    optionsTextColor: ['#8aadf4']
+    selectedLineBgColor: ['#363a4f']
+    inactiveViewSelectedLineBgColor: ['#1e2030']
+    cherryPickedCommitBgColor: ['#494d64']
+    cherryPickedCommitFgColor: ['#8aadf4']
+    unstagedChangesColor: ['#ed8796']
+    defaultFgColor: ['#cad3f5']

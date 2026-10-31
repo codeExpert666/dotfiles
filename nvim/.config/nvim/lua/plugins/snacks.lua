@@ -9,6 +9,7 @@ return {
     opts = function(_, opts)
       local compact = require("config.snacks-compact")
       compact.setup()
+      require("config.lazygit-appearance").setup()
       return vim.tbl_deep_extend("force", opts, {
         picker = {
           -- hidden：显示点文件；ignored：包含被忽略的文件和构建产物。
