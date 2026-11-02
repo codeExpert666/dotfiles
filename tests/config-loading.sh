@@ -236,7 +236,7 @@ else
 	pass
 fi
 
-case_label='Sidekick routes project contexts, keeps hidden processes and forwards hovered mouse wheels'
+case_label='Sidekick routes contexts and file tabs, keeps hidden processes and forwards hovered mouse wheels'
 if [[ -z ${DOTFILES_TEST_PREPARED_HOME-} ]]; then
 	skip 'set DOTFILES_TEST_PREPARED_HOME for cached Sidekick CLI integration'
 elif [[ -z ${real_nvim-} ]]; then
@@ -247,11 +247,16 @@ else
 	[[ -d $prepared_sidekick ]] || fail 'prepared Sidekick plugin cache is missing'
 	mkdir -p "$case_home/.local/share/nvim/lazy"
 	cp -R "$prepared_sidekick" "$case_home/.local/share/nvim/lazy/sidekick.nvim"
+	prepared_bufferline="$DOTFILES_TEST_PREPARED_HOME/.local/share/nvim/lazy/bufferline.nvim"
+	[[ -d $prepared_bufferline ]] || fail 'prepared bufferline plugin cache is missing'
+	cp -R "$prepared_bufferline" "$case_home/.local/share/nvim/lazy/bufferline.nvim"
 	run_application "$real_nvim" --headless -u NONE -n -i NONE \
 		-l "$test_dir/config-loading/sidekick.lua" > "$case_log" 2>&1 || fail 'Sidekick CLI integration failed'
 	# 鼠标输入需要主事件循环，不能使用阻塞输入处理的 -l 探针模式。
 	run_application "$real_nvim" --headless -u NONE -n -i NONE \
 		-c "luafile $test_dir/config-loading/sidekick-mouse.lua" >> "$case_log" 2>&1 || fail 'Sidekick mouse integration failed'
+	run_application "$real_nvim" --headless -u NONE -n -i NONE \
+		-c "luafile $test_dir/config-loading/bufferline-click.lua" >> "$case_log" 2>&1 || fail 'Sidekick file tab routing failed'
 	pass
 fi
 

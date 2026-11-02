@@ -119,6 +119,11 @@ Sidekick 自建 tmux 会话的前缀键也被关闭，避免默认 `Ctrl-b` 截�
 保持终端输入模式；若已按 `Ctrl-q` 进入终端普通模式，先按 `i` 回到输入模式。
 应用这项配置后重启 Neovim，再用 `Space a a` 重连即可，tmux 中的 Codex 无需退出。
 
+焦点在 Codex 时，左键点击顶部文件标签会回到当前标签页的编辑区：优先切到已显示
+该文件的编辑窗口，否则使用最近的编辑窗口；没有可用编辑窗口时在终端左侧新建分屏。
+右侧 Codex 保持可见，进程与会话不变。焦点原本就在编辑窗口时，文件标签仍在该窗口
+切换文件。此规则仅调整 bufferline 的左键点击，不改变关闭标签或其他文件打开入口。
+
 ## 日常任务
 
 1. 从项目目录打开 Neovim，保存相关文件，确认 `:pwd`。
@@ -200,7 +205,8 @@ DOTFILES_TEST_PREPARED_HOME="$HOME" TMPDIR=/tmp bash tests/config-loading.sh
 缓存检查使用真实 Sidekick 终端和 `cat`，验证目录隔离、文件/选区输入、焦点和隐藏复用；
 模拟 TUI 另行验证活动终端及编辑区普通/插入/可视模式下悬停终端的上下滚轮，
 确认滚轮转发、坐标和焦点保留。检查不读取凭据、不启动模型或连接宿主 tmux；
-CodeCompanion 状态栏另有缓存回归。
+文件标签回归使用真实 bufferline 鼠标事件，验证终端输入模式下的点击、未保存内容、
+多编辑窗口选择、标签页隔离和无编辑窗口时的新建分屏；CodeCompanion 状态栏另有缓存回归。
 这些检查与真实 Codex PTY、Ghostty GUI 验收的边界见[测试文档](../tests/README.md)。
 升级 Sidekick 时同时复核目录选择逻辑使用的 `sidekick.cli.state` API、窗口控制键和
 LazyVim extra 默认映射，再定向更新锁文件。
