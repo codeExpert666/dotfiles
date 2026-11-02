@@ -34,6 +34,12 @@ LazyVim 使用同样的两种配色，由 Neovim 的终端背景检测切换；�
 Ghostty 支持向已运行的 Neovim（0.11+）报告外观变化；其他终端或 tmux 需要透传相应协议，
 否则可能只在启动时检测。手动设置 `background` 会影响自动检测。
 
+LazyVim 优先使用 **Material Design Icons**：文件夹、补全符号、诊断、Git 状态、
+首页、命令栏及常用界面图标统一采用该系列。文件类型沿用 `mini.icons` 的 Material 优先策略，
+补齐 React、Shell 等图标；YAML、TOML 及部分产品缺少对应标志时，保留其他系列的专属 Logo。
+图标由现有 Nerd Font 显示，颜色继续跟随 Catppuccin；集中配置见
+[`icons.lua`](nvim/.config/nvim/lua/plugins/icons.lua)，修改后重启 Neovim 生效。
+
 Starship 采用[官方 Catppuccin Powerline 预设](https://starship.rs/presets/catppuccin-powerline)，
 保留两行提示符及 SSH 身份显示。在新 Zsh 会话中，macOS 与 GNOME 会在每次显示新提示符前
 按系统外观选择 Latte / Macchiato；系统外观改变后按一次回车即可刷新。
