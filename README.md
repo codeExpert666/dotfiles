@@ -40,6 +40,10 @@ LazyVim 优先使用 **Material Design Icons**：文件夹、补全符号、诊�
 图标由现有 Nerd Font 显示，颜色继续跟随 Catppuccin；集中配置见
 [`icons.lua`](nvim/.config/nvim/lua/plugins/icons.lua)，修改后重启 Neovim 生效。
 
+LazyVim 使用官方 LuaSnip 扩展处理嵌套代码片段：例如在 `if` 条件中补全
+`fmt.Fscan` 后，`Tab` 逐个跳转函数参数，`Shift+Tab` 返回上一个参数。
+回车仍用于接受补全。已有环境需重启 Neovim，等待 lazy.nvim 安装新增的 LuaSnip 插件。
+
 Starship 采用[官方 Catppuccin Powerline 预设](https://starship.rs/presets/catppuccin-powerline)，
 保留两行提示符及 SSH 身份显示。在新 Zsh 会话中，macOS 与 GNOME 会在每次显示新提示符前
 按系统外观选择 Latte / Macchiato；系统外观改变后按一次回车即可刷新。
