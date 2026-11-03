@@ -10,6 +10,31 @@ local ok, err = pcall(function()
   assert(vim.o.relativenumber == false, "relative line numbers are enabled")
   assert(vim.g.autoformat == true, "automatic formatting is disabled")
 
+  -- 加载真实 Go ftplugin 和部署的 after 配置，验证选择占位符时 [] 用于输入而非跳转。
+  vim.opt.runtimepath:prepend(config)
+  vim.opt.runtimepath:append(config .. "/after")
+  vim.cmd("filetype plugin on")
+  vim.bo.filetype = "go"
+  for _, key in ipairs({ "[[", "[]", "][", "]]" }) do
+    assert(vim.fn.maparg(key, "s") == "", "Go navigation intercepts Select-mode input: " .. key)
+    for _, mode in ipairs({ "n", "x", "o" }) do
+      assert(vim.fn.maparg(key, mode):find("GoFindSection", 1, true), "Go navigation removed from " .. mode)
+    end
+  end
+  vim.api.nvim_buf_set_lines(0, 0, -1, false, { "Type" })
+  vim.api.nvim_feedkeys(vim.keycode("gg0v$<C-g>[]int<Esc>"), "xt", false)
+  assert(vim.api.nvim_get_current_line() == "[]int", "slice type did not replace the selected placeholder")
+  -- 文件类型切换后重新加载仍生效；用户禁用内置映射时也不应报错。
+  vim.bo.filetype = "text"
+  vim.bo.filetype = "go"
+  assert(vim.fn.maparg("[]", "s") == "", "Go Select-mode mapping returned after filetype reload")
+  vim.bo.filetype = "text"
+  vim.g.no_go_maps = true
+  vim.bo.filetype = "go"
+  assert(vim.fn.maparg("[]", "n") == "", "disabled Go mappings were recreated")
+  vim.g.no_go_maps = nil
+  vim.bo.filetype = ""
+
   -- 模拟会话环境，检查 provider 选择及个人覆盖；不连接 SSH 或系统剪贴板。
   local options = config .. "/lua/config/options.lua"
   vim.env.SSH_CONNECTION = nil

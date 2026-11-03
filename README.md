@@ -43,6 +43,8 @@ LazyVim 优先使用 **Material Design Icons**：文件夹、补全符号、诊�
 LazyVim 使用官方 LuaSnip 扩展处理嵌套代码片段：例如在 `if` 条件中补全
 `fmt.Fscan` 后，`Tab` 逐个跳转函数参数，`Shift+Tab` 返回上一个参数。
 回车仍用于接受补全。已有环境需重启 Neovim，等待 lazy.nvim 安装新增的 LuaSnip 插件。
+Go 参数占位符中可直接输入 `[]int` 等切片类型；Go 分节跳转快捷键仅在 Select 模式禁用，
+普通模式和可视模式仍可使用。
 
 Starship 采用[官方 Catppuccin Powerline 预设](https://starship.rs/presets/catppuccin-powerline)，
 保留两行提示符及 SSH 身份显示。在新 Zsh 会话中，macOS 与 GNOME 会在每次显示新提示符前

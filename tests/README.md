@@ -88,6 +88,8 @@ SSH agent 发现检查在原生平台的真实 Zsh 会话中使用隔离的 Unix
 Neovim 探针还通过模拟会话环境检查 Ghostty SSH 下的 OSC52 provider 选择和个人覆盖，
 并用真实 Neovim provider 与模拟终端回复验证复制、粘贴及普通 yank；这不代表真实
 Ghostty / SSH 的交互验收。
+Go 检查加载真实 ftplugin，验证 Select 模式可输入 `[]int`、其他模式的分节跳转保留，
+以及文件类型重载和禁用内置映射的行为。
 
 Starship 检查用模拟 macOS / GNOME 回复驱动真实提示符渲染，覆盖 Latte / Macchiato
 选择、缓存复用与源配置更新、个人覆盖、缓存写入失败及无桌面回退。
