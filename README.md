@@ -88,6 +88,11 @@ bootstrap 会准备相应插件、Mason 工具（`pyright`、`ruff`、`debugpy`�
 在 Python 文件中按 `Space c v` 选择项目虚拟环境，`Space d c` 启动调试，`Space t t` 运行当前文件测试，
 `Space t r` 运行光标所在的测试。项目依赖及测试运行器（如 `pytest`）应安装在项目虚拟环境中。
 
+Java 使用[文件类型配置](nvim/.config/nvim/after/ftplugin/java.lua)默认按 4 空格缩进，
+JDTLS 保存格式化沿用该宽度；其他语言的缩进规则保持。重开 Neovim 生效，
+已打开的 Java 缓冲区可执行 `:setlocal expandtab tabstop=4 shiftwidth=4 softtabstop=4` 后保存。
+项目显式 EditorConfig 或格式化配置仍需按项目约定核对。
+
 Java DAP 调试通过[窗口跳转配置](nvim/.config/nvim/lua/plugins/java-dap.lua)优先复用已打开的
 源码窗口，避免从输入终端命中断点时跳入固定的调试面板。设置在 `nvim-dap` 加载时自动应用。
 
