@@ -304,6 +304,21 @@ else
 	pass
 fi
 
+case_label='LazyVim icons agree across file consumers and UI adapters'
+if [[ -z ${DOTFILES_TEST_PREPARED_HOME-} ]]; then
+	skip 'set DOTFILES_TEST_PREPARED_HOME for cached LazyVim icon integration'
+elif [[ -z ${real_nvim-} ]] || ! real_tmux=$(command -v tmux); then
+	skip 'nvim or tmux is not installed'
+else
+	case_log="$case_root/icons.log"
+	run_application "$real_python" -B "$test_dir/config-loading/icons.py" \
+		--config "$case_home/.config/nvim" \
+		--plugins "$DOTFILES_TEST_PREPARED_HOME/.local/share/nvim/lazy" \
+		--nvim "$real_nvim" --tmux "$real_tmux" \
+		> "$case_log" 2>&1 || fail 'LazyVim icon integration failed'
+	pass
+fi
+
 case_label='Snacks compact explorer works with the prepared plugin cache'
 if [[ -z ${DOTFILES_TEST_PREPARED_HOME-} ]]; then
 	skip 'set DOTFILES_TEST_PREPARED_HOME for cached Snacks explorer integration'

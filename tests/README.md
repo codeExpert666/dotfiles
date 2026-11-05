@@ -206,6 +206,29 @@ bash tests/multipass-live.sh --ref '<40位提交SHA>' \
 
 ## 失败定位与维护
 
+### LazyVim 图标集成
+
+已准备缓存模式同时执行 [图标探针](config-loading/icons.lua)，由
+[隔离运行器](config-loading/icons.py) 启动完整 LazyVim 和专用 tmux 服务。
+运行器只读复用现有插件缓存，复制编辑器配置到临时 HOME；关闭插件更新、安装、
+parser 下载、LSP 和调试适配器安装，不连接 AI 或已有工作会话。
+覆盖 30 种文件名的 basename／完整路径、devicons 兼容入口、Snacks、bufferline、
+lualine、Trouble、命令行路径补全，以及误匹配、默认回退、重复初始化、
+显式文件名优先级、filetype 保持、明暗主题颜色和字形单列宽度。
+同时检查插件适配及原有标签点击回调；缺少准备缓存或 Neovim／tmux 时明确 SKIP。
+
+可单独执行，不下载依赖：
+
+```sh
+python3 -B tests/config-loading/icons.py \
+  --config "$HOME/.config/nvim" --plugins "$HOME/.local/share/nvim/lazy"
+```
+
+加 `--preview-seconds 90` 会保留合成文件树和图标样板 90 秒，并输出专用 `PREVIEW_SOCKET`；
+可在另一个终端用 `tmux -S <输出的 socket 路径> attach -t icons` 查看。
+样板缓冲区的 `d`／`l` 切换暗／亮主题，时间到后测试服务与目录自动清理。
+字形查询、终端单元格宽度和颜色断言不等同于实际 Ghostty 像素渲染验收。
+
 ### 失败排查与进程清理
 
 - **日志与输出**：Bash 套件用例失败时会输出失败阶段与对应的命令执行日志；Python unittest 用例默认缓冲（buffer）标准输出与错误，仅在断言失败时展开相关上下文；终端交互故障会保留转义后的 PTY 输出末尾。排查时应先依据断言确认所属职责，区分究竟是代码产品故障、测试夹具问题还是缺失运行前提。

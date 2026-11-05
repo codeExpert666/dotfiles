@@ -34,11 +34,19 @@ LazyVim 使用同样的两种配色，由 Neovim 的终端背景检测切换；�
 Ghostty 支持向已运行的 Neovim（0.11+）报告外观变化；其他终端或 tmux 需要透传相应协议，
 否则可能只在启动时检测。手动设置 `background` 会影响自动检测。
 
-LazyVim 优先使用 **Material Design Icons**：文件夹、补全符号、诊断、Git 状态、
-首页、命令栏及常用界面图标统一采用该系列。文件类型沿用 `mini.icons` 的 Material 优先策略，
-补齐 React、Shell 等图标；YAML、TOML 及部分产品缺少对应标志时，保留其他系列的专属 Logo。
-图标由现有 Nerd Font 显示，颜色继续跟随 Catppuccin；集中配置见
-[`icons.lua`](nvim/.config/nvim/lua/plugins/icons.lua)，修改后重启 Neovim 生效。
+LazyVim 的操作、诊断、补全、调试、测试和 AI 集成等可配置界面图标统一使用 **Material Design Icons**，
+保留树线、边框及动画所用的结构字符，颜色继续跟随 Catppuccin。
+文件图标统一由 `mini.icons` 提供，文件树、搜索、标签栏、状态栏和命令行路径补全共用规则：
+Compose／Docker 使用 Docker 标志，`pom.xml`／`maven-wrapper.properties` 使用 Maven 标志，
+`mvnw`／`mvnw.cmd` 使用 Material 终端命令图标，沿用 Maven 红色以区分执行入口与配置文件；
+`application`／`bootstrap` 配置及 profile 变体使用 Spring 标志，
+`AGENTS.md`／`AGENTS.override.md`／`CLAUDE.md` 使用机器人，`.env`／`.env.*` 使用配置图标。
+Maven、Spring、YAML、TOML 保留专属品牌／格式标志，其他文件沿用内置识别；不改变文件类型或 LSP。
+定义和命名规则集中在 [`config/icons.lua`](nvim/.config/nvim/lua/config/icons.lua)，
+插件连接位于 [`plugins/icons.lua`](nvim/.config/nvim/lua/plugins/icons.lua)，
+文件名模式由 [`icon-files.lua`](nvim/.config/nvim/lua/config/icon-files.lua) 统一接入。
+修改后正常重开 Neovim 生效；终端字体须包含相应 Nerd Fonts 字形。
+Claude／Codex CLI 和 Lazygit 自行绘制的界面不受这套规则控制。
 
 LazyVim 使用官方 LuaSnip 扩展处理嵌套代码片段：例如在 `if` 条件中补全
 `fmt.Fscan` 后，`Tab` 逐个跳转函数参数，`Shift+Tab` 返回上一个参数。

@@ -15,6 +15,9 @@ end
 vim.opt.rtp:prepend(lazypath)
 
 require("lazy").setup({
+  ui = { icons = vim.tbl_map(function(icon)
+    return icon .. " "
+  end, require("config.icons").lazy) },
   spec = {
     -- add LazyVim and import its plugins
     { "LazyVim/LazyVim", import = "lazyvim.plugins" },
