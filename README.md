@@ -96,6 +96,19 @@ bootstrap 会准备相应插件、Mason 工具（`pyright`、`ruff`、`debugpy`�
 在 Python 文件中按 `Space c v` 选择项目虚拟环境，`Space d c` 启动调试，`Space t t` 运行当前文件测试，
 `Space t r` 运行光标所在的测试。项目依赖及测试运行器（如 `pytest`）应安装在项目虚拟环境中。
 
+JSON、YAML 与 Docker 使用官方 `lang.json`、`lang.yaml`、`lang.docker` Extras；
+JSON/YAML 接入 SchemaStore，Dockerfile 使用 Hadolint 检查。XML（包括 Maven `pom.xml`）
+通过 [配置文件语言设置](nvim/.config/nvim/lua/plugins/config-languages.lua)启用 LemMinX。
+同一配置识别 Compose 标准文件名及 `compose.*.yml`／`docker-compose.*.yaml` 等变体，
+Compose 补全由专用语言服务提供，YAML/Schema 诊断由 yamlls 处理，避免重复语法提示。
+JSON、YAML 和 Compose 保留 Prettier 格式化，XML 使用 LSP 格式化。
+文本 plist 按 XML 内容识别，`.mobileconfig` 显式识别为 XML；二进制 plist 不强制映射。
+
+已有编辑器保存并正常重开后加载新增支持，可用 `:LspInfo`、`:Mason` 和 `:ConformInfo`
+分别检查语言服务、工具和格式化器。自定义 JSON/YAML 数据需要项目自己的 Schema，
+Spring 配置支持不等于完整 Spring IDE 功能，JSONL 也不按单个 JSON 文档处理。
+Schema/XSD 的远程获取仍取决于正常网络；这些编辑器检查不能替代 Maven、业务数据检查或 `plutil`。
+
 Java 使用[文件类型配置](nvim/.config/nvim/after/ftplugin/java.lua)默认按 4 空格缩进，
 JDTLS 保存格式化沿用该宽度；其他语言的缩进规则保持。重开 Neovim 生效，
 已打开的 Java 缓冲区可执行 `:setlocal expandtab tabstop=4 shiftwidth=4 softtabstop=4` 后保存。
