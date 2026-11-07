@@ -109,6 +109,12 @@ JSON、YAML 和 Compose 保留 Prettier 格式化，XML 使用 LSP 格式化。
 Spring 配置支持不等于完整 Spring IDE 功能，JSONL 也不按单个 JSON 文档处理。
 Schema/XSD 的远程获取仍取决于正常网络；这些编辑器检查不能替代 Maven、业务数据检查或 `plutil`。
 
+MyBatis Mapper XML 使用 [MyBatis 配置](nvim/.config/nvim/lua/plugins/mybatis.lua)保留 SQL 容器内的手写换行、缩进、动态标签和 CDATA；普通 XML 仍由 LemMinX 格式化。
+保存不会自动美化或恢复已经合并的 SQL，需要先整理一次已有内容。
+`blink-cmp-dictionary` 使用[本地 SQL 词表](nvim/.config/nvim/dictionaries/sql.txt)，在 Mapper 的 SQL 内容区输入至少两个字符即可出现关键词候选，例如 `sel` → `SELECT`，选择后按回车接受。
+[上下文判断](nvim/.config/nvim/lua/config/mybatis.lua)复用 XML Treesitter parser，排除 XML 标签、属性、注释及 `#{…}`／`${…}` 参数；原 LSP、路径、片段与 buffer 补全保持。
+词表提供常用 SQL 关键字及部分常用函数，不做 SQL 方言检查、表名／字段名或 Java 参数语义补全；未启用 SQL Extra 或连接数据库。已有会话保存并正常重开 Neovim 生效。
+
 Java 使用[文件类型配置](nvim/.config/nvim/after/ftplugin/java.lua)默认按 4 空格缩进，
 JDTLS 保存格式化沿用该宽度；其他语言的缩进规则保持。重开 Neovim 生效，
 已打开的 Java 缓冲区可执行 `:setlocal expandtab tabstop=4 shiftwidth=4 softtabstop=4` 后保存。
