@@ -1,4 +1,4 @@
--- 保留 JDTLS 格式化，只覆盖 else 的换行风格。
+-- 保留 JDTLS 格式化，仅调整本地声明的排版规则。
 return {
   {
     "mfussenegger/nvim-jdtls",

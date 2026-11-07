@@ -119,9 +119,13 @@ Java 使用[文件类型配置](nvim/.config/nvim/after/ftplugin/java.lua)默认
 JDTLS 保存格式化沿用该宽度；其他语言的缩进规则保持。重开 Neovim 生效，
 已打开的 Java 缓冲区可执行 `:setlocal expandtab tabstop=4 shiftwidth=4 softtabstop=4` 后保存。
 项目显式 EditorConfig 或格式化配置仍需按项目约定核对。
-Java 保存时 `else`／`else if` 另起一行，由 [JDTLS 配置](nvim/.config/nvim/lua/plugins/java-format.lua)
-加载[本地格式规则](nvim/.config/nvim/java-formatter.xml)；保留自动格式化、四空格缩进及其他默认规则。
-保存工作并正常重开 Neovim 后生效，已被合并的 `} else {` 会在下次格式化保存时拆开。
+Java 通过 [JDTLS 配置](nvim/.config/nvim/lua/plugins/java-format.lua)加载[统一排版规则](nvim/.config/nvim/java-formatter.xml)：
+
+- 复合语句后续的 `else`／`else if`、`catch`、`finally` 和 `do…while` 的 `while` 另起一行，左花括号仍跟随声明。
+- 空声明、方法／构造器、匿名类、Lambda、控制流／普通代码块及空数组初始化器采用单行 `{}`；非空主体保持多行，注释和刻意保留的空白行沿用 JDTLS 规则。
+
+JDTLS 没有统一总开关，XML 将各语法结构的原生选项配置为同一风格，不按文件名或源码文本匹配。
+保留自动格式化和四空格缩进。保存工作并正常重开 Neovim 生效；后续格式化保存会整理已有代码。
 
 Java DAP 调试通过[窗口跳转配置](nvim/.config/nvim/lua/plugins/java-dap.lua)优先复用已打开的
 源码窗口，避免从输入终端命中断点时跳入固定的调试面板。设置在 `nvim-dap` 加载时自动应用。
