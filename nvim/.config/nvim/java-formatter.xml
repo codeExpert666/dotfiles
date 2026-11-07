@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<profiles>
+  <!-- 不指定版本：JDTLS 按当前版本读取，未列出的规则沿用默认值。 -->
+  <profile kind="CodeFormatterProfile" name="Personal">
+    <setting id="org.eclipse.jdt.core.formatter.insert_new_line_before_else_in_if_statement" value="insert"/>
+  </profile>
+</profiles>
