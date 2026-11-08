@@ -282,6 +282,16 @@ else
 	pass
 fi
 
+case_label='Java test bundles preserve runtime JARs and distinct versions while excluding duplicate extensions'
+if [[ -z ${real_nvim-} ]]; then
+	skip 'nvim is not installed'
+else
+	case_log="$case_root/java-bundles.log"
+	run_application "$real_nvim" --headless -u NONE -n -i NONE \
+		-l "$test_dir/config-loading/java-bundles.lua" > "$case_log" 2>&1 || fail 'Java bundle filtering failed'
+	pass
+fi
+
 case_label='Java hover formats JDT links, metadata, properties and wide tables while preserving lists and code'
 if [[ -z ${DOTFILES_TEST_PREPARED_HOME-} ]]; then
 	skip 'set DOTFILES_TEST_PREPARED_HOME for cached Java hover integration'

@@ -131,6 +131,14 @@ JDTLS 没有统一总开关，XML 将各语法结构的原生选项配置为同�
 Java DAP 调试通过[窗口跳转配置](nvim/.config/nvim/lua/plugins/java-dap.lua)优先复用已打开的
 源码窗口，避免从输入终端命中断点时跳入固定的调试面板。设置在 `nvim-dap` 加载时自动应用。
 
+同一配置会整理 Mason 的 Java 测试扩展加载列表：排除只供测试进程使用的 runner／JaCoCo agent，
+去除指向同一文件的重复软链，并复用 JDTLS 已包含的同文件名（含版本）依赖。
+安装包保留，测试发现及 DAP 测试运行仍启用；不同版本或 JDTLS 未提供的依赖不会被排除。
+同时补齐 JDTLS 的 `_java.reloadBundles.command` 客户端查询：扩展已在初始化时完整提交，
+没有异步待补充扩展时返回空数组，保留其他客户端命令及已有的自定义同步实现。
+运行中安装／升级 Java 扩展后须重启 Java 语言服务，不提供扩展热更新。
+保存工作并正常重开 Neovim 生效。
+
 Java 的 `K` hover 和 Blink 补全文档浮窗使用[临时修复](nvim/.config/nvim/lua/plugins/java-hover.lua)，通过[共用模块](nvim/.config/nvim/lua/config/java-documentation.lua)在两种窗口渲染前整理
 JDTLS 的 Markdown：移除 `jdt://` 链接目标以避免隐藏长链接造成大片空白；将 `{@systemProperty ...}`
 显示为代码文本；将 `Since` 显示为单行、`Impl Note` 显示为标题与正文；过宽表格改成逐项列出列名和内容，

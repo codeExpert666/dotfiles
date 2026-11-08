@@ -143,6 +143,10 @@ Git 状态回归使用临时普通仓库和真实 worktree，覆盖 `.git` 文�
 核对实际索引目录已被监听，并排空夹具创建事件后，仅改变暂存区，验证暂存和取消暂存均自动刷新。
 所有新建、重命名、复制、移动和删除均限定在本轮临时目录；未提供缓存时明确标记为 `SKIP`。
 
+同一套件的 [Java 测试扩展回归](config-loading/java-bundles.lua)使用合成文件和软链，
+检查运行辅助 JAR 保留、重复扩展过滤、不同版本／缺失依赖保留及原有配置回调组合，
+还验证 reload 查询的 JSON 数组响应、客户端作用域和已有同步实现保留；只需 Neovim，不启动 JDTLS。
+
 同一命令还验证 [Java hover 临时修复](config-loading/java-hover.lua)：复制 Noice、Nui、Blink、render-markdown 和
 `markdown` / `markdown_inline` parser 到隔离 HOME，以长 `jdt://` 链接及公开的 `Thread` 文档片段构造响应。
 调用真实 Noice formatter 与 Neovim 窗口测量，确认 120 列下 `HttpClient` 首段可显示为一行，
