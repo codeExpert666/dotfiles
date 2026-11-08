@@ -2,6 +2,9 @@
 <profiles>
   <!-- 不指定版本：JDTLS 按当前版本读取，未列出的规则沿用默认值。 -->
   <profile kind="CodeFormatterProfile" name="Personal">
+    <!-- 保留 // 行注释的原始分行，不按默认注释宽度重新拆行或合并。 -->
+    <setting id="org.eclipse.jdt.core.formatter.comment.format_line_comments" value="false"/>
+
     <!-- 复合语句的后续关键字另起一行；左花括号仍在声明行。 -->
     <setting id="org.eclipse.jdt.core.formatter.insert_new_line_before_catch_in_try_statement" value="insert"/>
     <setting id="org.eclipse.jdt.core.formatter.insert_new_line_before_else_in_if_statement" value="insert"/>
