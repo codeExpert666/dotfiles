@@ -130,6 +130,14 @@ Java 通过 [JDTLS 配置](nvim/.config/nvim/lua/plugins/java-format.lua)加载[
 JDTLS 没有统一总开关，XML 将各语法结构的原生选项配置为同一风格，不按文件名或源码文本匹配。
 保留自动格式化和四空格缩进。保存工作并正常重开 Neovim 生效；后续格式化保存会整理已有代码。
 
+Java 点号后的成员补全由[局部排序配置](nvim/.config/nvim/lua/plugins/java-completion.lua)和
+[上下文判断](nvim/.config/nvim/lua/config/java-completion.lua)调整：成员方法／字段优先于后缀模板，
+完整输入 `.cast`、`.syserr` 时仍优先选择对应模板。成员之间沿用原模糊匹配与 JDTLS 排序，
+同分时按标签排列；不固定某个方法永远第一。仅作用于 Java 插入模式的点号名称区域，
+注释、字符串内容、包／导入声明、其他语言及命令行保持原排序。Java parser 不可用或解析未完成时
+沿用原排序。普通 `sysout` 等片段、方法参数占位、补全文档及原补全来源保留。
+保存工作并正常重开 Neovim 生效。
+
 Java DAP 调试通过[窗口跳转配置](nvim/.config/nvim/lua/plugins/java-dap.lua)优先复用已打开的
 源码窗口，避免从输入终端命中断点时跳入固定的调试面板。设置在 `nvim-dap` 加载时自动应用。
 
