@@ -8,6 +8,10 @@ return {
       server.settings.xml = server.settings.xml or {}
       local xml = server.settings.xml
       xml.format = xml.format or {}
+      -- 部分 format 设置会令 LemMinX 将缺省 enabled 读为 false，需显式保留格式化。
+      xml.format.enabled = true
+      -- 标签、注释之间保留最多两行空白；部分设置对象不会自动补齐服务端默认值。
+      xml.format.preservedNewlines = 2
       -- preserveSpace 是替换列表：保留 LemMinX 默认项，再追加 SQL 容器。
       local preserve = xml.format.preserveSpace
         or {
