@@ -109,6 +109,10 @@ JSON、YAML 和 Compose 保留 Prettier 格式化，XML 使用 LSP 格式化。
 Spring 配置支持不等于完整 Spring IDE 功能，JSONL 也不按单个 JSON 文档处理。
 Schema/XSD 的远程获取仍取决于正常网络；这些编辑器检查不能替代 Maven、业务数据检查或 `plutil`。
 
+所有 XML（包括 Mapper 和 `pom.xml`）通过[文件类型配置](nvim/.config/nvim/after/ftplugin/xml.lua)默认使用 4 个空格，LemMinX 保存格式化沿用缓冲区缩进宽度。
+保存工作并正常重开 LazyVim 生效；当前 XML 缓冲区可执行 `:setlocal expandtab tabstop=4 shiftwidth=4 softtabstop=4`。
+项目显式 EditorConfig 仍可覆盖默认值；SQL 容器内的既有缩进按下述规则保留，不自动整体重排。
+
 MyBatis Mapper XML 使用 [MyBatis 配置](nvim/.config/nvim/lua/plugins/mybatis.lua)保留 SQL 容器内的手写换行、缩进、动态标签和 CDATA；普通 XML 仍由 LemMinX 格式化。
 配置显式保留 `xml.format.enabled=true`，避免仅提供 `preserveSpace` 时触发 LemMinX 撤销格式化能力的启动报错。
 XML 标签与注释之间已有的一至两行空行在保存时保留，连续更多空行按 `preservedNewlines=2` 收敛为两行；SQL 容器内部仍按原样保留。
