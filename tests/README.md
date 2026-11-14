@@ -55,6 +55,9 @@ bash tests/multipass.sh Inputs.test_missing_ssh_key
 
 ### doctor
 
+Antigravity 清单另验证在不同 HOME 和含空格的仓库路径下仍能定位同一份 `coding-mentor`，
+并检查清单未部署时的诊断；这属于配置解析与部署验证，不代替 Antigravity 的实际加载验收。
+
 验证 PASS/WARN/FAIL/SKIP 的诊断判定逻辑、遇到独立故障时继续报告其他检查项的能力，以及绝不修改被测系统真实状态的只读边界。覆盖部署缺失、工具版本失配及 Java/Maven runtime 路径分歧。借助真实 PTY 终端与应用替身夹具检查 TUI 交互、编辑器交接与子进程清理；路径与权限故障必须报告失败，不得误判为健康。
 终端定义回归在无 TTY、TERM 未设置或为 `dumb` 时均检查缺失失败，并验证真实目标 HOME
 中的 `~/.terminfo` 可被发现，不被隔离探针 HOME 或 `TERMINFO` 覆盖掩盖。

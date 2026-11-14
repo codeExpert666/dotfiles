@@ -13,6 +13,8 @@
   package's `.stow-local-ignore`; per-skill directory links in the same package
   expose them at the clients' discovery paths. `scripts/layout.bash` declares
   the required clients per skill; `astra-sol` has only an `.agents` entry.
+  Antigravity's `skills/.gemini/config/skills.json` is deployed by the same
+  package and selects `coding-mentor` from the deployed `.agents/skills/`.
 - Codex custom agents live in `codex/agents/` and deploy as regular copies
   outside Stow because Codex rejects symlinked role files; personal Codex config,
   credentials, and runtime state remain outside version control.

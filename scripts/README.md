@@ -83,12 +83,17 @@ deploy 按 [layout.bash](layout.bash) 选择平台配置，保持公共父目录
 | ---------------- | ------------------------------------------------------------------------------------------------------------------------ |
 | 普通配置         | Stow 建立文件级链接，不折叠整个目录                                                                                      |
 | Skills           | 客户端入口链接到包内入口，再链接到 `skills/src/<名称>`；`src` 由 [.stow-local-ignore](../skills/.stow-local-ignore) 排除 |
+| Antigravity 清单 | Stow 部署 `~/.gemini/config/skills.json`；通过相对路径引用 `.agents/skills/`，仅选择 `coding-mentor` |
 | 个人 Git 入口    | `~/.config/git/config` 不存在时创建普通文件，包含直接的 `include.path = config.shared`；已有文件须包含该项，不自动改写   |
 | Ghostty 平台入口 | macOS 部署 `ghostty-macos`，Linux 上该入口必须缺席                                                                       |
 | Codex 角色       | 复制到 `~/.codex/agents/`；相同普通文件复用，内容不同或目标为链接、目录时保留原件并报错                                  |
 
 Skill 的必需客户端由 `layout_skill_clients` 声明，doctor 不从现存链接反推范围。
 `astra-sol` 仅声明 `.agents`；这是客户端使用约定，其他扫描该目录的客户端仍可能发现它。
+Antigravity 的加载范围由 [skills.json](../skills/.gemini/config/skills.json) 的 `include_only`
+独立限定；`.gemini` 和 `.gemini/config` 必须为真实目录，个人设置及运行状态与清单共存。
+已有普通清单须先核对、备份并移走，再执行 `--dry-run` 和 `--apply`，不自动合并或覆盖。
+doctor 核验清单的部署链接；应用是否加载成功需在 Antigravity 的 Customizations → Installed 确认。
 Codex 的 `.codex` 和 `.codex/agents` 保持真实目录，允许个人配置、认证状态及其他代理共存；
 修改仓库不会自动更新已部署的角色副本。
 

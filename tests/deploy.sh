@@ -96,6 +96,7 @@ mkdir -p "$case_target/.codex" "$case_target/.dsh" "$case_target/.agents/skills/
 printf 'model = "local-model"\n' > "$case_target/.codex/config.toml"
 printf 'name = "local_worker"\n' > "$case_target/.codex/agents/local_worker.toml"
 printf '{"theme":"dark"}\n' > "$case_target/.claude/settings.json"
+printf '{"theme":"dark"}\n' > "$case_target/.gemini/config/config.json"
 printf 'local: true\n' > "$case_target/.dsh/cordis.patch.yml"
 printf 'local skill\n' > "$case_target/.agents/skills/local-only/SKILL.md"
 snapshot_tree "$case_target" > "$case_root/target.before"
@@ -623,7 +624,7 @@ done
 # --- 冲突保护与源文件预检 ---
 for conflict in vim-file shared-file config-link git-link ghostty-link config-file \
 	nvim-file lazygit-file shuck-file nvim-link nvim-lua-link nvim-config-link nvim-plugins-link lazygit-link shuck-link \
-	skill-file claude-skill-dir astra-skill-dir sol-worker-file agents-link claude-skills-link codex-link codex-agents-link; do
+	skill-file claude-skill-dir astra-skill-dir sol-worker-file antigravity-manifest agents-link claude-skills-link codex-link codex-agents-link gemini-link gemini-config-link; do
 	new_case "existing path preserved: $conflict"
 	case $conflict in
 		vim-file) printf 'keep vim file\n' > "$case_target/.vimrc" ;;
@@ -642,7 +643,7 @@ for conflict in vim-file shared-file config-link git-link ghostty-link config-fi
 			ln -s "$case_outside" "$entry"
 			;;
 		config-file) printf 'keep parent file\n' > "$case_target/.config" ;;
-		nvim-file | lazygit-file | shuck-file | skill-file | claude-skill-dir | astra-skill-dir | sol-worker-file)
+		nvim-file | lazygit-file | shuck-file | skill-file | claude-skill-dir | astra-skill-dir | sol-worker-file | antigravity-manifest)
 			case $conflict in
 				nvim-file) entry="$case_target/.config/nvim/init.lua" ;;
 				lazygit-file) entry="$case_target/.config/lazygit/config.yml" ;;
@@ -651,16 +652,19 @@ for conflict in vim-file shared-file config-link git-link ghostty-link config-fi
 				claude-skill-dir) entry="$case_target/.claude/skills/coding-mentor/SKILL.md" ;;
 				astra-skill-dir) entry="$case_target/.agents/skills/astra-sol/SKILL.md" ;;
 				sol-worker-file) entry="$case_target/.codex/agents/sol_worker.toml" ;;
+				antigravity-manifest) entry="$case_target/.gemini/config/skills.json" ;;
 			esac
 			mkdir -p "${entry%/*}"
 			printf 'keep application config\n' > "$entry"
 			;;
-		agents-link | claude-skills-link | codex-link | codex-agents-link)
+		agents-link | claude-skills-link | codex-link | codex-agents-link | gemini-link | gemini-config-link)
 			case $conflict in
 				agents-link) name=.agents ;;
 				claude-skills-link) name=.claude/skills ;;
 				codex-link) name=.codex ;;
 				codex-agents-link) name=.codex/agents ;;
+				gemini-link) name=.gemini ;;
+				gemini-config-link) name=.gemini/config ;;
 			esac
 			entry="$case_target/$name"
 			mkdir -p "${entry%/*}"
@@ -692,7 +696,7 @@ for conflict in vim-file shared-file config-link git-link ghostty-link config-fi
 	assert_unchanged "$case_outside" "$case_root/outside.before"
 	assert_no_log '^CREATE:'
 	case $conflict in
-		vim-file | shared-file | nvim-file | lazygit-file | shuck-file | skill-file | claude-skill-dir | astra-skill-dir) assert_failure_result stow 1 ;;
+		vim-file | shared-file | nvim-file | lazygit-file | shuck-file | skill-file | claude-skill-dir | astra-skill-dir | antigravity-manifest) assert_failure_result stow 1 ;;
 		*) assert_failure_result preflight 1 ;;
 	esac
 	pass

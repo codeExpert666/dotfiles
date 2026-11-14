@@ -51,7 +51,7 @@ Deployment constraints:
   .config/nvim (including lua, lua/config and lua/plugins), .config/lazygit and
   .config/shuck must also be real directories if present.
   .agents, .agents/skills, .claude, .claude/skills, .codex and .codex/agents
-  must also be real directories if present.
+  and .gemini, .gemini/config must also be real directories if present.
   An existing .config/git/config must be a regular file, not a symbolic link,
   and contain a direct include.path value of config.shared; it is never edited automatically.
   Codex rejects symbolic links for agent files, so $HOME/.codex/agents/sol_worker.toml

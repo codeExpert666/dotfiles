@@ -22,7 +22,7 @@
 | [atuin](atuin)                 | Stow 软链  | 全平台   | `.config/atuin/config.toml`          | 本地历史搜索与疑似凭据过滤                                |
 | [shuck](shuck)                 | Stow 软链  | 全平台   | `.config/shuck/shuck.toml`           | 命令行与语言服务器共用的 Zsh 格式规则                     |
 | [vim](vim)                     | Stow 软链  | 全平台   | `.vimrc`                             | 后备编辑器，状态使用 XDG state                            |
-| [skills](skills)               | 声明式软链 | 全平台   | `.agents/skills/`、`.claude/skills/` | 按客户端声明入口，共用 `skills/src/` 技能源文件           |
+| [skills](skills)               | 声明式软链 | 全平台   | `.agents/skills/`、`.claude/skills/`、`.gemini/config/skills.json` | 按客户端声明入口和发现清单，共用 `skills/src/` 技能源文件 |
 | [codex](codex)                 | 独立副本   | 全平台   | `.codex/agents/`                     | Codex 执行代理 `sol_worker.toml` 的普通副本（不支持软链） |
 
 Zsh 交互会话提供 `lg`（`lazygit`）和 `mp`（系统 `multipass`）别名。`mp` 调用原生命令，
@@ -365,6 +365,13 @@ ln -s '../../src/<名称>' 'skills/.claude/skills/<名称>'
 ```
 
 专用技能只声明对应客户端；`astra-sol` 仅声明 `.agents`，不建立 `.claude` 入口。
+
+Antigravity 使用 [skills.json](skills/.gemini/config/skills.json) 全局发现清单，
+由同一 Stow 包部署到 `~/.gemini/config/skills.json`，目前只加载 `coding-mentor`。
+清单中的 `../../.agents/skills` 相对于目标 `~/.gemini/config/` 解析，复用已有技能链接，
+不依赖用户名或仓库位置。扩展加载范围时显式修改 `include_only`。
+若已有手工创建的同名文件，先核对内容、备份并移走原文件，再执行 deploy 的预览与部署；
+Stow 不会覆盖个人清单。部署后在 Antigravity 的 Customizations → Installed 中确认技能及其全局来源。
 
 [post-dev-review](skills/src/post-dev-review/SKILL.md) 是共享技能，通过 `.agents` 和 `.claude`
 发现同一份源码；用于开发后的代码冗余／兼容性审视、使用文档重编排与验证，也可只执行其中一阶段。

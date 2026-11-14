@@ -136,6 +136,7 @@ class DoctorTests(unittest.TestCase):
         self.assertIn("PASS deployment..config/nvim/init.lua", log)
         self.assertIn("PASS deployment..agents/skills/coding-mentor", log)
         self.assertIn("PASS deployment..claude/skills/coding-mentor", log)
+        self.assertIn("PASS deployment..gemini/config/skills.json", log)
         self.assertIn("PASS deployment.skill-source.coding-mentor", log)
         self.assertIn("PASS deployment..agents/skills/post-dev-review", log)
         self.assertIn("PASS deployment..claude/skills/post-dev-review", log)
@@ -148,6 +149,24 @@ class DoctorTests(unittest.TestCase):
         self.assertNotIn("WARN deployment.ignore.skills", log)
         self.assertIn("SKIP state..cache/zsh", log)
         self.assertNotIn("FAIL", log.replace("FAIL=0", ""))
+
+    def test_antigravity_manifest_resolves_only_coding_mentor_in_another_home(self):
+        self.deploy()
+        manifest = self.target / ".gemini/config/skills.json"
+        self.assertTrue(manifest.is_symlink())
+        data = json.loads(manifest.read_text())
+        selected = []
+        for entry in data["entries"]:
+            root = manifest.parent / entry["path"]
+            for skill in root.iterdir():
+                if skill.name in entry["include_only"]:
+                    selected.append(skill / "SKILL.md")
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0].resolve(), self.repo / "skills/src/coding-mentor/SKILL.md")
+        self.assertIn("name: coding-mentor", selected[0].read_text())
+        manifest.unlink()
+        log = self.doctor("--only", "deployment", code=1)
+        self.assertIn("deployment..gemini/config/skills.json: not deployed", log)
 
     def test_multiple_independent_link_faults(self):
         self.deploy()

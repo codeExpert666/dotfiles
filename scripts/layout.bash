@@ -13,6 +13,7 @@ layout_directories=(
 	.config .config/nvim .config/nvim/lua .config/nvim/lua/config
 	.config/nvim/lua/plugins .config/lazygit .config/shuck .config/ghostty .config/git
 	.agents .agents/skills .claude .claude/skills .codex .codex/agents
+	.gemini .gemini/config
 )
 # 每项声明一个受管 Skill 及所需客户端入口；缺失入口仍须报告。
 layout_skill_clients=(
