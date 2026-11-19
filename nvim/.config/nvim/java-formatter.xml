@@ -2,6 +2,9 @@
 <profiles>
   <!-- 不指定版本：JDTLS 按当前版本读取，未列出的规则沿用默认值。 -->
   <profile kind="CodeFormatterProfile" name="Personal">
+    <!-- INDENT_PRESERVE：保留 Java 文本块正文和结束引号的手写缩进。 -->
+    <setting id="org.eclipse.jdt.core.formatter.text_block_indentation" value="3"/>
+
     <!-- 保留 // 行注释的原始分行，不按默认注释宽度重新拆行或合并。 -->
     <setting id="org.eclipse.jdt.core.formatter.comment.format_line_comments" value="false"/>
 
