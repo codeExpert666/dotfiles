@@ -127,7 +127,7 @@ JDTLS 保存格式化沿用该宽度；其他语言的缩进规则保持。重�
 项目显式 EditorConfig 或格式化配置仍需按项目约定核对。
 Java 通过 [JDTLS 配置](nvim/.config/nvim/lua/plugins/java-format.lua)加载[统一排版规则](nvim/.config/nvim/java-formatter.xml)：
 
-- 复合语句后续的 `else`／`else if`、`catch`、`finally` 和 `do…while` 的 `while` 另起一行，左花括号仍跟随声明。
+- `else`／`else if`、`catch`、`finally` 另起一行。`do` 循环的结束条件写作 `} while (条件);`，左花括号仍跟随声明。
 - 空声明、方法／构造器、匿名类、Lambda、控制流／普通代码块及空数组初始化器采用单行 `{}`；非空主体保持多行，注释和刻意保留的空白行沿用 JDTLS 规则。
 - `//` 行注释保留手写分行，不因注释行宽自动拆行或合并；块注释和 Javadoc 沿用原规则。已被拆开的行注释需要手动合并一次。
 - Java 文本块保留正文和结束引号的手写缩进。连续传入两个长文本块时，可以将第一个起始引号写在参数逗号后，第二个写在前一块的结束引号和逗号后。

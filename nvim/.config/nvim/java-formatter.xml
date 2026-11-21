@@ -8,11 +8,11 @@
     <!-- 保留 // 行注释的原始分行，不按默认注释宽度重新拆行或合并。 -->
     <setting id="org.eclipse.jdt.core.formatter.comment.format_line_comments" value="false"/>
 
-    <!-- 复合语句的后续关键字另起一行；左花括号仍在声明行。 -->
+    <!-- else、catch、finally 另起一行，do 的结束花括号与 while 同行。 -->
     <setting id="org.eclipse.jdt.core.formatter.insert_new_line_before_catch_in_try_statement" value="insert"/>
     <setting id="org.eclipse.jdt.core.formatter.insert_new_line_before_else_in_if_statement" value="insert"/>
     <setting id="org.eclipse.jdt.core.formatter.insert_new_line_before_finally_in_try_statement" value="insert"/>
-    <setting id="org.eclipse.jdt.core.formatter.insert_new_line_before_while_in_do_statement" value="insert"/>
+    <setting id="org.eclipse.jdt.core.formatter.insert_new_line_before_while_in_do_statement" value="do not insert"/>
 
     <!-- 所有受支持的声明及代码块：仅空主体保持单行，非空主体保持多行。 -->
     <setting id="org.eclipse.jdt.core.formatter.keep_loop_body_block_on_one_line" value="one_line_if_empty"/>
